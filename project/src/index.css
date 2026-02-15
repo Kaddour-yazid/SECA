@@ -1,0 +1,128 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Root variables for both themes */
+:root {
+  /* Light mode colors */
+  --bg-primary: #f8fafc;
+  --bg-secondary: #f1f5f9;
+  --bg-tertiary: #e2e8f0;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-tertiary: #64748b;
+  --border-color: #cbd5e1;
+}
+
+.dark {
+  /* Dark mode colors (default) */
+  --bg-primary: #0f172a;
+  --bg-secondary: #1e293b;
+  --bg-tertiary: #334155;
+  --text-primary: #f8fafc;
+  --text-secondary: #cbd5e1;
+  --text-tertiary: #94a3b8;
+  --border-color: #475569;
+}
+
+/* Apply theme colors */
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+/* Light mode overrides for specific elements */
+.light .bg-slate-900 {
+  background-color: #f8fafc !important;
+}
+
+.light .bg-slate-800 {
+  background-color: #ffffff !important;
+}
+
+.light .bg-slate-800\/50 {
+  background-color: #f1f5f9 !important;
+}
+
+.light .bg-slate-900\/50 {
+  background-color: #e2e8f0 !important;
+}
+
+.light .text-white {
+  color: #0f172a !important;
+}
+
+.light .text-slate-300 {
+  color: #475569 !important;
+}
+
+.light .text-slate-400 {
+  color: #64748b !important;
+}
+
+.light .text-slate-500 {
+  color: #64748b !important;
+}
+
+.light .border-slate-700 {
+  border-color: #cbd5e1 !important;
+}
+
+.light .border-slate-600 {
+  border-color: #cbd5e1 !important;
+}
+
+/* Light mode gradients */
+.light .bg-gradient-to-br {
+  /* Keep gradients colorful in both modes */
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;   /* disable browser scroll */
+}
+
+/* MAIN SCROLL CONTAINER (right side scroll) */
+.global-scroll {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* Left‑side scroll container */
+.scroll-left {
+  direction: rtl;
+  overflow-y: auto;
+  overflow-x: hidden;
+  height: 100%;
+  scrollbar-width: thin;
+  scrollbar-color: #0ea5e9 transparent;
+}
+
+.scroll-left > * {
+  direction: ltr;
+}
+
+/* Nice Cyber Scrollbar for both directions */
+.global-scroll::-webkit-scrollbar,
+.scroll-left::-webkit-scrollbar {
+  width: 10px;
+}
+
+.global-scroll::-webkit-scrollbar-track,
+.scroll-left::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.global-scroll::-webkit-scrollbar-thumb,
+.scroll-left::-webkit-scrollbar-thumb {
+  background: #0ea5e9;
+  border-radius: 8px;
+}
+
+.global-scroll::-webkit-scrollbar-thumb:hover,
+.scroll-left::-webkit-scrollbar-thumb:hover {
+  background: #0284c7;
+}
