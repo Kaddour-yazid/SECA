@@ -137,6 +137,25 @@ def _sandbox_alive() -> bool:
     )
 
 
+def wait_for_sandbox_launch(
+    timeout: int = 25,
+    on_tick: Optional[Callable[[float, float], None]] = None,
+    abort_if: Optional[Callable[[], bool]] = None,
+) -> bool:
+    """Wait until at least one Windows Sandbox process is visible."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        elapsed = time.time() - t0
+        if on_tick:
+            on_tick(elapsed, float(timeout))
+        if abort_if and abort_if():
+            return False
+        if _sandbox_alive():
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def wait_for_ready(
     timeout: int = 30,
     min_mtime: Optional[float] = None,
@@ -149,8 +168,6 @@ def wait_for_ready(
         elapsed = time.time() - t0
         if on_tick:
             on_tick(elapsed, float(timeout))
-        if abort_if and abort_if():
-            return False
         if ready.exists():
             if min_mtime is None:
                 return True
@@ -159,6 +176,8 @@ def wait_for_ready(
                     return True
             except OSError:
                 pass
+        if abort_if and abort_if():
+            return False
         time.sleep(0.5)
     return False
 
@@ -176,10 +195,17 @@ def wait_for_done(
         elapsed = time.time() - t0
         if on_tick:
             on_tick(elapsed, float(timeout))
-        if abort_if and abort_if():
-            return None
         if done_file.exists():
             return out_dir
+        if abort_if and abort_if():
+            # If the VM exits right after writing artifacts, allow a short grace
+            # window so host-side file sync can complete before failing the run.
+            grace_deadline = time.time() + 8
+            while time.time() < grace_deadline:
+                if done_file.exists():
+                    return out_dir
+                time.sleep(0.5)
+            return None
         time.sleep(1)
     return None
 
@@ -189,6 +215,7 @@ def run_dynamic_scan(
     filename: str,
     duration: int = 60,
     launch_wsb_file: bool = True,
+    allow_existing_monitor: bool = False,
     on_progress: Optional[Callable[[str, int], None]] = None,
     session_id: Optional[str] = None,
     abort_if: Optional[Callable[[], bool]] = None,
@@ -253,6 +280,18 @@ def run_dynamic_scan(
         report("Launching Windows Sandbox VM...", 20)
         launch_wsb(wsb_path)
 
+        if not wait_for_sandbox_launch(
+            timeout=30,
+            on_tick=lambda elapsed, timeout: report(
+                "Starting Windows Sandbox process...",
+                20 + int(min(1.0, elapsed / max(timeout, 1.0)) * 8),
+            ),
+            abort_if=abort_if,
+        ):
+            _safe_unlink(trigger_path)
+            diagnostics["launch_failed"] = True
+            return {"status": "error", "reason": "sandbox-launch-failed", "diagnostics": diagnostics}
+
     def should_abort() -> bool:
         nonlocal abort_reason
         if abort_if and abort_if():
@@ -277,7 +316,7 @@ def run_dynamic_scan(
         abort_if=should_abort,
     ):
         ready_via = "ready-marker"
-    else:
+    elif allow_existing_monitor or not launch_wsb_file:
         # Fallback: if monitor is already running from an existing session,
         # it may consume triggers without rewriting sandbox_ready.txt.
         t0 = time.time()
@@ -297,6 +336,8 @@ def run_dynamic_scan(
                 ready_via = "done-file"
                 break
             time.sleep(1)
+    else:
+        diagnostics["ready_strict_mode"] = True
 
     if not ready_via:
         reason = abort_reason or "sandbox-not-ready"

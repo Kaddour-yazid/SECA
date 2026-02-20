@@ -44,6 +44,19 @@ type PollResponse = {
   result?: DynamicResult; error?: string;
 };
 
+type PersistedScannerState = {
+  fileName: string;
+  result: ScanResult | null;
+  dynState: 'idle'|'uploading'|'running'|'done'|'error';
+  dynStep: string;
+  dynProgress: number;
+  dynResult: DynamicResult | null;
+  dynError: string | null;
+  dynJobId: string | null;
+};
+
+const FILE_SCANNER_STATE_PREFIX = 'seca:file-scanner-state';
+
 // ─── Static analysis helpers ──────────────────────────────────────────────────
 
 const toHex = (bytes: Uint8Array) => Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -220,6 +233,7 @@ const buildLayers = async (file: File): Promise<ScanResult['details']['layers']>
 
 export function FileScannerView() {
   const { user, token } = useAuth();
+  const stateStorageKey = user ? `${FILE_SCANNER_STATE_PREFIX}:${user.id}` : null;
   const [scanning, setScanning]         = useState(false);
   const [result, setResult]             = useState<ScanResult | null>(null);
   const [fileName, setFileName]         = useState('');
@@ -234,11 +248,127 @@ export function FileScannerView() {
   const [dynError, setDynError]           = useState<string | null>(null);
   const [dynJobId, setDynJobId]           = useState<string | null>(null);
   const [dynCancelling, setDynCancelling] = useState(false);
+  const [stateHydrated, setStateHydrated] = useState(false);
   const [expanded, setExpanded] = useState<Record<string,boolean>>({ processes:true, network:true, files:true, registry:true });
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const hydratedKeyRef = useRef<string | null>(null);
+
+  const clearPoll = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  };
+
+  const startPolling = (jobId: string, authToken: string) => {
+    clearPoll();
+
+    const pollOnce = async () => {
+      try {
+        const pollRes = await fetch(`http://127.0.0.1:8000/analyze/dynamic/status/${jobId}`, {
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        if (!pollRes.ok) {
+          if (pollRes.status === 404) {
+            clearPoll();
+            setDynError('Dynamic job not found anymore. Start a new scan.');
+            setDynState('error');
+            setDynJobId(null);
+            setDynCancelling(false);
+            return;
+          }
+          throw new Error(`Poll error ${pollRes.status}`);
+        }
+
+        const poll: PollResponse = await pollRes.json();
+        setDynStep(poll.step);
+        setDynProgress(poll.progress);
+
+        if (poll.status === 'done' && poll.result) {
+          clearPoll();
+          setDynResult(poll.result);
+          setDynState('done');
+          setDynJobId(null);
+          setDynCancelling(false);
+        } else if (poll.status === 'error') {
+          clearPoll();
+          setDynError(poll.error || 'Sandbox analysis failed');
+          setDynState('error');
+          setDynJobId(null);
+          setDynCancelling(false);
+        }
+      } catch (pollErr) {
+        clearPoll();
+        setDynError(pollErr instanceof Error ? pollErr.message : 'Lost connection to backend');
+        setDynState('error');
+        setDynJobId(null);
+        setDynCancelling(false);
+      }
+    };
+
+    void pollOnce();
+    pollRef.current = setInterval(() => {
+      void pollOnce();
+    }, 2000);
+  };
 
   // Clean up poll on unmount
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+  useEffect(() => () => { clearPoll(); }, []);
+
+  // Restore persisted scanner state when returning to this view.
+  useEffect(() => {
+    if (!stateStorageKey) {
+      setStateHydrated(false);
+      return;
+    }
+    if (hydratedKeyRef.current === stateStorageKey) return;
+
+    setStateHydrated(false);
+    hydratedKeyRef.current = stateStorageKey;
+
+    const raw = localStorage.getItem(stateStorageKey);
+    if (!raw) {
+      setStateHydrated(true);
+      return;
+    }
+
+    try {
+      const saved = JSON.parse(raw) as Partial<PersistedScannerState>;
+      setFileName(saved.fileName ?? '');
+      setResult((saved.result as ScanResult | null) ?? null);
+      setDynState((saved.dynState as PersistedScannerState['dynState']) ?? 'idle');
+      setDynStep(saved.dynStep ?? '');
+      setDynProgress(typeof saved.dynProgress === 'number' ? saved.dynProgress : 0);
+      setDynResult((saved.dynResult as DynamicResult | null) ?? null);
+      setDynError(saved.dynError ?? null);
+      setDynJobId(saved.dynJobId ?? null);
+
+      if (saved.dynJobId && token && (saved.dynState === 'running' || saved.dynState === 'uploading')) {
+        setDynState('running');
+        startPolling(saved.dynJobId, token);
+      }
+    } catch {
+      localStorage.removeItem(stateStorageKey);
+    } finally {
+      setStateHydrated(true);
+    }
+  }, [stateStorageKey, token]);
+
+  // Persist scanner state so changing views does not wipe progress.
+  useEffect(() => {
+    if (!stateStorageKey || !stateHydrated) return;
+    const state: PersistedScannerState = {
+      fileName,
+      result,
+      dynState,
+      dynStep,
+      dynProgress,
+      dynResult,
+      dynError,
+      dynJobId,
+    };
+    localStorage.setItem(stateStorageKey, JSON.stringify(state));
+  }, [stateStorageKey, stateHydrated, fileName, result, dynState, dynStep, dynProgress, dynResult, dynError, dynJobId]);
 
   const toggleExpand = (k: string) => setExpanded(p => ({ ...p, [k]: !p[k] }));
 
@@ -247,7 +377,8 @@ export function FileScannerView() {
     const file = e.target.files?.[0];
     if (!file || !user || !token) return;
     setFileName(file.name); setScanning(true); setResult(null);
-    setDynResult(null); setDynState('idle'); setDynError(null);
+    clearPoll();
+    setDynResult(null); setDynState('idle'); setDynError(null); setDynStep(''); setDynProgress(0); setDynJobId(null);
     setError(null); setCurrentLayer(0);
     try {
       for (let i = 1; i <= 4; i++) { setCurrentLayer(i); await new Promise(r => setTimeout(r, 600)); }
@@ -285,7 +416,7 @@ export function FileScannerView() {
     setDynError(null);
     setDynJobId(null);
     setDynCancelling(false);
-    if (pollRef.current) clearInterval(pollRef.current);
+    clearPoll();
 
     try {
       // Step 1: POST file → server launches sandbox in background, returns job_id immediately
@@ -311,39 +442,7 @@ export function FileScannerView() {
       setDynProgress(5);
 
       // Step 2: Poll every 2s — backend updates step/progress in REAL TIME
-      pollRef.current = setInterval(async () => {
-        try {
-          const pollRes = await fetch(`http://127.0.0.1:8000/analyze/dynamic/status/${job_id}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          if (!pollRes.ok) throw new Error(`Poll error ${pollRes.status}`);
-          const poll: PollResponse = await pollRes.json();
-
-          // Mirror real backend progress directly into UI
-          setDynStep(poll.step);
-          setDynProgress(poll.progress);
-
-          if (poll.status === 'done' && poll.result) {
-            clearInterval(pollRef.current!);
-            setDynResult(poll.result);
-            setDynState('done');
-            setDynJobId(null);
-            setDynCancelling(false);
-          } else if (poll.status === 'error') {
-            clearInterval(pollRef.current!);
-            setDynError(poll.error || 'Sandbox analysis failed');
-            setDynState('error');
-            setDynJobId(null);
-            setDynCancelling(false);
-          }
-        } catch (pollErr) {
-          clearInterval(pollRef.current!);
-          setDynError(pollErr instanceof Error ? pollErr.message : 'Lost connection to backend');
-          setDynState('error');
-          setDynJobId(null);
-          setDynCancelling(false);
-        }
-      }, 2000);
+      startPolling(job_id, token);
 
     } catch (err) {
       setDynError(err instanceof Error ? err.message : 'Failed to start sandbox');
@@ -366,9 +465,9 @@ export function FileScannerView() {
         // Best effort cancellation; UI still resets local polling state.
       }
     }
-    if (pollRef.current) clearInterval(pollRef.current);
+    clearPoll();
     setDynState('idle'); setDynStep(''); setDynProgress(0);
-    setDynJobId(null); setDynCancelling(false);
+    setDynResult(null); setDynError(null); setDynJobId(null); setDynCancelling(false);
   };
 
   // ── UI helpers ────────────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Globe,
   AlertCircle,
@@ -45,13 +45,71 @@ type ScanResult = {
   };
 };
 
+type PersistedURLScannerState = {
+  url: string;
+  scanning: boolean;
+  result: ScanResult | null;
+  error: string | null;
+  currentLayer: number;
+};
+
+const URL_SCANNER_STATE_PREFIX = 'seca:url-scanner-state';
+
 export function URLScannerView() {
   const { user, token } = useAuth();
+  const stateStorageKey = user ? `${URL_SCANNER_STATE_PREFIX}:${user.id}` : null;
   const [url, setUrl] = useState('');
   const [scanning, setScanning] = useState(false);
   const [result, setResult] = useState<ScanResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [currentLayer, setCurrentLayer] = useState(0);
+  const [stateHydrated, setStateHydrated] = useState(false);
+  const hydratedKeyRef = useRef<string | null>(null);
+
+  // Restore scanner state when user navigates back to this view.
+  useEffect(() => {
+    if (!stateStorageKey) {
+      setStateHydrated(false);
+      return;
+    }
+    if (hydratedKeyRef.current === stateStorageKey) return;
+
+    hydratedKeyRef.current = stateStorageKey;
+    setStateHydrated(false);
+
+    const raw = localStorage.getItem(stateStorageKey);
+    if (!raw) {
+      setStateHydrated(true);
+      return;
+    }
+
+    try {
+      const saved = JSON.parse(raw) as Partial<PersistedURLScannerState>;
+      setUrl(saved.url ?? '');
+      setResult((saved.result as ScanResult | null) ?? null);
+      setError(saved.error ?? null);
+      setCurrentLayer(typeof saved.currentLayer === 'number' ? saved.currentLayer : 0);
+      setScanning(false);
+      if (saved.scanning) setCurrentLayer(0);
+    } catch {
+      localStorage.removeItem(stateStorageKey);
+    } finally {
+      setStateHydrated(true);
+    }
+  }, [stateStorageKey]);
+
+  // Persist scanner state across sidebar navigation.
+  useEffect(() => {
+    if (!stateStorageKey || !stateHydrated) return;
+    const state: PersistedURLScannerState = {
+      url,
+      scanning,
+      result,
+      error,
+      currentLayer,
+    };
+    localStorage.setItem(stateStorageKey, JSON.stringify(state));
+  }, [stateStorageKey, stateHydrated, url, scanning, result, error, currentLayer]);
 
   // Log the result to verify backend data
   useEffect(() => {

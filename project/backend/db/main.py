@@ -644,6 +644,12 @@ KEEP_SANDBOX_OPEN = os.environ.get("SECA_KEEP_SANDBOX_OPEN", "0").strip().lower(
 # Job tracking: {job_id: {status, step, progress, result, error}}
 _sandbox_jobs: Dict[str, Dict[str, Any]] = {}
 _executor = ThreadPoolExecutor(max_workers=1)
+SANDBOX_PROCESS_NAMES = (
+    "WindowsSandbox.exe",
+    "WindowsSandboxRemoteSession.exe",
+    "WindowsSandboxServer.exe",
+    "vmmemWindowsSandbox.exe",
+)
 
 
 def clean_sandbox_share():
@@ -659,28 +665,42 @@ def clean_sandbox_share():
             logger.error(f"Error cleaning {path}: {e}")
 
 
-def close_windows_sandbox():
-    """Terminate any running Windows Sandbox process."""
+def _sandbox_process_running(proc_name: str) -> bool:
     try:
-        for proc_name in (
-            "WindowsSandbox.exe",
-            "WindowsSandboxRemoteSession.exe",
-            "WindowsSandboxServer.exe",
-        ):
+        result = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {proc_name}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return proc_name.lower() in (result.stdout or "").lower()
+    except Exception:
+        return False
+
+
+def _sandbox_alive() -> bool:
+    return any(_sandbox_process_running(name) for name in SANDBOX_PROCESS_NAMES)
+
+
+def close_windows_sandbox(wait_timeout_seconds: int = 20) -> bool:
+    """Terminate any running Windows Sandbox process and wait until fully stopped."""
+    try:
+        for proc_name in SANDBOX_PROCESS_NAMES:
             subprocess.run(
                 ["taskkill", "/IM", proc_name, "/F"],
                 capture_output=True,
                 text=True,
             )
-        # Best effort only; this may fail depending on privileges.
-        subprocess.run(
-            ["taskkill", "/IM", "vmmemWindowsSandbox.exe", "/F"],
-            capture_output=True,
-            text=True,
-        )
-        time.sleep(1)
+        deadline = time.time() + max(1, int(wait_timeout_seconds))
+        while time.time() < deadline:
+            if not _sandbox_alive():
+                return True
+            time.sleep(0.5)
+        logger.warning("Timed out waiting for Windows Sandbox processes to exit")
+        return not _sandbox_alive()
     except Exception as e:
         logger.error(f"Error closing sandbox: {e}")
+        return False
 
 
 def get_file_extension(filename: str) -> str:
@@ -830,38 +850,84 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
 
     try:
         update("Preparing sandbox environment...", 5)
-        close_windows_sandbox()
+        if not close_windows_sandbox():
+            raise RuntimeError(
+                "Failed to stop a previous Windows Sandbox session. "
+                "Close any open Windows Sandbox window and try again."
+            )
 
         update("Launching sandbox job...", 15)
         def is_cancel_requested() -> bool:
             return bool(job.get("cancel_requested"))
 
-        run_result = sandbox_run_dynamic_scan(
-            file_bytes=file_content,
-            filename=filename,
-            duration=60,
-            launch_wsb_file=True,
-            on_progress=update,
-            session_id=session_id,
-            abort_if=is_cancel_requested,
-        )
+        max_attempts = 2
+        retryable_reasons = {"sandbox-not-ready", "sandbox-launch-failed", "sandbox-exited"}
+        run_result: Dict[str, Any] = {}
+        last_reason: Optional[str] = None
+        last_diagnostics: Optional[Dict[str, Any]] = None
 
-        if run_result.get("status") != "done":
-            reason = run_result.get("reason", "unknown-error")
-            diagnostics = run_result.get("diagnostics")
-            if reason == "sandbox-not-ready":
-                message = "Sandbox started but monitor did not become ready. Check C:\\sandbox_share\\monitor_debug.txt."
-            elif reason == "sandbox-exited":
-                message = "Sandbox session closed unexpectedly during execution. This can happen if the sample forces logoff/shutdown."
-            elif reason == "scan-timeout":
-                message = "Sandbox execution timed out before completion."
-            elif reason == "monitor-missing":
-                message = "Sandbox monitor script is missing at C:\\sandbox_share\\monitor.ps1."
-            elif reason == "cancelled":
+        for attempt in range(1, max_attempts + 1):
+            attempt_session_id = session_id if attempt == 1 else f"{session_id}_retry{attempt - 1}"
+            if attempt > 1:
+                update("Sandbox session ended unexpectedly. Retrying with a fresh VM...", 18)
+                close_windows_sandbox(wait_timeout_seconds=30)
+
+            run_result = sandbox_run_dynamic_scan(
+                file_bytes=file_content,
+                filename=filename,
+                duration=60,
+                launch_wsb_file=True,
+                allow_existing_monitor=KEEP_SANDBOX_OPEN,
+                on_progress=update,
+                session_id=attempt_session_id,
+                abort_if=is_cancel_requested,
+            )
+
+            if run_result.get("status") == "done":
+                break
+
+            last_reason = str(run_result.get("reason", "unknown-error"))
+            raw_diagnostics = run_result.get("diagnostics")
+            if isinstance(raw_diagnostics, dict):
+                last_diagnostics = raw_diagnostics
+            else:
+                last_diagnostics = None
+
+            if last_reason == "cancelled":
                 job["status"] = "error"
                 job["error"] = "Scan cancelled by user."
                 update("Scan cancelled.", max(0, job.get("progress", 0)))
                 return
+
+            if last_reason in retryable_reasons and attempt < max_attempts:
+                logger.warning(
+                    "Sandbox attempt %s/%s failed with reason=%s. Retrying once.",
+                    attempt,
+                    max_attempts,
+                    last_reason,
+                )
+                continue
+            break
+
+        if run_result.get("status") != "done":
+            reason = last_reason or str(run_result.get("reason", "unknown-error"))
+            diagnostics = last_diagnostics if last_diagnostics is not None else run_result.get("diagnostics")
+            if reason == "sandbox-not-ready":
+                message = "Sandbox started but monitor did not become ready. Check C:\\sandbox_share\\monitor_debug.txt."
+            elif reason == "sandbox-launch-failed":
+                message = (
+                    "Windows Sandbox did not launch successfully. "
+                    "Verify virtualization is enabled and no stale Sandbox window is still closing."
+                )
+            elif reason == "sandbox-exited":
+                message = (
+                    "Sandbox session closed unexpectedly before artifacts were collected. "
+                    "This can happen if the sample triggers logoff/shutdown."
+                )
+            elif reason == "scan-timeout":
+                message = "Sandbox execution timed out before completion."
+            elif reason == "monitor-missing":
+                message = "Sandbox monitor script is missing at C:\\sandbox_share\\monitor.ps1."
             else:
                 message = f"Sandbox runner failed: {reason}"
             if diagnostics:
