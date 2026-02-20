@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { Hash, AlertCircle, CheckCircle, AlertTriangle, Loader2, Search, Database } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -16,70 +16,13 @@ type ScanResultType = {
   };
 };
 
-type PersistedHashScannerState = {
-  hash: string;
-  hashType: 'MD5' | 'SHA1' | 'SHA256';
-  scanning: boolean;
-  result: ScanResultType | null;
-  error: string | null;
-};
-
-const HASH_SCANNER_STATE_PREFIX = 'seca:hash-scanner-state';
-
 export function HashCheckerView() {
   const { user, token } = useAuth();
-  const stateStorageKey = user ? `${HASH_SCANNER_STATE_PREFIX}:${user.id}` : null;
   const [hash, setHash] = useState('');
   const [hashType, setHashType] = useState<'MD5' | 'SHA1' | 'SHA256'>('SHA256');
   const [scanning, setScanning] = useState(false);
   const [result, setResult] = useState<ScanResultType | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [stateHydrated, setStateHydrated] = useState(false);
-  const hydratedKeyRef = useRef<string | null>(null);
-
-  // Restore scanner state when user navigates back to this view.
-  useEffect(() => {
-    if (!stateStorageKey) {
-      setStateHydrated(false);
-      return;
-    }
-    if (hydratedKeyRef.current === stateStorageKey) return;
-
-    hydratedKeyRef.current = stateStorageKey;
-    setStateHydrated(false);
-
-    const raw = localStorage.getItem(stateStorageKey);
-    if (!raw) {
-      setStateHydrated(true);
-      return;
-    }
-
-    try {
-      const saved = JSON.parse(raw) as Partial<PersistedHashScannerState>;
-      setHash(saved.hash ?? '');
-      setHashType((saved.hashType as 'MD5' | 'SHA1' | 'SHA256') ?? 'SHA256');
-      setResult((saved.result as ScanResultType | null) ?? null);
-      setError(saved.error ?? null);
-      setScanning(false);
-    } catch {
-      localStorage.removeItem(stateStorageKey);
-    } finally {
-      setStateHydrated(true);
-    }
-  }, [stateStorageKey]);
-
-  // Persist scanner state across sidebar navigation.
-  useEffect(() => {
-    if (!stateStorageKey || !stateHydrated) return;
-    const state: PersistedHashScannerState = {
-      hash,
-      hashType,
-      scanning,
-      result,
-      error,
-    };
-    localStorage.setItem(stateStorageKey, JSON.stringify(state));
-  }, [stateStorageKey, stateHydrated, hash, hashType, scanning, result, error]);
 
   const validateHash = (hashValue: string, type: string): boolean => {
     const hashLengths = {

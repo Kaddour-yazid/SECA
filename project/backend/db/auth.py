@@ -8,12 +8,22 @@ import hashlib
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from typing import Optional
+import os
 
 print("🚀 Loading auth.py")
 
 SECRET_KEY = "yazid22t"          # Change in production
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+def _get_token_expiry_minutes() -> int:
+    raw = os.environ.get("SECA_ACCESS_TOKEN_EXPIRE_MINUTES", "720").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 720
+    return max(5, value)
+
+
+ACCESS_TOKEN_EXPIRE_MINUTES = _get_token_expiry_minutes()
 
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")

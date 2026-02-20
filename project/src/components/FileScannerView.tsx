@@ -44,19 +44,6 @@ type PollResponse = {
   result?: DynamicResult; error?: string;
 };
 
-type PersistedScannerState = {
-  fileName: string;
-  result: ScanResult | null;
-  dynState: 'idle'|'uploading'|'running'|'done'|'error';
-  dynStep: string;
-  dynProgress: number;
-  dynResult: DynamicResult | null;
-  dynError: string | null;
-  dynJobId: string | null;
-};
-
-const FILE_SCANNER_STATE_PREFIX = 'seca:file-scanner-state';
-
 // ─── Static analysis helpers ──────────────────────────────────────────────────
 
 const toHex = (bytes: Uint8Array) => Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -232,8 +219,7 @@ const buildLayers = async (file: File): Promise<ScanResult['details']['layers']>
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function FileScannerView() {
-  const { user, token } = useAuth();
-  const stateStorageKey = user ? `${FILE_SCANNER_STATE_PREFIX}:${user.id}` : null;
+  const { user, token, signOut } = useAuth();
   const [scanning, setScanning]         = useState(false);
   const [result, setResult]             = useState<ScanResult | null>(null);
   const [fileName, setFileName]         = useState('');
@@ -248,10 +234,8 @@ export function FileScannerView() {
   const [dynError, setDynError]           = useState<string | null>(null);
   const [dynJobId, setDynJobId]           = useState<string | null>(null);
   const [dynCancelling, setDynCancelling] = useState(false);
-  const [stateHydrated, setStateHydrated] = useState(false);
   const [expanded, setExpanded] = useState<Record<string,boolean>>({ processes:true, network:true, files:true, registry:true });
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const hydratedKeyRef = useRef<string | null>(null);
 
   const clearPoll = () => {
     if (pollRef.current) {
@@ -269,6 +253,15 @@ export function FileScannerView() {
           headers: { Authorization: `Bearer ${authToken}` },
         });
         if (!pollRes.ok) {
+          if (pollRes.status === 401) {
+            clearPoll();
+            setDynError('Session expired. Please sign in again.');
+            setDynState('error');
+            setDynJobId(null);
+            setDynCancelling(false);
+            signOut();
+            return;
+          }
           if (pollRes.status === 404) {
             clearPoll();
             setDynError('Dynamic job not found anymore. Start a new scan.');
@@ -314,61 +307,6 @@ export function FileScannerView() {
 
   // Clean up poll on unmount
   useEffect(() => () => { clearPoll(); }, []);
-
-  // Restore persisted scanner state when returning to this view.
-  useEffect(() => {
-    if (!stateStorageKey) {
-      setStateHydrated(false);
-      return;
-    }
-    if (hydratedKeyRef.current === stateStorageKey) return;
-
-    setStateHydrated(false);
-    hydratedKeyRef.current = stateStorageKey;
-
-    const raw = localStorage.getItem(stateStorageKey);
-    if (!raw) {
-      setStateHydrated(true);
-      return;
-    }
-
-    try {
-      const saved = JSON.parse(raw) as Partial<PersistedScannerState>;
-      setFileName(saved.fileName ?? '');
-      setResult((saved.result as ScanResult | null) ?? null);
-      setDynState((saved.dynState as PersistedScannerState['dynState']) ?? 'idle');
-      setDynStep(saved.dynStep ?? '');
-      setDynProgress(typeof saved.dynProgress === 'number' ? saved.dynProgress : 0);
-      setDynResult((saved.dynResult as DynamicResult | null) ?? null);
-      setDynError(saved.dynError ?? null);
-      setDynJobId(saved.dynJobId ?? null);
-
-      if (saved.dynJobId && token && (saved.dynState === 'running' || saved.dynState === 'uploading')) {
-        setDynState('running');
-        startPolling(saved.dynJobId, token);
-      }
-    } catch {
-      localStorage.removeItem(stateStorageKey);
-    } finally {
-      setStateHydrated(true);
-    }
-  }, [stateStorageKey, token]);
-
-  // Persist scanner state so changing views does not wipe progress.
-  useEffect(() => {
-    if (!stateStorageKey || !stateHydrated) return;
-    const state: PersistedScannerState = {
-      fileName,
-      result,
-      dynState,
-      dynStep,
-      dynProgress,
-      dynResult,
-      dynError,
-      dynJobId,
-    };
-    localStorage.setItem(stateStorageKey, JSON.stringify(state));
-  }, [stateStorageKey, stateHydrated, fileName, result, dynState, dynStep, dynProgress, dynResult, dynError, dynJobId]);
 
   const toggleExpand = (k: string) => setExpanded(p => ({ ...p, [k]: !p[k] }));
 
@@ -429,6 +367,10 @@ export function FileScannerView() {
       });
       if (!startRes.ok) {
         const txt = await startRes.text();
+        if (startRes.status === 401) {
+          signOut();
+          throw new Error('Session expired. Please sign in again.');
+        }
         if (startRes.status === 409) {
           throw new Error('Another dynamic analysis is already running. Cancel it or wait for completion.');
         }
