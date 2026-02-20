@@ -17,6 +17,12 @@ OUT = SHARE_ROOT / "out"
 TOOLS = SHARE_ROOT / "tools"
 WSB_PATH = SHARE_ROOT / "session_launch.wsb"
 MONITOR_SCRIPT = SHARE_ROOT / "monitor.ps1"
+SANDBOX_PROCESS_NAMES = (
+    "WindowsSandbox",
+    "WindowsSandboxRemoteSession",
+    "WindowsSandboxServer",
+    "vmmemWindowsSandbox",
+)
 
 
 def _ensure_dirs() -> None:
@@ -111,30 +117,36 @@ def launch_wsb(wsb_path: Path) -> None:
     os.startfile(str(wsb_path))
 
 
+def _process_name_candidates(image_name: str) -> List[str]:
+    base = image_name.strip()
+    if base.lower().endswith(".exe"):
+        base = base[:-4]
+    candidates = [base, f"{base}.exe"]
+    return [name for i, name in enumerate(candidates) if name and name not in candidates[:i]]
+
+
 def _process_running(image_name: str) -> bool:
     try:
-        result = subprocess.run(
-            ["tasklist", "/FI", f"IMAGENAME eq {image_name}"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return image_name.lower() in (result.stdout or "").lower()
+        for candidate in _process_name_candidates(image_name):
+            result = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {candidate}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            output = (result.stdout or "").lower()
+            if "no tasks are running" in output:
+                continue
+            if candidate.lower() in output:
+                return True
+        return False
     except Exception:
         # Avoid false negatives if tasklist is unavailable.
         return True
 
 
 def _sandbox_alive() -> bool:
-    return any(
-        _process_running(name)
-        for name in (
-            "WindowsSandboxRemoteSession.exe",
-            "WindowsSandboxServer.exe",
-            "WindowsSandbox.exe",
-            "vmmemWindowsSandbox.exe",
-        )
-    )
+    return any(_process_running(name) for name in SANDBOX_PROCESS_NAMES)
 
 
 def wait_for_sandbox_launch(
@@ -306,7 +318,11 @@ def run_dynamic_scan(
     print("[INFO] Waiting for sandbox ready marker...")
     session_done_file = OUT / f"session_{session}" / f"done_{session}.json"
     ready_via = ""
-    if wait_for_ready(
+    if not launch_wsb_file:
+        diagnostics["ready_marker_missing"] = True
+        report("Using active sandbox monitor...", 35)
+        ready_via = "monitor-assumed-no-launch"
+    elif wait_for_ready(
         timeout=90,
         min_mtime=ready_baseline,
         on_tick=lambda elapsed, timeout: report(
@@ -317,27 +333,13 @@ def run_dynamic_scan(
     ):
         ready_via = "ready-marker"
     elif allow_existing_monitor or not launch_wsb_file:
-        # Fallback: if monitor is already running from an existing session,
-        # it may consume triggers without rewriting sandbox_ready.txt.
-        t0 = time.time()
-        fallback_timeout = 25
-        while time.time() - t0 < fallback_timeout:
-            elapsed = time.time() - t0
-            report(
-                "Waiting for monitor to pick up trigger...",
-                35 + int(min(1.0, elapsed / fallback_timeout) * 10),
-            )
-            if should_abort():
-                break
-            if not trigger_path.exists():
-                ready_via = "trigger-consumed"
-                break
-            if session_done_file.exists():
-                ready_via = "done-file"
-                break
-            time.sleep(1)
-    else:
-        diagnostics["ready_strict_mode"] = True
+        diagnostics["ready_marker_missing"] = True
+        if session_done_file.exists():
+            ready_via = "done-file"
+        elif _sandbox_alive() or not launch_wsb_file:
+            # Reused monitor sessions may not rewrite sandbox_ready.txt each scan.
+            # Continue to done-file wait for this specific session.
+            ready_via = "monitor-assumed"
 
     if not ready_via:
         reason = abort_reason or "sandbox-not-ready"

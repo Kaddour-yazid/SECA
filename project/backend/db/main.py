@@ -645,10 +645,10 @@ KEEP_SANDBOX_OPEN = os.environ.get("SECA_KEEP_SANDBOX_OPEN", "0").strip().lower(
 _sandbox_jobs: Dict[str, Dict[str, Any]] = {}
 _executor = ThreadPoolExecutor(max_workers=1)
 SANDBOX_PROCESS_NAMES = (
-    "WindowsSandbox.exe",
-    "WindowsSandboxRemoteSession.exe",
-    "WindowsSandboxServer.exe",
-    "vmmemWindowsSandbox.exe",
+    "WindowsSandbox",
+    "WindowsSandboxRemoteSession",
+    "WindowsSandboxServer",
+    "vmmemWindowsSandbox",
 )
 
 
@@ -665,15 +665,33 @@ def clean_sandbox_share():
             logger.error(f"Error cleaning {path}: {e}")
 
 
+def _sandbox_process_name_candidates(proc_name: str) -> List[str]:
+    base = proc_name.strip()
+    if base.lower().endswith(".exe"):
+        base = base[:-4]
+    candidates = [base, f"{base}.exe"]
+    unique: List[str] = []
+    for name in candidates:
+        if name and name not in unique:
+            unique.append(name)
+    return unique
+
+
 def _sandbox_process_running(proc_name: str) -> bool:
     try:
-        result = subprocess.run(
-            ["tasklist", "/FI", f"IMAGENAME eq {proc_name}"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return proc_name.lower() in (result.stdout or "").lower()
+        for candidate in _sandbox_process_name_candidates(proc_name):
+            result = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {candidate}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            output = (result.stdout or "").lower()
+            if "no tasks are running" in output:
+                continue
+            if candidate.lower() in output:
+                return True
+        return False
     except Exception:
         return False
 
@@ -686,11 +704,12 @@ def close_windows_sandbox(wait_timeout_seconds: int = 20) -> bool:
     """Terminate any running Windows Sandbox process and wait until fully stopped."""
     try:
         for proc_name in SANDBOX_PROCESS_NAMES:
-            subprocess.run(
-                ["taskkill", "/IM", proc_name, "/F"],
-                capture_output=True,
-                text=True,
-            )
+            for candidate in _sandbox_process_name_candidates(proc_name):
+                subprocess.run(
+                    ["taskkill", "/IM", candidate, "/F", "/T"],
+                    capture_output=True,
+                    text=True,
+                )
         deadline = time.time() + max(1, int(wait_timeout_seconds))
         while time.time() < deadline:
             if not _sandbox_alive():
@@ -850,11 +869,13 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
 
     try:
         update("Preparing sandbox environment...", 5)
+        reuse_existing_monitor = KEEP_SANDBOX_OPEN
         if not close_windows_sandbox():
-            raise RuntimeError(
-                "Failed to stop a previous Windows Sandbox session. "
-                "Close any open Windows Sandbox window and try again."
+            logger.warning(
+                "Could not fully stop previous Windows Sandbox session; "
+                "reusing existing monitor instance for this scan."
             )
+            reuse_existing_monitor = True
 
         update("Launching sandbox job...", 15)
         def is_cancel_requested() -> bool:
@@ -870,14 +891,24 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
             attempt_session_id = session_id if attempt == 1 else f"{session_id}_retry{attempt - 1}"
             if attempt > 1:
                 update("Sandbox session ended unexpectedly. Retrying with a fresh VM...", 18)
-                close_windows_sandbox(wait_timeout_seconds=30)
+                if close_windows_sandbox(wait_timeout_seconds=30):
+                    reuse_existing_monitor = KEEP_SANDBOX_OPEN
+                else:
+                    reuse_existing_monitor = True
+                    logger.warning(
+                        "Retry could not force-stop existing sandbox; "
+                        "retrying with existing monitor session."
+                    )
+
+            if reuse_existing_monitor:
+                update("Reusing active sandbox monitor...", 20)
 
             run_result = sandbox_run_dynamic_scan(
                 file_bytes=file_content,
                 filename=filename,
                 duration=60,
-                launch_wsb_file=True,
-                allow_existing_monitor=KEEP_SANDBOX_OPEN,
+                launch_wsb_file=not reuse_existing_monitor,
+                allow_existing_monitor=reuse_existing_monitor,
                 on_progress=update,
                 session_id=attempt_session_id,
                 abort_if=is_cancel_requested,
