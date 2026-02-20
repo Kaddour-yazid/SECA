@@ -1,12 +1,19 @@
-from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Query
+﻿from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from typing import Dict, Any, Optional, List
+import asyncio
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 import json
 import re
 import sqlite3
 import os
+import shutil
+import subprocess
+import time
+import logging
 from urllib.parse import urlparse
 from datetime import datetime, timedelta
 import hashlib
@@ -15,6 +22,11 @@ from database import get_db, engine, Base
 from models import User, Scan, AuditLog, PhishTankEntry
 import schemas
 from auth import get_current_user, require_admin, create_access_token, router as auth_router
+from sandbox_runner import run_dynamic_scan as sandbox_run_dynamic_scan
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -23,9 +35,9 @@ app = FastAPI(title="Security Analyzer API")
 
 @app.middleware("http")
 async def log_requests(request, call_next):
-    print(f"➡️ Incoming request: {request.method} {request.url.path}")
+    logger.info(f"âž¡ï¸ Incoming request: {request.method} {request.url.path}")
     response = await call_next(request)
-    print(f"⬅️ Response status: {response.status_code}")
+    logger.info(f"â¬…ï¸ Response status: {response.status_code}")
     return response
 
 # CORS Configuration
@@ -107,7 +119,7 @@ def layer2_phishtank_check(url: str, db: Session) -> Dict[str, Any]:
         db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'security_analyzer.db')
 
         if not os.path.exists(db_path):
-            print(f"WARNING: security_analyzer.db not found at {db_path}")
+            logger.warning(f"security_analyzer.db not found at {db_path}")
             # Continue to PhishTank fallback
         else:
             threat_db = sqlite3.connect(db_path)
@@ -122,7 +134,7 @@ def layer2_phishtank_check(url: str, db: Session) -> Dict[str, Any]:
 
             if result:
                 threat_db.close()
-                print(f"✓ FOUND IN DATABASE: {url} - {result[3]} - {result[2]}")
+                logger.info(f"âœ“ FOUND IN DATABASE: {url} - {result[3]} - {result[2]}")
                 return {
                     "found": True,
                     "verified": True,
@@ -143,7 +155,7 @@ def layer2_phishtank_check(url: str, db: Session) -> Dict[str, Any]:
             threat_db.close()
 
             if domain_matches > 0:
-                print(f"⚠ DOMAIN MATCH: {domain} appears in {domain_matches} entries")
+                logger.info(f"âš  DOMAIN MATCH: {domain} appears in {domain_matches} entries")
                 return {
                     "found": True,
                     "verified": False,
@@ -153,7 +165,7 @@ def layer2_phishtank_check(url: str, db: Session) -> Dict[str, Any]:
                 }
 
     except Exception as e:
-        print(f"❌ Error checking threat database: {e}")
+        logger.error(f"Error checking threat database: {e}")
         import traceback
         traceback.print_exc()
 
@@ -460,7 +472,7 @@ async def get_scans(
     try:
         query = db.query(Scan)
 
-        # Non‑admins see only their own scans; admins see all
+        # Nonâ€‘admins see only their own scans; admins see all
         if not current_user.is_admin:
             query = query.filter(Scan.user_id == current_user.id)
 
@@ -487,8 +499,8 @@ async def get_scans(
 async def get_audit_logs(
         current_user: User = Depends(get_current_user),
         target_user_id: Optional[int] = Query(None, description="Filter by user ID (admin only)"),
-        sort_by: str = Query("date", regex="^(date|action|user)$"),
-        order: str = Query("desc", regex="^(asc|desc)$"),
+        sort_by: str = Query("date", pattern="^(date|action|user)$"),
+        order: str = Query("desc", pattern="^(asc|desc)$"),
         action_filter: Optional[str] = Query(None),
         start_date: Optional[str] = Query(None),
         end_date: Optional[str] = Query(None),
@@ -565,7 +577,7 @@ async def get_users(
 @app.get("/me")
 async def read_users_me(current_user: User = Depends(get_current_user)):
     """Get current authenticated user info"""
-    print("✅ /me endpoint called")
+    logger.info("âœ… /me endpoint called")
     return {
         "id": current_user.id,
         "email": current_user.email,
@@ -616,6 +628,423 @@ async def make_admin(
     create_audit_log(db, current_user.id, "Admin Privilege Grant", f"Granted admin to {email}")
 
     return {"success": True, "message": f"{email} is now an admin"}
+
+
+# ============= DYNAMIC ANALYSIS WITH WINDOWS SANDBOX =============
+
+
+# ============= DYNAMIC ANALYSIS WITH WINDOWS SANDBOX =============
+
+SANDBOX_SHARE = "C:\\sandbox_share"
+os.makedirs(SANDBOX_SHARE, exist_ok=True)
+KEEP_SANDBOX_OPEN = os.environ.get("SECA_KEEP_SANDBOX_OPEN", "0").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+
+# Job tracking: {job_id: {status, step, progress, result, error}}
+_sandbox_jobs: Dict[str, Dict[str, Any]] = {}
+_executor = ThreadPoolExecutor(max_workers=1)
+
+
+def clean_sandbox_share():
+    """Delete all files in the sandbox share folder for a clean state."""
+    for entry in os.listdir(SANDBOX_SHARE):
+        path = os.path.join(SANDBOX_SHARE, entry)
+        try:
+            if os.path.isfile(path) or os.path.islink(path):
+                os.unlink(path)
+            elif os.path.isdir(path):
+                shutil.rmtree(path)
+        except Exception as e:
+            logger.error(f"Error cleaning {path}: {e}")
+
+
+def close_windows_sandbox():
+    """Terminate any running Windows Sandbox process."""
+    try:
+        for proc_name in (
+            "WindowsSandbox.exe",
+            "WindowsSandboxRemoteSession.exe",
+            "WindowsSandboxServer.exe",
+        ):
+            subprocess.run(
+                ["taskkill", "/IM", proc_name, "/F"],
+                capture_output=True,
+                text=True,
+            )
+        # Best effort only; this may fail depending on privileges.
+        subprocess.run(
+            ["taskkill", "/IM", "vmmemWindowsSandbox.exe", "/F"],
+            capture_output=True,
+            text=True,
+        )
+        time.sleep(1)
+    except Exception as e:
+        logger.error(f"Error closing sandbox: {e}")
+
+
+def get_file_extension(filename: str) -> str:
+    return os.path.splitext(filename)[1].lower()
+
+
+def _normalise_processes(raw) -> list:
+    """Convert PowerShell Get-Process JSON to frontend format."""
+    results = []
+    if not raw:
+        return results
+    if isinstance(raw, dict):
+        raw = [raw]
+    suspicious_names = {"cmd", "powershell", "rundll32", "regsvr32", "wscript",
+                        "cscript", "mshta", "certutil", "bitsadmin"}
+    for p in raw:
+        if not isinstance(p, dict):
+            continue
+        name = p.get("ProcessName") or p.get("Name") or "unknown"
+        pid = p.get("Id") or p.get("pid") or 0
+        cpu = p.get("CPU") or 0
+        action = f"Running â€” CPU: {round(float(cpu), 2)}s" if cpu else "Running"
+        suspicious = name.lower().split(".")[0] in suspicious_names
+        results.append({"pid": int(pid), "name": name, "action": action, "suspicious": suspicious})
+    return results
+
+
+def _normalise_network(raw) -> list:
+    """Convert PowerShell Get-NetTCPConnection JSON to frontend format."""
+    results = []
+    if not raw:
+        return results
+    if isinstance(raw, dict):
+        raw = [raw]
+    local_prefixes = ("127.", "0.0.0.0", "::1", "::")
+    for n in raw:
+        if not isinstance(n, dict):
+            continue
+        remote = n.get("RemoteAddress") or n.get("destination") or ""
+        port = n.get("RemotePort") or n.get("port") or 0
+        proto = n.get("protocol") or "TCP"
+        suspicious = not any(remote.startswith(p) for p in local_prefixes) and remote not in ("", "0.0.0.0")
+        results.append({"protocol": proto, "destination": remote, "port": int(port), "suspicious": suspicious})
+    return [r for r in results if r["destination"] not in ("", "0.0.0.0")]
+
+
+def _normalise_files(raw) -> list:
+    """Convert PowerShell Get-ChildItem diff JSON to frontend format."""
+    results = []
+    if not raw:
+        return results
+    if isinstance(raw, dict):
+        raw = [raw]
+    sensitive_dirs = ("system32", "syswow64", "startup", "appdata\\roaming", "programdata")
+    for f in raw:
+        if not isinstance(f, dict):
+            continue
+        path = f.get("FullName") or f.get("path") or ""
+        action = f.get("action") or "created"
+        suspicious = any(d in path.lower() for d in sensitive_dirs)
+        results.append({"path": path, "action": action, "suspicious": suspicious})
+    return results
+
+
+def _normalise_registry(raw) -> list:
+    """Convert registry change list to frontend format."""
+    results = []
+    if not raw:
+        return results
+    if isinstance(raw, dict):
+        raw = [raw]
+    suspicious_keys = ("\\run", "\\services", "winlogon", "\\policies", "startup")
+    for r in raw:
+        if not isinstance(r, dict):
+            continue
+        key = r.get("key") or r.get("Key") or ""
+        action = r.get("action") or r.get("Action") or "write"
+        suspicious = any(k in key.lower() for k in suspicious_keys)
+        results.append({"key": key, "action": action, "suspicious": suspicious})
+    return results
+
+
+def _compute_verdict(processes, network, files, registry) -> tuple:
+    """Heuristic scoring on normalised data."""
+    score = 0
+    findings = []
+
+    # Suspicious processes
+    susp_procs = [p for p in processes if p.get("suspicious")]
+    if susp_procs:
+        score += 25
+        findings.append(f"{len(susp_procs)} suspicious process(es) spawned: {', '.join(p['name'] for p in susp_procs)}")
+
+    # External network connections
+    ext_net = [n for n in network if n.get("suspicious")]
+    if ext_net:
+        score += 30
+        findings.append(f"{len(ext_net)} external network connection(s) made")
+        for n in ext_net:
+            findings.append(f"   -> {n['protocol']} {n['destination']}:{n['port']}")
+
+    # Suspicious file writes
+    susp_files = [f for f in files if f.get("suspicious")]
+    if susp_files:
+        score += 20
+        findings.append(f"{len(susp_files)} suspicious file system change(s)")
+
+    # Registry persistence keys
+    susp_reg = [r for r in registry if r.get("suspicious")]
+    if susp_reg:
+        score += 30
+        findings.append(f"{len(susp_reg)} suspicious registry write(s) - possible persistence")
+
+    if not findings:
+        findings.append("No suspicious behaviour detected during sandbox execution")
+
+    score = min(100, score)
+    verdict = "malicious" if score >= 50 else "suspicious" if score >= 20 else "clean"
+    return verdict, score, findings
+
+
+def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
+    """
+    Runs entirely in a thread pool and updates _sandbox_jobs[job_id].
+    Uses sandbox_runner.py trigger/inbox flow so API and direct tests share one path.
+    """
+    job = _sandbox_jobs[job_id]
+    start_time = time.time()
+    session_id = str(job.get("session_id") or job_id.replace("-", ""))
+
+    def update(step: str, progress: int):
+        job["step"] = step
+        job["progress"] = progress
+        logger.info(f"[job {job_id[:8]}] {step}")
+
+    def read_json_file(path: str) -> list:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                raw = handle.read().strip()
+            if not raw:
+                return []
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, list) else [parsed]
+        except Exception as exc:
+            logger.error(f"Failed to parse JSON file {path}: {exc}")
+            return []
+
+    try:
+        update("Preparing sandbox environment...", 5)
+        close_windows_sandbox()
+
+        update("Launching sandbox job...", 15)
+        def is_cancel_requested() -> bool:
+            return bool(job.get("cancel_requested"))
+
+        run_result = sandbox_run_dynamic_scan(
+            file_bytes=file_content,
+            filename=filename,
+            duration=60,
+            launch_wsb_file=True,
+            on_progress=update,
+            session_id=session_id,
+            abort_if=is_cancel_requested,
+        )
+
+        if run_result.get("status") != "done":
+            reason = run_result.get("reason", "unknown-error")
+            diagnostics = run_result.get("diagnostics")
+            if reason == "sandbox-not-ready":
+                message = "Sandbox started but monitor did not become ready. Check C:\\sandbox_share\\monitor_debug.txt."
+            elif reason == "sandbox-exited":
+                message = "Sandbox session closed unexpectedly during execution. This can happen if the sample forces logoff/shutdown."
+            elif reason == "scan-timeout":
+                message = "Sandbox execution timed out before completion."
+            elif reason == "monitor-missing":
+                message = "Sandbox monitor script is missing at C:\\sandbox_share\\monitor.ps1."
+            elif reason == "cancelled":
+                job["status"] = "error"
+                job["error"] = "Scan cancelled by user."
+                update("Scan cancelled.", max(0, job.get("progress", 0)))
+                return
+            else:
+                message = f"Sandbox runner failed: {reason}"
+            if diagnostics:
+                message = f"{message} | diagnostics={json.dumps(diagnostics)}"
+            raise RuntimeError(message)
+
+        update("Reading sandbox logs...", 80)
+        session = run_result.get("session")
+        out_dir = run_result.get("out_dir")
+        if not session or not out_dir:
+            raise RuntimeError(f"Sandbox runner returned invalid output: {run_result}")
+
+        processes_raw = read_json_file(os.path.join(out_dir, f"processes_{session}.json"))
+        network_raw = read_json_file(os.path.join(out_dir, f"network_{session}.json"))
+        done_raw = read_json_file(os.path.join(out_dir, f"done_{session}.json"))
+        done_info = done_raw[0] if done_raw and isinstance(done_raw[0], dict) else {}
+
+        # Current monitor writes process+network snapshots only.
+        files_raw = []
+        registry_raw = []
+
+        update("Analyzing collected behaviour...", 90)
+        processes = _normalise_processes(processes_raw)
+        network = _normalise_network(network_raw)
+        files = _normalise_files(files_raw)
+        registry = _normalise_registry(registry_raw)
+
+        verdict, threat_score, summary = _compute_verdict(processes, network, files, registry)
+        open_action = done_info.get("open_action")
+        open_success = done_info.get("open_success")
+        open_error = done_info.get("open_error")
+        if open_action:
+            launch_state = "success" if open_success is True else "failed" if open_success is False else "unknown"
+            summary.insert(0, f"Launch action: {open_action} ({launch_state})")
+        if open_error:
+            summary.append(f"Launch error: {str(open_error)[:220]}")
+        duration = int(time.time() - start_time)
+
+        update("Analysis complete.", 100)
+        job["status"] = "done"
+        job["result"] = {
+            "verdict": verdict,
+            "threatScore": threat_score,
+            "duration": duration,
+            "processes": processes,
+            "network": network,
+            "files": files,
+            "registry": registry,
+            "summary": summary,
+        }
+
+    except Exception as e:
+        logger.error(f"Sandbox job {job_id} failed: {e}", exc_info=True)
+        job["status"] = "error"
+        job["error"] = str(e)
+
+    finally:
+        if KEEP_SANDBOX_OPEN:
+            logger.info("SECA_KEEP_SANDBOX_OPEN is enabled; leaving Windows Sandbox running.")
+        else:
+            close_windows_sandbox()
+
+
+@app.post("/analyze/dynamic")
+async def start_dynamic_analysis(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Read the file, register a job, return job_id INSTANTLY.
+    All blocking work (sandbox launch, monitoring) runs in a background thread.
+    Poll GET /analyze/dynamic/status/{job_id} every 2s for real progress.
+    """
+    sandbox_exe = "C:\\Windows\\System32\\WindowsSandbox.exe"
+    if not os.path.exists(sandbox_exe):
+        raise HTTPException(
+            status_code=500,
+            detail="Windows Sandbox is not installed or not enabled. "
+                   "Enable it via: Turn Windows features on/off -> Windows Sandbox"
+        )
+
+    # Read file content async (non-blocking) â€” the ONLY thing we do before returning
+    content = await file.read()
+    original_filename = file.filename or "uploaded_file"
+
+    active = [jid for jid, j in _sandbox_jobs.items() if j.get("status") == "running"]
+    if active:
+        raise HTTPException(
+            status_code=409,
+            detail="Another dynamic analysis is already running. Cancel or wait for it to finish."
+        )
+
+    job_id = str(uuid.uuid4())
+    session_id = job_id.replace("-", "")
+
+    # Register job immediately â€” worker thread will update step/progress in real time
+    _sandbox_jobs[job_id] = {
+        "status": "running",
+        "step": "Preparing sandbox environment...",
+        "progress": 3,
+        "result": None,
+        "error": None,
+        "filename": original_filename,
+        "session_id": session_id,
+        "cancel_requested": False,
+        "user_id": current_user.id,
+        "started_at": datetime.utcnow().isoformat(),
+    }
+
+    # Launch background thread â€” returns immediately, doesn't block the event loop
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(
+        _executor,
+        _run_sandbox_blocking,
+        job_id,
+        content,          # pass raw bytes â€” no disk write before returning
+        original_filename
+    )
+
+    logger.info(f"Job {job_id[:8]} created for {original_filename} â€” returning to client immediately")
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.post("/analyze/dynamic/cancel/{job_id}")
+async def cancel_dynamic_analysis(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Request cancellation for a running sandbox job."""
+    job = _sandbox_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.get("status") != "running":
+        return {"job_id": job_id, "status": job.get("status"), "message": "Job is not running"}
+
+    if job.get("user_id") != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Not allowed to cancel this job")
+
+    job["cancel_requested"] = True
+    job["step"] = "Cancelling sandbox job..."
+
+    session_id = str(job.get("session_id") or "")
+    if session_id:
+        for suffix in (".scan.json", ".scan.tmp"):
+            trigger = os.path.join(SANDBOX_SHARE, "inbox", f"{session_id}{suffix}")
+            try:
+                if os.path.exists(trigger):
+                    os.remove(trigger)
+            except OSError:
+                pass
+
+    close_windows_sandbox()
+    return {"job_id": job_id, "status": "cancelling"}
+
+
+@app.get("/analyze/dynamic/status/{job_id}")
+async def get_dynamic_status(
+    job_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Poll this endpoint every 2s to get sandbox progress and results."""
+    job = _sandbox_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    response = {
+        "job_id": job_id,
+        "status": job["status"],   # "running" | "done" | "error"
+        "step": job.get("step", ""),
+        "progress": job.get("progress", 0),
+        "filename": job.get("filename", ""),
+    }
+
+    if job["status"] == "done":
+        response["result"] = job["result"]
+        # Clean up job after retrieval
+        _sandbox_jobs.pop(job_id, None)
+    elif job["status"] == "error":
+        response["error"] = job.get("error", "Unknown error")
+        _sandbox_jobs.pop(job_id, None)
+
+    return response
 
 
 if __name__ == "__main__":

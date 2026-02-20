@@ -72,23 +72,32 @@ export function HashCheckerView() {
       setResult(mockResult);
       setScanning(false);
 
+      const formData = new URLSearchParams();
+      formData.append('scan_type', 'hash');
+      formData.append('target', hash);
+      formData.append('status', mockResult.status);
+      formData.append('threat_score', mockResult.threatScore.toString());
+      formData.append('details', JSON.stringify(mockResult.details));
+
       const response = await fetch('http://127.0.0.1:8000/hash-scan', {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({
-          scan_type: 'hash',
-          target: hash,
-          status: mockResult.status,
-          threat_score: mockResult.threatScore,
-          details: mockResult.details,
-        }),
+        body: formData,
       });
 
       if (!response.ok) {
-        throw new Error('Failed to save scan result');
+        const errorText = await response.text();
+        let errorMessage = 'Failed to save scan result';
+        try {
+          const errorData = JSON.parse(errorText);
+          errorMessage = errorData.detail || errorMessage;
+        } catch {
+          errorMessage = errorText || errorMessage;
+        }
+        throw new Error(errorMessage);
       }
 
       console.log('Hash scan result saved successfully');
@@ -122,6 +131,72 @@ export function HashCheckerView() {
       case 'suspicious':
         return 'text-yellow-400 bg-yellow-500/10 border-yellow-500/30';
     }
+  };
+
+  // Determine which message to show
+  const renderDetailedResult = () => {
+    if (!result) return null;
+
+    // If malicious and has a malware family (not None)
+    if (result.status === 'malicious' && result.details.malwareFamily !== 'None') {
+      return (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
+          <h4 className="text-red-400 font-semibold mb-2 flex items-center gap-2">
+            <AlertCircle className="w-5 h-5" />
+            Malware Detected
+          </h4>
+          <div className="space-y-2">
+            <div>
+              <p className="text-slate-400 text-sm">Malware Family</p>
+              <p className="text-white font-medium">{result.details.malwareFamily}</p>
+            </div>
+            <div>
+              <p className="text-slate-400 text-sm">First Seen</p>
+              <p className="text-white font-medium">
+                {new Date(result.details.firstSeen).toLocaleDateString('en-US', {
+                  year: 'numeric',
+                  month: 'long',
+                  day: 'numeric',
+                })}
+              </p>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // If suspicious (with or without detections)
+    if (result.status === 'suspicious') {
+      return (
+        <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-4">
+          <h4 className="text-yellow-400 font-semibold mb-2 flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5" />
+            Suspicious Indicators
+          </h4>
+          <p className="text-slate-300 text-sm">
+            This hash has suspicious characteristics but no confirmed malware. Further analysis recommended.
+          </p>
+          {result.details.detections > 0 && (
+            <p className="text-slate-300 text-sm mt-2">
+              {result.details.detections} out of {result.details.engines} engines flagged this file.
+            </p>
+          )}
+        </div>
+      );
+    }
+
+    // Otherwise clean or no threats found
+    return (
+      <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-4">
+        <h4 className="text-green-400 font-semibold mb-2 flex items-center gap-2">
+          <Database className="w-5 h-5" />
+          No Threats Found
+        </h4>
+        <p className="text-slate-300 text-sm">
+          This hash was not found in any known malware databases. The file appears to be clean.
+        </p>
+      </div>
+    );
   };
 
   return (
@@ -224,44 +299,8 @@ export function HashCheckerView() {
                 </div>
               </div>
 
-              {/* Malware Detection */}
-              {result.details.found && result.status !== 'clean' && (
-                <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
-                  <h4 className="text-red-400 font-semibold mb-2 flex items-center gap-2">
-                    <AlertCircle className="w-5 h-5" />
-                    Malware Detected
-                  </h4>
-                  <div className="space-y-2">
-                    <div>
-                      <p className="text-slate-400 text-sm">Malware Family</p>
-                      <p className="text-white font-medium">{result.details.malwareFamily}</p>
-                    </div>
-                    <div>
-                      <p className="text-slate-400 text-sm">First Seen</p>
-                      <p className="text-white font-medium">
-                        {new Date(result.details.firstSeen).toLocaleDateString('en-US', {
-                          year: 'numeric',
-                          month: 'long',
-                          day: 'numeric',
-                        })}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Clean Result */}
-              {!result.details.found || result.status === 'clean' && (
-                <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-4">
-                  <h4 className="text-green-400 font-semibold mb-2 flex items-center gap-2">
-                    <Database className="w-5 h-5" />
-                    No Threats Found
-                  </h4>
-                  <p className="text-slate-300 text-sm">
-                    This hash was not found in any known malware databases. The file appears to be clean.
-                  </p>
-                </div>
-              )}
+              {/* Dynamic Result Message */}
+              {renderDetailedResult()}
             </div>
           )}
         </div>

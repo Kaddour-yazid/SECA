@@ -20,7 +20,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(localStorage.getItem('token'));
 
-  // Validate token and fetch user info on mount or token change
   useEffect(() => {
     if (token) {
       fetch('http://127.0.0.1:8000/me', {
@@ -77,7 +76,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw new Error(errorMessage);
     }
 
-    // Registration successful – do not auto-login
     return true;
   };
 
