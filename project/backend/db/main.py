@@ -640,18 +640,31 @@ os.makedirs(SANDBOX_SHARE, exist_ok=True)
 KEEP_SANDBOX_OPEN = os.environ.get("SECA_KEEP_SANDBOX_OPEN", "0").strip().lower() in {
     "1", "true", "yes", "on"
 }
-REUSE_SANDBOX_SESSION = os.environ.get("SECA_REUSE_SANDBOX_SESSION", "1").strip().lower() in {
+REUSE_SANDBOX_SESSION = os.environ.get("SECA_REUSE_SANDBOX_SESSION", "0").strip().lower() in {
     "1", "true", "yes", "on"
 }
-AUTO_CLOSE_SANDBOX = os.environ.get("SECA_AUTO_CLOSE_SANDBOX", "0").strip().lower() in {
+AUTO_CLOSE_SANDBOX = os.environ.get("SECA_AUTO_CLOSE_SANDBOX", "1").strip().lower() in {
     "1", "true", "yes", "on"
 }
+if KEEP_SANDBOX_OPEN and AUTO_CLOSE_SANDBOX:
+    logger.warning(
+        "SECA_KEEP_SANDBOX_OPEN and SECA_AUTO_CLOSE_SANDBOX are both enabled; "
+        "auto-close takes precedence."
+    )
+    KEEP_SANDBOX_OPEN = False
 DYNAMIC_DURATION_EXEC_SECONDS = max(20, int(os.environ.get("SECA_DYNAMIC_EXEC_DURATION_SECONDS", "45")))
 DYNAMIC_DURATION_SCRIPT_SECONDS = max(15, int(os.environ.get("SECA_DYNAMIC_SCRIPT_DURATION_SECONDS", "35")))
 DYNAMIC_DURATION_DOC_SECONDS = max(10, int(os.environ.get("SECA_DYNAMIC_DOC_DURATION_SECONDS", "20")))
 DYNAMIC_DURATION_DEFAULT_SECONDS = max(15, int(os.environ.get("SECA_DYNAMIC_DEFAULT_DURATION_SECONDS", "30")))
 DYNAMIC_DONE_GRACE_SECONDS = max(20, int(os.environ.get("SECA_DYNAMIC_DONE_GRACE_SECONDS", "45")))
-MONITOR_HEARTBEAT_SECONDS = max(10, int(os.environ.get("SECA_MONITOR_HEARTBEAT_SECONDS", "30")))
+MONITOR_HEARTBEAT_SECONDS = max(5, int(os.environ.get("SECA_MONITOR_HEARTBEAT_SECONDS", "8")))
+logger.info(
+    "Sandbox config: reuse=%s auto_close=%s keep_open=%s heartbeat=%ss",
+    REUSE_SANDBOX_SESSION,
+    AUTO_CLOSE_SANDBOX,
+    KEEP_SANDBOX_OPEN,
+    MONITOR_HEARTBEAT_SECONDS,
+)
 
 # Job tracking: {job_id: {status, step, progress, result, error}}
 _sandbox_jobs: Dict[str, Dict[str, Any]] = {}
@@ -1011,7 +1024,7 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
         update("Preparing sandbox environment...", 5)
         scan_duration = _dynamic_observation_seconds(filename)
         update(f"Using observation window: {scan_duration}s", 6)
-        active_monitor = _sandbox_alive() or _monitor_heartbeat_recent()
+        active_monitor = _monitor_heartbeat_recent()
         reuse_existing_monitor = (
             REUSE_SANDBOX_SESSION
             and active_monitor
@@ -1031,7 +1044,12 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
             return bool(job.get("cancel_requested"))
 
         max_attempts = 2
-        retryable_reasons = {"sandbox-not-ready", "sandbox-launch-failed", "sandbox-exited"}
+        retryable_reasons = {
+            "sandbox-not-ready",
+            "sandbox-launch-failed",
+            "sandbox-exited",
+            "monitor-unresponsive",
+        }
         run_result: Dict[str, Any] = {}
         last_reason: Optional[str] = None
         last_diagnostics: Optional[Dict[str, Any]] = None
@@ -1104,6 +1122,8 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
                 )
             elif reason == "scan-timeout":
                 message = "Sandbox execution timed out before completion."
+            elif reason == "monitor-unresponsive":
+                message = "Reused sandbox monitor did not consume trigger. Retried with fresh sandbox launch."
             elif reason == "monitor-missing":
                 message = "Sandbox monitor script is missing at C:\\sandbox_share\\monitor.ps1."
             else:
@@ -1172,10 +1192,10 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
         job["finished_at"] = datetime.utcnow().isoformat()
 
     finally:
-        if KEEP_SANDBOX_OPEN or REUSE_SANDBOX_SESSION:
-            logger.info("Leaving Windows Sandbox running for reuse.")
-        elif AUTO_CLOSE_SANDBOX:
+        if AUTO_CLOSE_SANDBOX:
             close_windows_sandbox()
+        elif KEEP_SANDBOX_OPEN:
+            logger.info("Leaving Windows Sandbox running for reuse.")
 
 
 @app.post("/analyze/dynamic")

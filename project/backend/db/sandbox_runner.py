@@ -235,6 +235,28 @@ def wait_for_done(
     return None
 
 
+def wait_for_trigger_consumed(
+    trigger_path: Path,
+    timeout: int = 12,
+    on_tick: Optional[Callable[[float, float], None]] = None,
+    abort_if: Optional[Callable[[], bool]] = None,
+) -> bool:
+    """
+    Wait until the sandbox monitor picks up the trigger (file disappears from inbox).
+    """
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        elapsed = time.time() - t0
+        if on_tick:
+            on_tick(elapsed, float(timeout))
+        if not trigger_path.exists():
+            return True
+        if abort_if and abort_if():
+            return False
+        time.sleep(0.5)
+    return not trigger_path.exists()
+
+
 def run_dynamic_scan(
     file_bytes: bytes,
     filename: str,
@@ -324,6 +346,9 @@ def run_dynamic_scan(
         if abort_if and abort_if():
             abort_reason = "cancelled"
             return True
+        if not launch_wsb_file and not _sandbox_alive():
+            abort_reason = "sandbox-exited"
+            return True
         # Give Sandbox a startup window before deciding it exited.
         if ready_baseline and (time.time() - ready_baseline) > 30 and not _sandbox_alive():
             abort_reason = "sandbox-exited"
@@ -335,8 +360,28 @@ def run_dynamic_scan(
     ready_via = ""
     if not launch_wsb_file:
         diagnostics["ready_marker_missing"] = True
-        report("Using active sandbox monitor...", 35)
-        ready_via = "monitor-assumed-no-launch"
+        trigger_consumed = wait_for_trigger_consumed(
+            trigger_path=trigger_path,
+            timeout=12,
+            on_tick=lambda elapsed, timeout: report(
+                "Using active sandbox monitor...",
+                30 + int(min(1.0, elapsed / max(timeout, 1.0)) * 8),
+            ),
+            abort_if=should_abort,
+        )
+        diagnostics["trigger_consumed"] = trigger_consumed
+        diagnostics["trigger_present_after_wait"] = trigger_path.exists()
+        if not trigger_consumed:
+            reason = abort_reason or "monitor-unresponsive"
+            _safe_unlink(trigger_path)
+            if reason == "sandbox-exited":
+                report("Sandbox session closed unexpectedly.", 35)
+            elif reason == "cancelled":
+                report("Sandbox scan cancelled.", 35)
+            else:
+                report("Active sandbox monitor did not pick up trigger.", 35)
+            return {"status": "error", "reason": reason, "diagnostics": diagnostics}
+        ready_via = "monitor-trigger-consumed"
     elif wait_for_ready(
         timeout=90,
         min_mtime=ready_baseline,
