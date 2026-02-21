@@ -19,9 +19,16 @@ WSB_PATH = SHARE_ROOT / "session_launch.wsb"
 MONITOR_SCRIPT = SHARE_ROOT / "monitor.ps1"
 SANDBOX_PROCESS_NAMES = (
     "WindowsSandbox",
+    "WindowsSandboxClient",
     "WindowsSandboxRemoteSession",
     "WindowsSandboxServer",
     "vmmemWindowsSandbox",
+)
+SANDBOX_ACTIVE_PROCESS_NAMES = (
+    "WindowsSandbox",
+    "WindowsSandboxClient",
+    "WindowsSandboxRemoteSession",
+    "WindowsSandboxServer",
 )
 
 
@@ -145,8 +152,9 @@ def _process_running(image_name: str) -> bool:
         return True
 
 
-def _sandbox_alive() -> bool:
-    return any(_process_running(name) for name in SANDBOX_PROCESS_NAMES)
+def _sandbox_alive(include_auxiliary: bool = False) -> bool:
+    names = SANDBOX_PROCESS_NAMES if include_auxiliary else SANDBOX_ACTIVE_PROCESS_NAMES
+    return any(_process_running(name) for name in names)
 
 
 def wait_for_sandbox_launch(

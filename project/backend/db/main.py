@@ -654,9 +654,16 @@ DYNAMIC_JOB_MAX_TRACKED = max(
 )
 SANDBOX_PROCESS_NAMES = (
     "WindowsSandbox",
+    "WindowsSandboxClient",
     "WindowsSandboxRemoteSession",
     "WindowsSandboxServer",
     "vmmemWindowsSandbox",
+)
+SANDBOX_ACTIVE_PROCESS_NAMES = (
+    "WindowsSandbox",
+    "WindowsSandboxClient",
+    "WindowsSandboxRemoteSession",
+    "WindowsSandboxServer",
 )
 
 
@@ -741,8 +748,9 @@ def _sandbox_process_running(proc_name: str) -> bool:
         return False
 
 
-def _sandbox_alive() -> bool:
-    return any(_sandbox_process_running(name) for name in SANDBOX_PROCESS_NAMES)
+def _sandbox_alive(include_auxiliary: bool = False) -> bool:
+    names = SANDBOX_PROCESS_NAMES if include_auxiliary else SANDBOX_ACTIVE_PROCESS_NAMES
+    return any(_sandbox_process_running(name) for name in names)
 
 
 def close_windows_sandbox(wait_timeout_seconds: int = 20) -> bool:
@@ -760,7 +768,9 @@ def close_windows_sandbox(wait_timeout_seconds: int = 20) -> bool:
             if not _sandbox_alive():
                 return True
             time.sleep(0.5)
-        logger.warning("Timed out waiting for Windows Sandbox processes to exit")
+        if not _sandbox_alive(include_auxiliary=True):
+            return True
+        logger.warning("Timed out waiting for active Windows Sandbox processes to exit")
         return not _sandbox_alive()
     except Exception as e:
         logger.error(f"Error closing sandbox: {e}")
@@ -902,11 +912,21 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
 
     def read_json_file(path: str) -> list:
         try:
-            with open(path, "r", encoding="utf-8") as handle:
-                raw = handle.read().strip()
-            if not raw:
+            with open(path, "rb") as handle:
+                payload = handle.read()
+            if not payload:
                 return []
-            parsed = json.loads(raw)
+            decoded: Optional[str] = None
+            for encoding in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-8"):
+                try:
+                    text = payload.decode(encoding).strip()
+                    decoded = text
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if decoded is None or not decoded:
+                return []
+            parsed = json.loads(decoded)
             return parsed if isinstance(parsed, list) else [parsed]
         except Exception as exc:
             logger.error(f"Failed to parse JSON file {path}: {exc}")
@@ -917,10 +937,10 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
         reuse_existing_monitor = KEEP_SANDBOX_OPEN
         if not close_windows_sandbox():
             logger.warning(
-                "Could not fully stop previous Windows Sandbox session; "
-                "reusing existing monitor instance for this scan."
+                "Could not fully stop previous Windows Sandbox session. "
+                "Will try launching a fresh sandbox window first; fallback to monitor reuse only if needed."
             )
-            reuse_existing_monitor = True
+            reuse_existing_monitor = KEEP_SANDBOX_OPEN
 
         update("Launching sandbox job...", 15)
         def is_cancel_requested() -> bool:
@@ -935,18 +955,16 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
         for attempt in range(1, max_attempts + 1):
             attempt_session_id = session_id if attempt == 1 else f"{session_id}_retry{attempt - 1}"
             if attempt > 1:
-                update("Sandbox session ended unexpectedly. Retrying with a fresh VM...", 18)
-                if close_windows_sandbox(wait_timeout_seconds=30):
-                    reuse_existing_monitor = KEEP_SANDBOX_OPEN
+                if reuse_existing_monitor:
+                    update("Fresh sandbox launch failed. Retrying with active monitor...", 18)
                 else:
-                    reuse_existing_monitor = True
-                    logger.warning(
-                        "Retry could not force-stop existing sandbox; "
-                        "retrying with existing monitor session."
-                    )
+                    update("Sandbox session ended unexpectedly. Retrying with a fresh VM...", 18)
+                    close_windows_sandbox(wait_timeout_seconds=30)
 
             if reuse_existing_monitor:
                 update("Reusing active sandbox monitor...", 20)
+            else:
+                update("Launching visible Windows Sandbox window...", 20)
 
             run_result = sandbox_run_dynamic_scan(
                 file_bytes=file_content,
@@ -977,11 +995,25 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
                 return
 
             if last_reason in retryable_reasons and attempt < max_attempts:
+                if not reuse_existing_monitor and not KEEP_SANDBOX_OPEN:
+                    logger.warning(
+                        "Sandbox attempt %s/%s failed with reason=%s. "
+                        "Falling back to existing monitor session.",
+                        attempt,
+                        max_attempts,
+                        last_reason,
+                    )
+                    reuse_existing_monitor = True
+                else:
+                    logger.warning(
+                        "Sandbox attempt %s/%s failed with reason=%s. Retrying once.",
+                        attempt,
+                        max_attempts,
+                        last_reason,
+                    )
                 logger.warning(
-                    "Sandbox attempt %s/%s failed with reason=%s. Retrying once.",
-                    attempt,
-                    max_attempts,
-                    last_reason,
+                    "Sandbox retry mode: %s",
+                    "reuse-monitor" if reuse_existing_monitor else "fresh-launch",
                 )
                 continue
             break
@@ -1197,4 +1229,7 @@ async def get_dynamic_status(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    reload_enabled = os.environ.get("SECA_BACKEND_RELOAD", "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=reload_enabled)
