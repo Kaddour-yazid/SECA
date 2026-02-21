@@ -644,12 +644,57 @@ KEEP_SANDBOX_OPEN = os.environ.get("SECA_KEEP_SANDBOX_OPEN", "0").strip().lower(
 # Job tracking: {job_id: {status, step, progress, result, error}}
 _sandbox_jobs: Dict[str, Dict[str, Any]] = {}
 _executor = ThreadPoolExecutor(max_workers=1)
+DYNAMIC_JOB_RETENTION_SECONDS = max(
+    60,
+    int(os.environ.get("SECA_DYNAMIC_JOB_RETENTION_SECONDS", "900"))
+)
+DYNAMIC_JOB_MAX_TRACKED = max(
+    20,
+    int(os.environ.get("SECA_DYNAMIC_JOB_MAX_TRACKED", "250"))
+)
 SANDBOX_PROCESS_NAMES = (
     "WindowsSandbox",
     "WindowsSandboxRemoteSession",
     "WindowsSandboxServer",
     "vmmemWindowsSandbox",
 )
+
+
+def _parse_iso8601(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _cleanup_terminal_sandbox_jobs() -> None:
+    now = datetime.utcnow()
+    cutoff = now - timedelta(seconds=DYNAMIC_JOB_RETENTION_SECONDS)
+
+    for jid, job in list(_sandbox_jobs.items()):
+        if job.get("status") not in {"done", "error"}:
+            continue
+        finished_at = _parse_iso8601(job.get("finished_at")) or _parse_iso8601(job.get("started_at"))
+        if finished_at and finished_at < cutoff:
+            _sandbox_jobs.pop(jid, None)
+
+    if len(_sandbox_jobs) <= DYNAMIC_JOB_MAX_TRACKED:
+        return
+
+    terminal_jobs: List[tuple] = []
+    for jid, job in _sandbox_jobs.items():
+        if job.get("status") not in {"done", "error"}:
+            continue
+        finished_at = _parse_iso8601(job.get("finished_at")) or _parse_iso8601(job.get("started_at")) or datetime.min
+        terminal_jobs.append((finished_at, jid))
+
+    terminal_jobs.sort(key=lambda item: item[0])
+    for _, jid in terminal_jobs:
+        if len(_sandbox_jobs) <= DYNAMIC_JOB_MAX_TRACKED:
+            break
+        _sandbox_jobs.pop(jid, None)
 
 
 def clean_sandbox_share():
@@ -927,6 +972,7 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
             if last_reason == "cancelled":
                 job["status"] = "error"
                 job["error"] = "Scan cancelled by user."
+                job["finished_at"] = datetime.utcnow().isoformat()
                 update("Scan cancelled.", max(0, job.get("progress", 0)))
                 return
 
@@ -999,6 +1045,7 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
 
         update("Analysis complete.", 100)
         job["status"] = "done"
+        job["finished_at"] = datetime.utcnow().isoformat()
         job["result"] = {
             "verdict": verdict,
             "threatScore": threat_score,
@@ -1014,6 +1061,7 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
         logger.error(f"Sandbox job {job_id} failed: {e}", exc_info=True)
         job["status"] = "error"
         job["error"] = str(e)
+        job["finished_at"] = datetime.utcnow().isoformat()
 
     finally:
         if KEEP_SANDBOX_OPEN:
@@ -1044,6 +1092,7 @@ async def start_dynamic_analysis(
     content = await file.read()
     original_filename = file.filename or "uploaded_file"
 
+    _cleanup_terminal_sandbox_jobs()
     active = [jid for jid, j in _sandbox_jobs.items() if j.get("status") == "running"]
     if active:
         raise HTTPException(
@@ -1066,6 +1115,7 @@ async def start_dynamic_analysis(
         "cancel_requested": False,
         "user_id": current_user.id,
         "started_at": datetime.utcnow().isoformat(),
+        "finished_at": None,
     }
 
     # Launch background thread â€” returns immediately, doesn't block the event loop
@@ -1121,9 +1171,12 @@ async def get_dynamic_status(
     current_user: User = Depends(get_current_user)
 ):
     """Poll this endpoint every 2s to get sandbox progress and results."""
+    _cleanup_terminal_sandbox_jobs()
     job = _sandbox_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("user_id") != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Not allowed to read this job")
 
     response = {
         "job_id": job_id,
@@ -1131,15 +1184,13 @@ async def get_dynamic_status(
         "step": job.get("step", ""),
         "progress": job.get("progress", 0),
         "filename": job.get("filename", ""),
+        "finished_at": job.get("finished_at"),
     }
 
     if job["status"] == "done":
         response["result"] = job["result"]
-        # Clean up job after retrieval
-        _sandbox_jobs.pop(job_id, None)
     elif job["status"] == "error":
         response["error"] = job.get("error", "Unknown error")
-        _sandbox_jobs.pop(job_id, None)
 
     return response
 

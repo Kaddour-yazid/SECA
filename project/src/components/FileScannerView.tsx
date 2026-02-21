@@ -42,6 +42,7 @@ type PollResponse = {
   job_id: string; status: 'running' | 'done' | 'error';
   step: string; progress: number; filename: string;
   result?: DynamicResult; error?: string;
+  finished_at?: string | null;
 };
 
 // ─── Static analysis helpers ──────────────────────────────────────────────────
@@ -236,22 +237,50 @@ export function FileScannerView() {
   const [dynCancelling, setDynCancelling] = useState(false);
   const [expanded, setExpanded] = useState<Record<string,boolean>>({ processes:true, network:true, files:true, registry:true });
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollGenerationRef = useRef(0);
+  const activePollJobRef = useRef<string | null>(null);
+  const pollAbortRef = useRef<AbortController | null>(null);
 
   const clearPoll = () => {
     if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
+    if (pollAbortRef.current) {
+      pollAbortRef.current.abort();
+      pollAbortRef.current = null;
+    }
+    activePollJobRef.current = null;
+    pollGenerationRef.current += 1;
   };
 
   const startPolling = (jobId: string, authToken: string) => {
     clearPoll();
+    activePollJobRef.current = jobId;
+    const pollGeneration = pollGenerationRef.current;
+
+    const isCurrentPoll = () =>
+      activePollJobRef.current === jobId && pollGenerationRef.current === pollGeneration;
 
     const pollOnce = async () => {
+      if (!isCurrentPoll()) {
+        return;
+      }
+
+      if (pollAbortRef.current) {
+        pollAbortRef.current.abort();
+      }
+      const controller = new AbortController();
+      pollAbortRef.current = controller;
+
       try {
         const pollRes = await fetch(`http://127.0.0.1:8000/analyze/dynamic/status/${jobId}`, {
           headers: { Authorization: `Bearer ${authToken}` },
+          signal: controller.signal,
         });
+        if (!isCurrentPoll()) {
+          return;
+        }
         if (!pollRes.ok) {
           if (pollRes.status === 401) {
             clearPoll();
@@ -274,6 +303,9 @@ export function FileScannerView() {
         }
 
         const poll: PollResponse = await pollRes.json();
+        if (!isCurrentPoll()) {
+          return;
+        }
         setDynStep(poll.step);
         setDynProgress(poll.progress);
 
@@ -291,11 +323,18 @@ export function FileScannerView() {
           setDynCancelling(false);
         }
       } catch (pollErr) {
+        if (controller.signal.aborted || !isCurrentPoll()) {
+          return;
+        }
         clearPoll();
         setDynError(pollErr instanceof Error ? pollErr.message : 'Lost connection to backend');
         setDynState('error');
         setDynJobId(null);
         setDynCancelling(false);
+      } finally {
+        if (pollAbortRef.current === controller) {
+          pollAbortRef.current = null;
+        }
       }
     };
 
