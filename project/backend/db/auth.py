@@ -10,7 +10,7 @@ from jose import JWTError, jwt
 from typing import Optional
 import os
 
-print("🚀 Loading auth.py")
+print("Loading auth.py")
 
 SECRET_KEY = "yazid22t"          # Change in production
 ALGORITHM = "HS256"
@@ -90,11 +90,11 @@ def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     user_id = verify_token(token)
-    print(f"🔍 get_current_user: token starts with {token[:20]}..., user_id={user_id}")
+    print(f"get_current_user: token starts with {token[:20]}..., user_id={user_id}")
     if user_id is None:
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
     user = db.query(models.User).filter(models.User.id == user_id).first()
-    print(f"🔍 get_current_user: user found = {user is not None}")
+    print(f"get_current_user: user found = {user is not None}")
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
     return user

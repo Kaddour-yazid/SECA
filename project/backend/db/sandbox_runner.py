@@ -239,6 +239,7 @@ def run_dynamic_scan(
     file_bytes: bytes,
     filename: str,
     duration: int = 60,
+    done_grace: int = 45,
     launch_wsb_file: bool = True,
     allow_existing_monitor: bool = False,
     on_progress: Optional[Callable[[str, int], None]] = None,
@@ -249,6 +250,7 @@ def run_dynamic_scan(
     file_bytes: raw bytes of uploaded file
     filename: basename only; saved at to_analyze/<filename>
     duration: seconds to monitor inside sandbox
+    done_grace: additional seconds to wait for done marker synchronization
     launch_wsb_file: whether runner should open the .wsb
     """
     def report(step: str, progress: int) -> None:
@@ -369,7 +371,7 @@ def run_dynamic_scan(
     report("Sandbox ready. Executing file...", 50)
     outdir = wait_for_done(
         session,
-        timeout=duration + 120,
+        timeout=max(20, int(duration)) + max(10, int(done_grace)),
         on_tick=lambda elapsed, timeout: report(
             "Executing and collecting telemetry...",
             50 + int(min(1.0, elapsed / max(timeout, 1.0)) * 45),

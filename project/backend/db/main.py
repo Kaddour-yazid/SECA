@@ -650,6 +650,8 @@ DYNAMIC_DURATION_EXEC_SECONDS = max(20, int(os.environ.get("SECA_DYNAMIC_EXEC_DU
 DYNAMIC_DURATION_SCRIPT_SECONDS = max(15, int(os.environ.get("SECA_DYNAMIC_SCRIPT_DURATION_SECONDS", "35")))
 DYNAMIC_DURATION_DOC_SECONDS = max(10, int(os.environ.get("SECA_DYNAMIC_DOC_DURATION_SECONDS", "20")))
 DYNAMIC_DURATION_DEFAULT_SECONDS = max(15, int(os.environ.get("SECA_DYNAMIC_DEFAULT_DURATION_SECONDS", "30")))
+DYNAMIC_DONE_GRACE_SECONDS = max(20, int(os.environ.get("SECA_DYNAMIC_DONE_GRACE_SECONDS", "45")))
+MONITOR_HEARTBEAT_SECONDS = max(10, int(os.environ.get("SECA_MONITOR_HEARTBEAT_SECONDS", "30")))
 
 # Job tracking: {job_id: {status, step, progress, result, error}}
 _sandbox_jobs: Dict[str, Dict[str, Any]] = {}
@@ -820,6 +822,17 @@ def _ready_marker_available(max_age_seconds: int = 3600) -> bool:
     try:
         age = time.time() - os.path.getmtime(marker)
         return age <= max(60, max_age_seconds)
+    except OSError:
+        return False
+
+
+def _monitor_heartbeat_recent(max_age_seconds: int = MONITOR_HEARTBEAT_SECONDS) -> bool:
+    debug_log = os.path.join(SANDBOX_SHARE, "monitor_debug.txt")
+    if not os.path.exists(debug_log):
+        return False
+    try:
+        age = time.time() - os.path.getmtime(debug_log)
+        return age <= max(5, max_age_seconds)
     except OSError:
         return False
 
@@ -997,9 +1010,11 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
     try:
         update("Preparing sandbox environment...", 5)
         scan_duration = _dynamic_observation_seconds(filename)
+        update(f"Using observation window: {scan_duration}s", 6)
+        active_monitor = _sandbox_alive() or _monitor_heartbeat_recent()
         reuse_existing_monitor = (
             REUSE_SANDBOX_SESSION
-            and _sandbox_alive()
+            and active_monitor
             and _ready_marker_available()
         )
         if reuse_existing_monitor:
@@ -1037,6 +1052,7 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
                 file_bytes=file_content,
                 filename=filename,
                 duration=scan_duration,
+                done_grace=DYNAMIC_DONE_GRACE_SECONDS,
                 launch_wsb_file=not reuse_existing_monitor,
                 allow_existing_monitor=reuse_existing_monitor,
                 on_progress=update,

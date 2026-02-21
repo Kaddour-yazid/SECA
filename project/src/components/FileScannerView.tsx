@@ -132,14 +132,22 @@ const buildLayers = async (file: File): Promise<ScanResult['details']['layers']>
   const stringsSample = sampleBytes(bytes, 1024 * 1024);
   const allStrings = extractAsciiStrings(stringsSample).map((s) => s.toLowerCase());
 
-  const suspiciousPatterns = [
+  const coreSuspiciousPatterns = [
     'powershell -enc', 'cmd.exe /c', 'rundll32.exe', 'regsetvalue', 'wscript.exe',
     'mshta.exe', 'frombase64string', 'createremotethread', 'virtualalloc', 'writeprocessmemory',
-    'schtasks /create', 'net user /add', 'http://', 'https://',
+    'schtasks /create', 'net user /add',
   ];
+  const documentSuspiciousPatterns = [
+    '/openaction', '/launch', 'powershell -enc', 'cmd.exe /c', 'wscript.exe', 'mshta.exe', 'frombase64string',
+  ];
+  const urlIndicatorPatterns = ['http://', 'https://'];
+  const suspiciousPatterns = cat === 'document' ? documentSuspiciousPatterns : coreSuspiciousPatterns;
   const suspiciousStrings = uniq(
     suspiciousPatterns.filter((pattern) => allStrings.some((s) => s.includes(pattern)))
   ).slice(0, 8);
+  const urlIndicators = uniq(
+    urlIndicatorPatterns.filter((pattern) => allStrings.some((s) => s.includes(pattern)))
+  ).slice(0, 4);
 
   const importCandidates = ['kernel32.dll','user32.dll','gdi32.dll','advapi32.dll','ole32.dll','wininet.dll','urlmon.dll','ntdll.dll','wsock32.dll'];
   const imports = uniq(
@@ -160,11 +168,14 @@ const buildLayers = async (file: File): Promise<ScanResult['details']['layers']>
   let riskScore = baseRisk;
   if (cat === 'executable' && hasPeHeader) riskScore += 10;
   if (cat === 'executable' && !hasPeHeader && ext === 'exe') riskScore += 15;
-  if (highEntropy) riskScore += 18;
-  riskScore += Math.min(30, suspiciousStrings.length * 7);
-  riskScore += Math.min(15, suspiciousImportCount * 5);
-  if (looksObfuscated) riskScore += 10;
+  const codeLikeCategory = cat === 'executable' || cat === 'script';
+  if (highEntropy && codeLikeCategory) riskScore += 18;
+  if (highEntropy && cat === 'document') riskScore += 3;
+  riskScore += Math.min(30, suspiciousStrings.length * (cat === 'document' ? 4 : 7));
+  if (codeLikeCategory) riskScore += Math.min(15, suspiciousImportCount * 5);
+  if (looksObfuscated && codeLikeCategory) riskScore += 10;
   if (suspiciousName) riskScore += 12;
+  if (codeLikeCategory) riskScore += Math.min(10, urlIndicators.length * 3);
   if (cat === 'script' && suspiciousStrings.length > 0) riskScore += 12;
   if (cat === 'document' && suspiciousStrings.some((s) => s.includes('powershell') || s.includes('cmd.exe'))) riskScore += 20;
   riskScore = Math.min(100, riskScore);
@@ -173,10 +184,10 @@ const buildLayers = async (file: File): Promise<ScanResult['details']['layers']>
   const detections = databaseMatch ? Math.min(70, 10 + suspiciousStrings.length * 8 + suspiciousImportCount * 4) : 0;
 
   const threats: Threat[] = [];
-  if (riskScore >= 75) threats.push({ name: 'Trojan.Generic', severity: 'high', description: 'High-risk executable behavior indicators detected' });
+  if (riskScore >= 75 && codeLikeCategory) threats.push({ name: 'Trojan.Generic', severity: 'high', description: 'High-risk executable behavior indicators detected' });
   if (highEntropy && cat === 'executable') threats.push({ name: 'Suspicious.Packer', severity: 'medium', description: 'High entropy suggests packing/obfuscation' });
-  if (suspiciousStrings.length > 0) threats.push({ name: 'Malicious.Strings', severity: suspiciousStrings.length >= 3 ? 'high' : 'medium', description: 'Suspicious command or injection strings detected' });
-  if (suspiciousImportCount > 0) threats.push({ name: 'Suspicious.Import', severity: suspiciousImportCount >= 2 ? 'medium' : 'low', description: 'Network/injection-related imports detected' });
+  if (suspiciousStrings.length > 0 && (codeLikeCategory || suspiciousStrings.some((s) => s.includes('powershell') || s.includes('cmd.exe') || s.includes('wscript') || s.includes('mshta')))) threats.push({ name: 'Malicious.Strings', severity: suspiciousStrings.length >= 3 ? 'high' : 'medium', description: 'Suspicious command or injection strings detected' });
+  if (suspiciousImportCount > 0 && codeLikeCategory) threats.push({ name: 'Suspicious.Import', severity: suspiciousImportCount >= 2 ? 'medium' : 'low', description: 'Network/injection-related imports detected' });
   if (cat === 'script' && suspiciousStrings.length > 0) threats.push({ name: 'Heuristic.Threat', severity: 'medium', description: 'Script contains suspicious execution patterns' });
   const uniqueThreats = uniq(threats.map((t) => JSON.stringify(t))).map((s) => JSON.parse(s) as Threat);
 
