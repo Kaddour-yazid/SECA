@@ -857,24 +857,29 @@ def _normalise_registry(raw) -> list:
     return results
 
 
-def _compute_verdict(processes, network, files, registry) -> tuple:
+def _compute_verdict(
+    processes,
+    network,
+    files,
+    registry,
+    open_action: Optional[str] = None,
+    open_success: Optional[bool] = None,
+) -> tuple:
     """Heuristic scoring on normalised data."""
     score = 0
     findings = []
+    action = (open_action or "").lower()
+    is_document_open = action in {"msedge-pdf", "notepad", "invoke-item"}
 
     # Suspicious processes
     susp_procs = [p for p in processes if p.get("suspicious")]
+    monitor_like = [p for p in susp_procs if str(p.get("name", "")).lower().split(".")[0] == "powershell"]
+    if open_success and is_document_open and monitor_like and len(susp_procs) == len(monitor_like) and len(monitor_like) <= 1:
+        findings.append("Monitor PowerShell activity detected and ignored for document-open scenario")
+        susp_procs = []
     if susp_procs:
         score += 25
         findings.append(f"{len(susp_procs)} suspicious process(es) spawned: {', '.join(p['name'] for p in susp_procs)}")
-
-    # External network connections
-    ext_net = [n for n in network if n.get("suspicious")]
-    if ext_net:
-        score += 30
-        findings.append(f"{len(ext_net)} external network connection(s) made")
-        for n in ext_net:
-            findings.append(f"   -> {n['protocol']} {n['destination']}:{n['port']}")
 
     # Suspicious file writes
     susp_files = [f for f in files if f.get("suspicious")]
@@ -887,6 +892,20 @@ def _compute_verdict(processes, network, files, registry) -> tuple:
     if susp_reg:
         score += 30
         findings.append(f"{len(susp_reg)} suspicious registry write(s) - possible persistence")
+
+    # External network connections
+    ext_net = [n for n in network if n.get("suspicious")]
+    if ext_net:
+        web_ports_only = all(int(n.get("port") or 0) in {80, 443} for n in ext_net)
+        has_other_categories = bool(susp_procs or susp_files or susp_reg)
+        if web_ports_only and not has_other_categories and open_success and is_document_open:
+            score += 8
+            findings.append(f"{len(ext_net)} outbound web connection(s) observed during document open")
+        else:
+            score += 30
+            findings.append(f"{len(ext_net)} external network connection(s) made")
+        for n in ext_net:
+            findings.append(f"   -> {n['protocol']} {n['destination']}:{n['port']}")
 
     if not findings:
         findings.append("No suspicious behaviour detected during sandbox execution")
@@ -938,9 +957,9 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
         if not close_windows_sandbox():
             logger.warning(
                 "Could not fully stop previous Windows Sandbox session. "
-                "Will try launching a fresh sandbox window first; fallback to monitor reuse only if needed."
+                "Will still try launching a fresh visible sandbox window."
             )
-            reuse_existing_monitor = KEEP_SANDBOX_OPEN
+            reuse_existing_monitor = False
 
         update("Launching sandbox job...", 15)
         def is_cancel_requested() -> bool:
@@ -955,11 +974,9 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
         for attempt in range(1, max_attempts + 1):
             attempt_session_id = session_id if attempt == 1 else f"{session_id}_retry{attempt - 1}"
             if attempt > 1:
-                if reuse_existing_monitor:
-                    update("Fresh sandbox launch failed. Retrying with active monitor...", 18)
-                else:
-                    update("Sandbox session ended unexpectedly. Retrying with a fresh VM...", 18)
-                    close_windows_sandbox(wait_timeout_seconds=30)
+                update("Sandbox session ended unexpectedly. Retrying with a fresh VM...", 18)
+                close_windows_sandbox(wait_timeout_seconds=30)
+                reuse_existing_monitor = KEEP_SANDBOX_OPEN
 
             if reuse_existing_monitor:
                 update("Reusing active sandbox monitor...", 20)
@@ -995,25 +1012,11 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
                 return
 
             if last_reason in retryable_reasons and attempt < max_attempts:
-                if not reuse_existing_monitor and not KEEP_SANDBOX_OPEN:
-                    logger.warning(
-                        "Sandbox attempt %s/%s failed with reason=%s. "
-                        "Falling back to existing monitor session.",
-                        attempt,
-                        max_attempts,
-                        last_reason,
-                    )
-                    reuse_existing_monitor = True
-                else:
-                    logger.warning(
-                        "Sandbox attempt %s/%s failed with reason=%s. Retrying once.",
-                        attempt,
-                        max_attempts,
-                        last_reason,
-                    )
                 logger.warning(
-                    "Sandbox retry mode: %s",
-                    "reuse-monitor" if reuse_existing_monitor else "fresh-launch",
+                    "Sandbox attempt %s/%s failed with reason=%s. Retrying once with fresh launch.",
+                    attempt,
+                    max_attempts,
+                    last_reason,
                 )
                 continue
             break
@@ -1064,10 +1067,17 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
         files = _normalise_files(files_raw)
         registry = _normalise_registry(registry_raw)
 
-        verdict, threat_score, summary = _compute_verdict(processes, network, files, registry)
         open_action = done_info.get("open_action")
         open_success = done_info.get("open_success")
         open_error = done_info.get("open_error")
+        verdict, threat_score, summary = _compute_verdict(
+            processes,
+            network,
+            files,
+            registry,
+            open_action=open_action,
+            open_success=open_success,
+        )
         if open_action:
             launch_state = "success" if open_success is True else "failed" if open_success is False else "unknown"
             summary.insert(0, f"Launch action: {open_action} ({launch_state})")

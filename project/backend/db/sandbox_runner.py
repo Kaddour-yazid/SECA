@@ -317,8 +317,8 @@ def run_dynamic_scan(
         if abort_if and abort_if():
             abort_reason = "cancelled"
             return True
-        # Give Sandbox a short startup window before deciding it exited.
-        if ready_baseline and (time.time() - ready_baseline) > 12 and not _sandbox_alive():
+        # Give Sandbox a startup window before deciding it exited.
+        if ready_baseline and (time.time() - ready_baseline) > 30 and not _sandbox_alive():
             abort_reason = "sandbox-exited"
             return True
         return False
