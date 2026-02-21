@@ -22,13 +22,15 @@ SANDBOX_PROCESS_NAMES = (
     "WindowsSandboxClient",
     "WindowsSandboxRemoteSession",
     "WindowsSandboxServer",
-    "vmmemWindowsSandbox",
 )
 SANDBOX_ACTIVE_PROCESS_NAMES = (
     "WindowsSandbox",
     "WindowsSandboxClient",
     "WindowsSandboxRemoteSession",
     "WindowsSandboxServer",
+)
+SANDBOX_AUXILIARY_PROCESS_NAMES = (
+    "vmmemWindowsSandbox",
 )
 
 
@@ -153,7 +155,10 @@ def _process_running(image_name: str) -> bool:
 
 
 def _sandbox_alive(include_auxiliary: bool = False) -> bool:
-    names = SANDBOX_PROCESS_NAMES if include_auxiliary else SANDBOX_ACTIVE_PROCESS_NAMES
+    if include_auxiliary:
+        names = SANDBOX_ACTIVE_PROCESS_NAMES + SANDBOX_AUXILIARY_PROCESS_NAMES
+    else:
+        names = SANDBOX_ACTIVE_PROCESS_NAMES
     return any(_process_running(name) for name in names)
 
 

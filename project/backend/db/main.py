@@ -640,6 +640,16 @@ os.makedirs(SANDBOX_SHARE, exist_ok=True)
 KEEP_SANDBOX_OPEN = os.environ.get("SECA_KEEP_SANDBOX_OPEN", "0").strip().lower() in {
     "1", "true", "yes", "on"
 }
+REUSE_SANDBOX_SESSION = os.environ.get("SECA_REUSE_SANDBOX_SESSION", "1").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+AUTO_CLOSE_SANDBOX = os.environ.get("SECA_AUTO_CLOSE_SANDBOX", "0").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+DYNAMIC_DURATION_EXEC_SECONDS = max(20, int(os.environ.get("SECA_DYNAMIC_EXEC_DURATION_SECONDS", "45")))
+DYNAMIC_DURATION_SCRIPT_SECONDS = max(15, int(os.environ.get("SECA_DYNAMIC_SCRIPT_DURATION_SECONDS", "35")))
+DYNAMIC_DURATION_DOC_SECONDS = max(10, int(os.environ.get("SECA_DYNAMIC_DOC_DURATION_SECONDS", "20")))
+DYNAMIC_DURATION_DEFAULT_SECONDS = max(15, int(os.environ.get("SECA_DYNAMIC_DEFAULT_DURATION_SECONDS", "30")))
 
 # Job tracking: {job_id: {status, step, progress, result, error}}
 _sandbox_jobs: Dict[str, Dict[str, Any]] = {}
@@ -657,13 +667,15 @@ SANDBOX_PROCESS_NAMES = (
     "WindowsSandboxClient",
     "WindowsSandboxRemoteSession",
     "WindowsSandboxServer",
-    "vmmemWindowsSandbox",
 )
 SANDBOX_ACTIVE_PROCESS_NAMES = (
     "WindowsSandbox",
     "WindowsSandboxClient",
     "WindowsSandboxRemoteSession",
     "WindowsSandboxServer",
+)
+SANDBOX_AUXILIARY_PROCESS_NAMES = (
+    "vmmemWindowsSandbox",
 )
 
 
@@ -749,7 +761,10 @@ def _sandbox_process_running(proc_name: str) -> bool:
 
 
 def _sandbox_alive(include_auxiliary: bool = False) -> bool:
-    names = SANDBOX_PROCESS_NAMES if include_auxiliary else SANDBOX_ACTIVE_PROCESS_NAMES
+    if include_auxiliary:
+        names = SANDBOX_ACTIVE_PROCESS_NAMES + SANDBOX_AUXILIARY_PROCESS_NAMES
+    else:
+        names = SANDBOX_ACTIVE_PROCESS_NAMES
     return any(_sandbox_process_running(name) for name in names)
 
 
@@ -779,6 +794,34 @@ def close_windows_sandbox(wait_timeout_seconds: int = 20) -> bool:
 
 def get_file_extension(filename: str) -> str:
     return os.path.splitext(filename)[1].lower()
+
+
+def _dynamic_observation_seconds(filename: str) -> int:
+    ext = get_file_extension(filename)
+    executable_exts = {".exe", ".dll", ".com", ".scr", ".pif", ".msi"}
+    script_exts = {".bat", ".cmd", ".ps1", ".vbs", ".js", ".wsf", ".hta"}
+    document_exts = {
+        ".pdf", ".txt", ".rtf", ".doc", ".docx", ".xls", ".xlsx",
+        ".ppt", ".pptx", ".csv", ".json", ".xml", ".ini", ".cfg", ".log",
+    }
+    if ext in executable_exts:
+        return DYNAMIC_DURATION_EXEC_SECONDS
+    if ext in script_exts:
+        return DYNAMIC_DURATION_SCRIPT_SECONDS
+    if ext in document_exts:
+        return DYNAMIC_DURATION_DOC_SECONDS
+    return DYNAMIC_DURATION_DEFAULT_SECONDS
+
+
+def _ready_marker_available(max_age_seconds: int = 3600) -> bool:
+    marker = os.path.join(SANDBOX_SHARE, "sandbox_ready.txt")
+    if not os.path.exists(marker):
+        return False
+    try:
+        age = time.time() - os.path.getmtime(marker)
+        return age <= max(60, max_age_seconds)
+    except OSError:
+        return False
 
 
 def _normalise_processes(raw) -> list:
@@ -953,13 +996,20 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
 
     try:
         update("Preparing sandbox environment...", 5)
-        reuse_existing_monitor = KEEP_SANDBOX_OPEN
-        if not close_windows_sandbox():
-            logger.warning(
-                "Could not fully stop previous Windows Sandbox session. "
-                "Will still try launching a fresh visible sandbox window."
-            )
-            reuse_existing_monitor = False
+        scan_duration = _dynamic_observation_seconds(filename)
+        reuse_existing_monitor = (
+            REUSE_SANDBOX_SESSION
+            and _sandbox_alive()
+            and _ready_marker_available()
+        )
+        if reuse_existing_monitor:
+            update("Reusing active sandbox session...", 8)
+        elif _sandbox_alive(include_auxiliary=True):
+            if not close_windows_sandbox():
+                logger.warning(
+                    "Could not fully stop previous Windows Sandbox session. "
+                    "Will still try launching a fresh visible sandbox window."
+                )
 
         update("Launching sandbox job...", 15)
         def is_cancel_requested() -> bool:
@@ -976,7 +1026,7 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
             if attempt > 1:
                 update("Sandbox session ended unexpectedly. Retrying with a fresh VM...", 18)
                 close_windows_sandbox(wait_timeout_seconds=30)
-                reuse_existing_monitor = KEEP_SANDBOX_OPEN
+                reuse_existing_monitor = False
 
             if reuse_existing_monitor:
                 update("Reusing active sandbox monitor...", 20)
@@ -986,7 +1036,7 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
             run_result = sandbox_run_dynamic_scan(
                 file_bytes=file_content,
                 filename=filename,
-                duration=60,
+                duration=scan_duration,
                 launch_wsb_file=not reuse_existing_monitor,
                 allow_existing_monitor=reuse_existing_monitor,
                 on_progress=update,
@@ -1106,9 +1156,9 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
         job["finished_at"] = datetime.utcnow().isoformat()
 
     finally:
-        if KEEP_SANDBOX_OPEN:
-            logger.info("SECA_KEEP_SANDBOX_OPEN is enabled; leaving Windows Sandbox running.")
-        else:
+        if KEEP_SANDBOX_OPEN or REUSE_SANDBOX_SESSION:
+            logger.info("Leaving Windows Sandbox running for reuse.")
+        elif AUTO_CLOSE_SANDBOX:
             close_windows_sandbox()
 
 
