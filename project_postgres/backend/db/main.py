@@ -600,6 +600,43 @@ async def check_phishtank(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/threat-feed/stats")
+async def threat_feed_stats(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    """Return threat-feed and scan counters for UI insights."""
+    try:
+        total_threat_urls = db.query(ThreatUrl).count()
+        verified_threat_urls = db.query(ThreatUrl).filter(ThreatUrl.verified.is_(True)).count()
+        unique_domains = db.query(ThreatUrl.domain).filter(ThreatUrl.domain.isnot(None)).distinct().count()
+        phishtank_entries = db.query(PhishTankEntry).count()
+
+        total_scans = db.query(Scan).count()
+        malicious_scans = db.query(Scan).filter(Scan.status == "malicious").count()
+        suspicious_scans = db.query(Scan).filter(Scan.status == "suspicious").count()
+        clean_scans = db.query(Scan).filter(Scan.status == "clean").count()
+
+        return {
+            "total_threat_urls": total_threat_urls,
+            "verified_threat_urls": verified_threat_urls,
+            "unique_domains": unique_domains,
+            "phishtank_entries": phishtank_entries,
+            "scan_totals": {
+                "total": total_scans,
+                "malicious": malicious_scans,
+                "suspicious": suspicious_scans,
+                "clean": clean_scans,
+            },
+            "viewer": {
+                "user_id": current_user.id,
+                "is_admin": bool(current_user.is_admin),
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/admin/make-admin")
 async def make_admin(
         email: str,
