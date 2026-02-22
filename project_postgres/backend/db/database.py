@@ -13,13 +13,17 @@ DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql+psycopg2://postgres:postgres@localhost:5432/sonprj",
 )
+if not DATABASE_URL.startswith("postgresql"):
+    raise RuntimeError("DATABASE_URL must be a PostgreSQL URL.")
+
+DB_SSLMODE = os.getenv("SECA_DB_SSLMODE", "").strip()
+if DATABASE_URL.startswith("postgresql") and DB_SSLMODE and "sslmode=" not in DATABASE_URL:
+    joiner = "&" if "?" in DATABASE_URL else "?"
+    DATABASE_URL = f"{DATABASE_URL}{joiner}sslmode={DB_SSLMODE}"
 
 engine_kwargs = {
     "pool_pre_ping": True,
 }
-if DATABASE_URL.startswith("sqlite"):
-    # Keep compatibility if you temporarily point back to SQLite.
-    engine_kwargs["connect_args"] = {"check_same_thread": False}
 
 engine = create_engine(DATABASE_URL, **engine_kwargs)
 

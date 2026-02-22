@@ -8,9 +8,19 @@ Create `.env` in `project_postgres/backend` and set:
 
 ```env
 DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/sonprj
+SECA_DB_SSLMODE=prefer
+SECA_PBKDF2_ITERATIONS=600000
+SECA_URL_ENCRYPTION_KEY=<FERNET_KEY>
 ```
 
 You can copy from `.env.example`.
+
+Generate an encryption key:
+
+```powershell
+cd db
+python generate_url_key.py
+```
 
 ## 2) Install dependencies
 

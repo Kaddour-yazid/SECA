@@ -1,13 +1,9 @@
 import argparse
 import getpass
-import hashlib
 
 from database import SessionLocal
 from models import User
-
-
-def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+from security_utils import hash_password
 
 
 def prompt_password() -> str:

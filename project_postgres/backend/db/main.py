@@ -8,7 +8,6 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 import json
 import re
-import sqlite3
 import os
 import shutil
 import subprocess
@@ -16,13 +15,13 @@ import time
 import logging
 from urllib.parse import urlparse
 from datetime import datetime, timedelta
-import hashlib
 
 from database import get_db, engine, Base
-from models import User, Scan, AuditLog, PhishTankEntry
+from models import User, Scan, AuditLog, PhishTankEntry, ThreatUrl
 import schemas
 from auth import get_current_user, require_admin, create_access_token, router as auth_router
 from sandbox_runner import run_dynamic_scan as sandbox_run_dynamic_scan
+from security_utils import sha256_hex
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -113,65 +112,44 @@ def layer1_format_validation(url: str) -> Dict[str, Any]:
 
 def layer2_phishtank_check(url: str, db: Session) -> Dict[str, Any]:
     """Layer 2: Malicious URL Database Check (75K+ URLs)"""
-    # Check our comprehensive malicious URL database
+    normalized_url = url.strip()
+    domain = urlparse(normalized_url).netloc.lower()
+
+    # Check imported threat feed entries stored in PostgreSQL.
     try:
-        # Use absolute path to security_analyzer.db
-        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'security_analyzer.db')
+        url_hash = sha256_hex(normalized_url)
+        threat_entry = db.query(ThreatUrl).filter(ThreatUrl.url_hash == url_hash).first()
+        if threat_entry:
+            source = threat_entry.source or "threat-feed"
+            threat_type = threat_entry.threat_type or "malicious-url"
+            logger.info(f"THREAT FEED HIT: {normalized_url} - {source} - {threat_type}")
+            return {
+                "found": True,
+                "verified": bool(threat_entry.verified),
+                "threat_type": threat_type,
+                "source": source,
+                "threat_level": "high",
+                "message": f"URL found in imported threat feed ({source})",
+            }
 
-        if not os.path.exists(db_path):
-            logger.warning(f"security_analyzer.db not found at {db_path}")
-            # Continue to PhishTank fallback
-        else:
-            threat_db = sqlite3.connect(db_path)
-            cursor = threat_db.cursor()
-
-            # Direct URL match
-            cursor.execute(
-                "SELECT url, domain, threat_type, source FROM malicious_urls WHERE url = ?",
-                (url,)
-            )
-            result = cursor.fetchone()
-
-            if result:
-                threat_db.close()
-                logger.info(f"âœ“ FOUND IN DATABASE: {url} - {result[3]} - {result[2]}")
-                return {
-                    "found": True,
-                    "verified": True,
-                    "threat_type": result[2],
-                    "source": result[3],
-                    "threat_level": "high",
-                    "message": f"URL found in {result[3]} database - {result[2]}"
-                }
-
-            # Domain-level match
-            domain = urlparse(url).netloc
-            cursor.execute(
-                "SELECT COUNT(*) FROM malicious_urls WHERE domain = ?",
-                (domain,)
-            )
-            domain_matches = cursor.fetchone()[0]
-
-            threat_db.close()
-
+        if domain:
+            domain_matches = db.query(ThreatUrl).filter(ThreatUrl.domain == domain).count()
             if domain_matches > 0:
-                logger.info(f"âš  DOMAIN MATCH: {domain} appears in {domain_matches} entries")
+                logger.info(f"DOMAIN MATCH: {domain} appears in {domain_matches} threat feed entries")
                 return {
                     "found": True,
                     "verified": False,
                     "domain_matches": domain_matches,
                     "threat_level": "medium",
-                    "message": f"Domain appears in {domain_matches} malicious URL entries"
+                    "message": f"Domain appears in {domain_matches} imported threat feed entries",
                 }
 
     except Exception as e:
-        logger.error(f"Error checking threat database: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error checking imported threat feed: {e}")
 
-    # Also check PhishTank table as fallback
+    # Also check PhishTank table as fallback (plain URL table).
     phish_entry = db.query(PhishTankEntry).filter(
-        PhishTankEntry.url == url
+        PhishTankEntry.url == normalized_url
     ).first()
 
     if phish_entry:
@@ -595,9 +573,21 @@ async def check_phishtank(
         url: str,
         db: Session = Depends(get_db)
 ):
-    """Check URL against PhishTank database (public, no auth required)"""
+    """Check URL against imported threat feed and PhishTank table."""
     try:
-        entry = db.query(PhishTankEntry).filter(PhishTankEntry.url == url).first()
+        normalized_url = url.strip()
+        url_hash = sha256_hex(normalized_url)
+
+        threat_entry = db.query(ThreatUrl).filter(ThreatUrl.url_hash == url_hash).first()
+        if threat_entry:
+            return {
+                "found": True,
+                "source": threat_entry.source or "threat-feed",
+                "verified": bool(threat_entry.verified),
+                "threat_type": threat_entry.threat_type,
+            }
+
+        entry = db.query(PhishTankEntry).filter(PhishTankEntry.url == normalized_url).first()
         if entry:
             return {
                 "found": True,

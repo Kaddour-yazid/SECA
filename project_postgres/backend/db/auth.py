@@ -4,11 +4,11 @@ from sqlalchemy.orm import Session
 from database import get_db
 import models
 import schemas
-import hashlib
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from typing import Optional
 import os
+from security_utils import hash_password, verify_password
 
 print("Loading auth.py")
 
@@ -27,10 +27,6 @@ ACCESS_TOKEN_EXPIRE_MINUTES = _get_token_expiry_minutes()
 
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
-
-
-def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
@@ -73,8 +69,16 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
 def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
     """Login user with JSON (email, password) and return JWT token"""
     db_user = db.query(models.User).filter(models.User.email == user.email).first()
-    if not db_user or db_user.password != hash_password(user.password):
+    if not db_user:
         raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    is_valid, needs_rehash = verify_password(user.password, db_user.password)
+    if not is_valid:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    if needs_rehash:
+        db_user.password = hash_password(user.password)
+        db.commit()
 
     access_token = create_access_token(data={"sub": str(db_user.id)})
     return {
