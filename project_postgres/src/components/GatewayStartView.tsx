@@ -246,7 +246,7 @@ export function GatewayStartView() {
   const onlinePercent = Math.round((stats.onlineGateways / mockDevices.length) * 100);
 
   return (
-    <div className="flex-1 bg-slate-900 global-scroll">
+    <div className="gateway-start flex-1 bg-slate-900 global-scroll">
       <div className="p-8 space-y-6">
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -331,7 +331,7 @@ export function GatewayStartView() {
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     {topSites.map((site) => (
-                      <div key={site.domain} className="rounded-lg border border-slate-700 bg-slate-800/70 p-3">
+                      <div key={site.domain} className="gateway-stat-item rounded-lg border border-slate-700 bg-slate-800/70 p-3">
                         <div className="flex items-center justify-between gap-2 mb-2">
                           <div className="flex items-center gap-2 min-w-0">
                             <img src={site.iconUrl} alt={site.label} className="w-5 h-5 rounded" />
@@ -350,7 +350,7 @@ export function GatewayStartView() {
 
                 <div className="space-y-4">
                   {employeeSiteUsage.map(({ employee, sites, nonWorkPercent }) => (
-                    <div key={employee.name} className="bg-slate-900/50 border border-slate-700 rounded-lg p-4">
+                    <div key={employee.name} className="gateway-employee-card bg-slate-900/50 border border-slate-700 rounded-lg p-4">
                       <div className="flex items-start justify-between mb-4">
                         <div>
                           <p className="text-white font-semibold text-lg">{employee.name}</p>
@@ -407,7 +407,7 @@ export function GatewayStartView() {
           </div>
 
           <div className="space-y-6">
-            <div className="bg-gradient-to-br from-cyan-500/20 via-blue-500/10 to-slate-900/60 border border-cyan-400/30 rounded-2xl p-6 shadow-[0_0_40px_rgba(6,182,212,0.12)]">
+            <div className="gateway-status-card bg-gradient-to-br from-cyan-500/20 via-blue-500/10 to-slate-900/60 border border-cyan-400/30 rounded-2xl p-6 shadow-[0_0_40px_rgba(6,182,212,0.12)]">
               <div className="flex items-center justify-between mb-4">
                 <h4 className="text-white font-semibold flex items-center gap-2 text-lg">
                   <Wifi className="w-5 h-5 text-cyan-300" />
@@ -428,15 +428,15 @@ export function GatewayStartView() {
               </div>
 
               <div className="grid grid-cols-3 gap-2 mb-5">
-                <div className="bg-slate-900/70 border border-slate-700 rounded-lg p-3 text-center">
+                <div className="gateway-mini-stat bg-slate-900/70 border border-slate-700 rounded-lg p-3 text-center">
                   <p className="text-xs text-slate-400">Online</p>
                   <p className="text-2xl font-extrabold text-green-400">{mockDevices.filter((d) => d.state === 'online').length}</p>
                 </div>
-                <div className="bg-slate-900/70 border border-slate-700 rounded-lg p-3 text-center">
+                <div className="gateway-mini-stat bg-slate-900/70 border border-slate-700 rounded-lg p-3 text-center">
                   <p className="text-xs text-slate-400">Warning</p>
                   <p className="text-2xl font-extrabold text-yellow-400">{mockDevices.filter((d) => d.state === 'warning').length}</p>
                 </div>
-                <div className="bg-slate-900/70 border border-slate-700 rounded-lg p-3 text-center">
+                <div className="gateway-mini-stat bg-slate-900/70 border border-slate-700 rounded-lg p-3 text-center">
                   <p className="text-xs text-slate-400">Offline</p>
                   <p className="text-2xl font-extrabold text-red-400">{mockDevices.filter((d) => d.state === 'offline').length}</p>
                 </div>
@@ -444,7 +444,7 @@ export function GatewayStartView() {
 
               <div className="space-y-2">
                 {mockDevices.map((device) => (
-                  <div key={device.hostname} className="bg-slate-900/70 border border-slate-700 rounded-lg p-3">
+                  <div key={device.hostname} className="gateway-device-row bg-slate-900/70 border border-slate-700 rounded-lg p-3">
                     <div className="flex items-center justify-between">
                       <p className="text-slate-100 font-semibold text-sm">{device.hostname}</p>
                       {deviceIcon(device.state)}
@@ -455,7 +455,7 @@ export function GatewayStartView() {
               </div>
             </div>
 
-            <div className="bg-slate-800/60 border border-slate-700 rounded-2xl p-5">
+            <div className="gateway-traffic-card bg-slate-800/60 border border-slate-700 rounded-2xl p-5">
               <div className="flex items-center justify-between mb-4">
                 <h4 className="text-white font-semibold flex items-center gap-2 text-lg">
                   <Activity className="w-5 h-5 text-cyan-300" />
@@ -466,7 +466,7 @@ export function GatewayStartView() {
 
               <div className="space-y-3">
                 {liveTraffic.map((event, idx) => (
-                  <div key={`${event.domain}-${idx}`} className="bg-slate-900/60 border border-slate-700 rounded-xl p-3">
+                  <div key={`${event.domain}-${idx}`} className="gateway-traffic-row bg-slate-900/60 border border-slate-700 rounded-xl p-3">
                     <div className="flex items-center justify-between gap-2 mb-2">
                       <div className="flex items-center gap-2 min-w-0">
                         <img src={faviconUrl(event.domain)} alt={event.domain} className="w-6 h-6 rounded" />

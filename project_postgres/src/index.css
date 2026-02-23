@@ -44,11 +44,26 @@ body {
   background-color: #f1f5f9 !important;
 }
 
+.light .bg-slate-800\/60,
+.light .bg-slate-800\/70 {
+  background-color: #e9eef5 !important;
+}
+
 .light .bg-slate-900\/50 {
   background-color: #e2e8f0 !important;
 }
 
+.light .bg-slate-900\/60,
+.light .bg-slate-900\/70 {
+  background-color: #dce4ef !important;
+}
+
 .light .text-white {
+  color: #0f172a !important;
+}
+
+.light .text-slate-100,
+.light .text-slate-200 {
   color: #0f172a !important;
 }
 
@@ -72,9 +87,28 @@ body {
   border-color: #cbd5e1 !important;
 }
 
-/* Light mode gradients */
-.light .bg-gradient-to-br {
-  /* Keep gradients colorful in both modes */
+/* Gateway page tune-ups for light mode */
+.light .gateway-start {
+  background: linear-gradient(180deg, #f4f8fc 0%, #eef3f9 100%);
+}
+
+.light .gateway-stat-item,
+.light .gateway-employee-card,
+.light .gateway-mini-stat,
+.light .gateway-device-row,
+.light .gateway-traffic-row {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+
+.light .gateway-status-card {
+  background: linear-gradient(135deg, #e8f7ff 0%, #e7f0ff 52%, #dce6f2 100%) !important;
+  border-color: #93d9f8 !important;
+  box-shadow: 0 10px 24px rgba(14, 165, 233, 0.12);
+}
+
+.light .gateway-traffic-card {
+  background: linear-gradient(180deg, #edf2f8 0%, #e3eaf4 100%) !important;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
 }
 
 html, body, #root {
