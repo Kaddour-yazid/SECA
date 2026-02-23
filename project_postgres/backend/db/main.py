@@ -525,14 +525,27 @@ async def get_audit_logs(
             query = query.order_by(sort_column.asc())
 
         logs = query.limit(limit).all()
+        user_ids = sorted({l.user_id for l in logs if l.user_id is not None})
+        user_email_map: Dict[int, str] = {}
+        if user_ids:
+            users = db.query(User.id, User.email).filter(User.id.in_(user_ids)).all()
+            user_email_map = {u.id: u.email for u in users}
 
-        return [{
-            "id": l.id,
-            "user_id": l.user_id,
-            "action": l.action,
-            "details": l.details,
-            "timestamp": l.timestamp.isoformat()
-        } for l in logs]
+        response = []
+        for l in logs:
+            user_email = user_email_map.get(l.user_id)
+            user_name = (user_email.split("@", 1)[0] if user_email else f"User #{l.user_id}")
+            response.append({
+                "id": l.id,
+                "user_id": l.user_id,
+                "user_email": user_email,
+                "user_name": user_name,
+                "action": l.action,
+                "details": l.details,
+                "timestamp": l.timestamp.isoformat()
+            })
+
+        return response
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
