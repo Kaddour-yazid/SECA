@@ -1,12 +1,16 @@
 ﻿from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import asyncio
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 import json
+import ipaddress
+import hashlib
+import math
 import re
 import os
 import shutil
@@ -22,6 +26,16 @@ import schemas
 from auth import get_current_user, require_admin, create_access_token, router as auth_router
 from sandbox_runner import run_dynamic_scan as sandbox_run_dynamic_scan
 from security_utils import sha256_hex
+
+try:
+    import pefile  # type: ignore
+except Exception:
+    pefile = None
+
+try:
+    import yara  # type: ignore
+except Exception:
+    yara = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -344,6 +358,544 @@ async def url_scan_advanced(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+STATIC_EXECUTABLE_EXTENSIONS = {".exe", ".dll", ".sys", ".scr", ".com", ".pif", ".msi", ".cpl", ".ocx"}
+STATIC_SCRIPT_EXTENSIONS = {".bat", ".cmd", ".ps1", ".vbs", ".js", ".wsf", ".hta", ".py", ".sh"}
+STATIC_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".rtf", ".txt"}
+STATIC_ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z", ".tar", ".gz", ".iso"}
+STATIC_MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".mp3", ".wav", ".mp4", ".avi", ".mkv"}
+SUSPICIOUS_STRING_PATTERNS = [
+    "powershell -enc",
+    "frombase64string",
+    "cmd.exe /c",
+    "rundll32.exe",
+    "regsvr32",
+    "wscript.exe",
+    "cscript.exe",
+    "mshta.exe",
+    "createremotethread",
+    "writeprocessmemory",
+    "virtualalloc",
+    "schtasks /create",
+    "net user /add",
+]
+SUSPICIOUS_DLL_IMPORTS = {
+    "wininet.dll",
+    "urlmon.dll",
+    "ws2_32.dll",
+    "winhttp.dll",
+    "crypt32.dll",
+    "advapi32.dll",
+    "ntdll.dll",
+}
+SUSPICIOUS_API_IMPORTS = {
+    "createremotethread",
+    "writeprocessmemory",
+    "virtualalloc",
+    "virtualallocex",
+    "createprocessa",
+    "createprocessw",
+    "shellexecutea",
+    "shellexecutew",
+    "winexec",
+    "internetopena",
+    "internetopenw",
+    "internetopenurla",
+    "internetopenurlw",
+    "urlmonikercreatefromurl",
+}
+_HASH_FEED_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "entries": {}}
+_YARA_CACHE: Dict[str, Any] = {"key": None, "rules": None, "source": "disabled", "error": None}
+
+
+def _classify_file_category(filename: str, content_type: Optional[str]) -> Tuple[str, int]:
+    ext = os.path.splitext(filename or "")[1].lower()
+    mime = (content_type or "").lower()
+    if ext in STATIC_EXECUTABLE_EXTENSIONS or "x-msdownload" in mime or "executable" in mime:
+        return "executable", 35
+    if ext in STATIC_SCRIPT_EXTENSIONS or "javascript" in mime or "x-sh" in mime:
+        return "script", 24
+    if ext in STATIC_ARCHIVE_EXTENSIONS or "zip" in mime or "compressed" in mime:
+        return "archive", 12
+    if ext in STATIC_DOCUMENT_EXTENSIONS or "pdf" in mime or "document" in mime or "spreadsheet" in mime:
+        return "document", 6
+    if ext in STATIC_MEDIA_EXTENSIONS or mime.startswith("image/") or mime.startswith("audio/") or mime.startswith("video/"):
+        return "media", 2
+    return "unknown", 14
+
+
+def _sample_bytes(data: bytes, max_size: int) -> bytes:
+    if len(data) <= max_size:
+        return data
+    step = max(1, len(data) // max_size)
+    return data[::step][:max_size]
+
+
+def _calculate_entropy(data: bytes) -> float:
+    if not data:
+        return 0.0
+    counts = [0] * 256
+    for b in data:
+        counts[b] += 1
+    entropy = 0.0
+    length = float(len(data))
+    for c in counts:
+        if not c:
+            continue
+        p = c / length
+        entropy -= p * math.log2(p)
+    return entropy
+
+
+def _extract_ascii_strings(data: bytes, min_len: int = 4, limit: int = 5000) -> List[str]:
+    out: List[str] = []
+    current: List[str] = []
+    for b in data:
+        if 32 <= b <= 126:
+            current.append(chr(b))
+        else:
+            if len(current) >= min_len:
+                out.append("".join(current))
+                if len(out) >= limit:
+                    break
+            current = []
+    if len(out) < limit and len(current) >= min_len:
+        out.append("".join(current))
+    return out
+
+
+def _load_local_hash_feed() -> Dict[str, str]:
+    path = os.environ.get("SECA_FILE_HASH_FEED", "").strip()
+    if not path:
+        return {}
+    if not os.path.exists(path):
+        return {}
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return {}
+    if _HASH_FEED_CACHE["path"] == path and _HASH_FEED_CACHE["mtime"] == mtime:
+        return _HASH_FEED_CACHE["entries"]
+
+    entries: Dict[str, str] = {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = [part.strip() for part in line.split(",", 1)]
+                hash_value = parts[0].lower()
+                if not re.fullmatch(r"[a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64}", hash_value):
+                    continue
+                entries[hash_value] = parts[1] if len(parts) > 1 and parts[1] else "known-malicious"
+    except Exception as exc:
+        logger.warning("Failed to load local hash feed from %s: %s", path, exc)
+        entries = {}
+
+    _HASH_FEED_CACHE["path"] = path
+    _HASH_FEED_CACHE["mtime"] = mtime
+    _HASH_FEED_CACHE["entries"] = entries
+    return entries
+
+
+def _hash_reputation_lookup(db: Session, md5_hex: str, sha1_hex: str, sha256_hex_value: str) -> Dict[str, Any]:
+    detections = 0
+    engines = 0
+    malware_family = None
+    evidence: List[str] = []
+    sources: List[str] = []
+    checked_hashes = [md5_hex.lower(), sha1_hex.lower(), sha256_hex_value.lower()]
+
+    local_feed = _load_local_hash_feed()
+    local_match = None
+    for h in checked_hashes:
+        if h in local_feed:
+            local_match = h
+            malware_family = local_feed[h]
+            break
+    if local_match:
+        detections += 1
+        engines += 1
+        sources.append("local-hash-feed")
+        evidence.append(f"Hash matched local feed ({local_match[:12]}...)")
+
+    historical_hits = (
+        db.query(Scan)
+        .filter(
+            Scan.scan_type == "hash",
+            Scan.target.in_(checked_hashes),
+            Scan.status.in_(["malicious", "suspicious"]),
+        )
+        .count()
+    )
+    if historical_hits:
+        detections += min(25, historical_hits)
+        engines += min(10, max(1, historical_hits))
+        sources.append("historical-hash-scans")
+        evidence.append(f"Hash seen in {historical_hits} previous hash scan(s)")
+
+    file_scan_hits = (
+        db.query(Scan)
+        .filter(
+            Scan.scan_type == "file",
+            Scan.status.in_(["malicious", "suspicious"]),
+            or_(
+                Scan.details.ilike(f"%{sha256_hex_value}%"),
+                Scan.details.ilike(f"%{sha1_hex}%"),
+                Scan.details.ilike(f"%{md5_hex}%"),
+            ),
+        )
+        .count()
+    )
+    if file_scan_hits:
+        detections += min(15, file_scan_hits)
+        engines += min(8, max(1, file_scan_hits // 2 + 1))
+        sources.append("historical-file-scans")
+        evidence.append(f"Hash fingerprint seen in {file_scan_hits} previous file scan(s)")
+
+    if db.query(ThreatUrl).filter(ThreatUrl.url_hash == sha256_hex_value.lower()).first():
+        detections += 1
+        engines += 1
+        sources.append("threat-feed-collision")
+        evidence.append("SHA-256 collides with an existing threat-feed hash entry")
+
+    database_match = detections > 0
+    if database_match and malware_family is None:
+        malware_family = "unknown"
+    return {
+        "databaseMatch": database_match,
+        "detections": detections,
+        "engines": max(1, engines) if database_match else 0,
+        "malwareFamily": malware_family,
+        "sources": sorted(set(sources)),
+        "evidence": evidence,
+    }
+
+
+def _default_yara_rules() -> str:
+    return r"""
+rule SECA_High_Encoded_PowerShell
+{
+    strings:
+        $a = "powershell -enc" nocase ascii wide
+        $b = "frombase64string" nocase ascii wide
+    condition:
+        any of them
+}
+
+rule SECA_Medium_Script_Execution
+{
+    strings:
+        $a = "cmd.exe /c" nocase ascii wide
+        $b = "wscript.exe" nocase ascii wide
+        $c = "cscript.exe" nocase ascii wide
+        $d = "mshta.exe" nocase ascii wide
+    condition:
+        1 of them
+}
+
+rule SECA_High_Process_Injection
+{
+    strings:
+        $a = "CreateRemoteThread" nocase ascii wide
+        $b = "WriteProcessMemory" nocase ascii wide
+        $c = "VirtualAllocEx" nocase ascii wide
+    condition:
+        2 of them
+}
+"""
+
+
+def _get_compiled_yara_rules() -> Tuple[Optional[Any], str, Optional[str]]:
+    if yara is None:
+        return None, "disabled", "yara-python is not installed"
+
+    custom_path = os.environ.get("SECA_YARA_RULES_PATH", "").strip()
+    if custom_path and os.path.exists(custom_path):
+        cache_key = f"path:{custom_path}:{os.path.getmtime(custom_path)}"
+        source_label = f"custom:{custom_path}"
+        with open(custom_path, "r", encoding="utf-8") as handle:
+            rule_source = handle.read()
+    else:
+        rule_source = _default_yara_rules()
+        cache_key = f"default:{hashlib.sha256(rule_source.encode('utf-8')).hexdigest()}"
+        source_label = "builtin"
+
+    if _YARA_CACHE["key"] == cache_key and _YARA_CACHE["rules"] is not None:
+        return _YARA_CACHE["rules"], source_label, None
+
+    try:
+        compiled = yara.compile(source=rule_source)
+        _YARA_CACHE["key"] = cache_key
+        _YARA_CACHE["rules"] = compiled
+        _YARA_CACHE["source"] = source_label
+        _YARA_CACHE["error"] = None
+        return compiled, source_label, None
+    except Exception as exc:
+        _YARA_CACHE["key"] = cache_key
+        _YARA_CACHE["rules"] = None
+        _YARA_CACHE["source"] = source_label
+        _YARA_CACHE["error"] = str(exc)
+        return None, source_label, str(exc)
+
+
+def _run_yara_scan(file_bytes: bytes) -> Dict[str, Any]:
+    rules, source_label, err = _get_compiled_yara_rules()
+    if rules is not None:
+        try:
+            matches = rules.match(data=file_bytes, timeout=10)
+            names = sorted({m.rule for m in matches})
+            return {
+                "enabled": True,
+                "source": source_label,
+                "matches": names,
+                "error": None,
+            }
+        except Exception as exc:
+            err = str(exc)
+
+    # Fallback matcher so the hook still returns deterministic signal.
+    lowered = file_bytes.lower()
+    fallback_rules = {
+        "SECA_Fallback_Encoded_PowerShell": [b"powershell -enc", b"frombase64string"],
+        "SECA_Fallback_Script_Exec": [b"cmd.exe /c", b"wscript.exe", b"cscript.exe", b"mshta.exe"],
+        "SECA_Fallback_Process_Injection": [b"createremotethread", b"writeprocessmemory", b"virtualallocex"],
+    }
+    fallback_matches: List[str] = []
+    for rule_name, patterns in fallback_rules.items():
+        if any(pattern in lowered for pattern in patterns):
+            fallback_matches.append(rule_name)
+    return {
+        "enabled": False,
+        "source": source_label,
+        "matches": fallback_matches,
+        "error": err or "yara-python unavailable; using fallback matcher",
+    }
+
+
+def _analyze_pe_metadata(file_bytes: bytes) -> Dict[str, Any]:
+    result = {
+        "is_pe": file_bytes.startswith(b"MZ"),
+        "score": 0,
+        "imports": [],
+        "anomalies": [],
+        "packer_detected": None,
+        "high_entropy_sections": 0,
+    }
+    if not result["is_pe"]:
+        return result
+    if pefile is None:
+        result["anomalies"].append("PE header detected but pefile module is unavailable")
+        result["score"] += 4
+        return result
+
+    try:
+        pe = pefile.PE(data=file_bytes, fast_load=True)
+        pe.parse_data_directories(
+            directories=[
+                pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"],
+            ]
+        )
+        section_count = len(pe.sections or [])
+        if section_count >= 8:
+            result["anomalies"].append(f"High section count ({section_count})")
+            result["score"] += 6
+
+        imports: List[str] = []
+        suspicious_import_hits: List[str] = []
+        if hasattr(pe, "DIRECTORY_ENTRY_IMPORT"):
+            for entry in pe.DIRECTORY_ENTRY_IMPORT:
+                dll_name = (entry.dll or b"").decode(errors="ignore").lower()
+                if dll_name:
+                    imports.append(dll_name)
+                    if dll_name in SUSPICIOUS_DLL_IMPORTS:
+                        suspicious_import_hits.append(dll_name)
+                for imported in entry.imports:
+                    if not imported.name:
+                        continue
+                    api = imported.name.decode(errors="ignore").lower()
+                    imports.append(api)
+                    if api in SUSPICIOUS_API_IMPORTS:
+                        suspicious_import_hits.append(api)
+
+        imports = sorted(set(imports))
+        result["imports"] = imports[:60]
+        if suspicious_import_hits:
+            unique_hits = sorted(set(suspicious_import_hits))
+            result["anomalies"].append(f"Suspicious imports: {', '.join(unique_hits[:8])}")
+            result["score"] += min(20, 4 + len(unique_hits) * 2)
+
+        packed_section_names = []
+        for section in pe.sections:
+            sec_name = (section.Name or b"").decode(errors="ignore").strip("\x00").lower()
+            sec_entropy = float(section.get_entropy() or 0.0)
+            if sec_entropy >= 7.2:
+                result["high_entropy_sections"] += 1
+            is_executable = bool(section.Characteristics & 0x20000000)
+            is_writable = bool(section.Characteristics & 0x80000000)
+            if is_executable and is_writable:
+                result["anomalies"].append(f"RWX section detected: {sec_name or 'unnamed'}")
+                result["score"] += 8
+            if sec_name in {".upx0", ".upx1", ".upx2", "upx0", "upx1"}:
+                packed_section_names.append(sec_name)
+
+        if result["high_entropy_sections"] >= 2:
+            result["anomalies"].append(f"{result['high_entropy_sections']} high-entropy PE sections")
+            result["score"] += min(20, 6 + result["high_entropy_sections"] * 3)
+        if packed_section_names:
+            result["packer_detected"] = "UPX or UPX-like section layout"
+            result["score"] += 10
+
+    except Exception as exc:
+        result["anomalies"].append(f"PE parse error: {str(exc)[:120]}")
+        result["score"] += 5
+
+    result["score"] = min(40, int(result["score"]))
+    return result
+
+
+def _build_file_scan_result(filename: str, content_type: Optional[str], file_bytes: bytes, db: Session) -> Dict[str, Any]:
+    file_size = len(file_bytes)
+    ext = os.path.splitext(filename or "")[1].lower()
+    risk_category, base_risk = _classify_file_category(filename, content_type)
+
+    sample = _sample_bytes(file_bytes, 2 * 1024 * 1024)
+    entropy = round(_calculate_entropy(sample), 2)
+    strings_sample = _sample_bytes(file_bytes, 1024 * 1024)
+    ascii_strings = _extract_ascii_strings(strings_sample, min_len=4, limit=5000)
+    lowered_strings = [s.lower() for s in ascii_strings]
+
+    md5_hex = hashlib.md5(file_bytes).hexdigest()
+    sha1_hex = hashlib.sha1(file_bytes).hexdigest()
+    sha256_hex_value = hashlib.sha256(file_bytes).hexdigest()
+
+    hash_info = _hash_reputation_lookup(db, md5_hex, sha1_hex, sha256_hex_value)
+    yara_info = _run_yara_scan(file_bytes)
+    pe_info = _analyze_pe_metadata(file_bytes)
+
+    suspicious_strings = sorted(
+        {
+            pattern
+            for pattern in SUSPICIOUS_STRING_PATTERNS
+            if any(pattern in extracted for extracted in lowered_strings)
+        }
+    )[:12]
+
+    threats: List[Dict[str, str]] = []
+    score = base_risk
+
+    if hash_info["databaseMatch"]:
+        score += 60
+        threats.append(
+            {
+                "name": "Known.Hash.Reputation",
+                "severity": "high",
+                "description": "; ".join(hash_info["evidence"])[:200] or "Hash matched known malicious reputation data",
+            }
+        )
+    if yara_info["matches"]:
+        score += min(30, 10 + len(yara_info["matches"]) * 4)
+        threats.append(
+            {
+                "name": "YARA.Rule.Match",
+                "severity": "high" if any("High" in rule for rule in yara_info["matches"]) else "medium",
+                "description": f"Matched rules: {', '.join(yara_info['matches'][:4])}",
+            }
+        )
+    if suspicious_strings:
+        score += min(22, len(suspicious_strings) * 4)
+        threats.append(
+            {
+                "name": "Suspicious.String.Patterns",
+                "severity": "medium",
+                "description": f"Detected string patterns: {', '.join(suspicious_strings[:4])}",
+            }
+        )
+    if pe_info["score"] > 0:
+        score += pe_info["score"]
+        threats.append(
+            {
+                "name": "PE.Metadata.Anomaly",
+                "severity": "high" if pe_info["score"] >= 18 else "medium",
+                "description": "; ".join(pe_info["anomalies"][:3]) or "Potentially suspicious PE metadata",
+            }
+        )
+
+    if entropy > 7.4 and risk_category in {"executable", "script"}:
+        score += 12
+        threats.append(
+            {
+                "name": "High.Entropy.Content",
+                "severity": "medium",
+                "description": f"File entropy is high ({entropy}) and may indicate packing/obfuscation",
+            }
+        )
+
+    score = min(100, int(score))
+    if score >= 70:
+        status = "malicious"
+    elif score >= 35:
+        status = "suspicious"
+    else:
+        status = "clean"
+
+    layer2_hashes = {
+        "md5": md5_hex,
+        "sha1": sha1_hex,
+        "sha256": sha256_hex_value,
+        "databaseMatch": bool(hash_info["databaseMatch"]),
+        "detections": int(hash_info["detections"]),
+        "engines": int(hash_info["engines"]),
+        "malwareFamily": hash_info.get("malwareFamily"),
+        "sources": hash_info.get("sources", []),
+    }
+    analysis_warnings: List[str] = []
+    if yara_info["error"]:
+        analysis_warnings.append(f"YARA unavailable: {yara_info['error']}")
+
+    is_code_like = risk_category in {"executable", "script"}
+    obfuscated_flag = bool((entropy > 7.4 and is_code_like) or pe_info["high_entropy_sections"] >= 2)
+
+    layer4_code = {
+        "suspiciousStrings": suspicious_strings,
+        "packerDetected": pe_info["packer_detected"],
+        "obfuscated": obfuscated_flag,
+        "imports": pe_info["imports"],
+        "anomalies": pe_info["anomalies"],
+        "yaraMatches": yara_info["matches"],
+        "yaraEnabled": yara_info["enabled"],
+        "yaraSource": yara_info["source"],
+    }
+    details = {
+        "fileName": filename,
+        "fileSize": file_size,
+        "fileType": content_type or "application/octet-stream",
+        "layers": {
+            "layer1_info": {
+                "fileName": filename,
+                "fileSize": file_size,
+                "fileType": content_type or "application/octet-stream",
+                "entropy": entropy,
+                "extension": ext,
+                "riskCategory": risk_category,
+            },
+            "layer2_hashes": layer2_hashes,
+            "layer3_threats": {
+                "threats": threats,
+                "totalScore": min(100, score),
+            },
+            "layer4_code": layer4_code,
+        },
+        "analysisMeta": {
+            "scanner": "backend-static-v2",
+            "timestamp": datetime.utcnow().isoformat(),
+            "hashEvidence": hash_info.get("evidence", []),
+            "analysisWarnings": analysis_warnings,
+        },
+    }
+    return {"status": status, "threat_score": score, "details": details}
+
+
 # ============= STANDARD ENDPOINTS =============
 
 @app.get("/")
@@ -360,27 +912,44 @@ async def root():
 @app.post("/scan")
 async def scan_file(
         file: UploadFile = File(...),
-        scan_type: str = Form(...),
-        status: str = Form(...),
-        threat_score: str = Form(...),
-        details: str = Form(...),
+        scan_type: str = Form("file"),
+        status: Optional[str] = Form(None),
+        threat_score: Optional[str] = Form(None),
+        details: Optional[str] = Form(None),
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
     try:
+        file_bytes = await file.read()
+        computed = _build_file_scan_result(
+            filename=file.filename or "uploaded.bin",
+            content_type=file.content_type,
+            file_bytes=file_bytes,
+            db=db,
+        )
+        final_status = computed["status"]
+        final_score = int(computed["threat_score"])
+        final_details = computed["details"]
+
         scan = Scan(
             user_id=current_user.id,
             scan_type=scan_type,
             target=file.filename,
-            status=status,
-            threat_score=int(threat_score),
-            details=details
+            status=final_status,
+            threat_score=final_score,
+            details=json.dumps(final_details)
         )
         db.add(scan)
         db.commit()
         db.refresh(scan)
         create_audit_log(db, current_user.id, "File Scan", f"Scanned {file.filename}")
-        return {"success": True, "scan_id": scan.id}
+        return {
+            "success": True,
+            "scan_id": scan.id,
+            "status": final_status,
+            "threat_score": final_score,
+            "details": final_details,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -722,12 +1291,14 @@ SANDBOX_PROCESS_NAMES = (
     "WindowsSandboxClient",
     "WindowsSandboxRemoteSession",
     "WindowsSandboxServer",
+    "codex-windows-sandbox",
 )
 SANDBOX_ACTIVE_PROCESS_NAMES = (
     "WindowsSandbox",
     "WindowsSandboxClient",
     "WindowsSandboxRemoteSession",
     "WindowsSandboxServer",
+    "codex-windows-sandbox",
 )
 SANDBOX_AUXILIARY_PROCESS_NAMES = (
     "vmmemWindowsSandbox",
@@ -823,25 +1394,60 @@ def _sandbox_alive(include_auxiliary: bool = False) -> bool:
     return any(_sandbox_process_running(name) for name in names)
 
 
-def close_windows_sandbox(wait_timeout_seconds: int = 20) -> bool:
+def _kill_sandbox_processes_once() -> None:
+    process_names = SANDBOX_PROCESS_NAMES + SANDBOX_AUXILIARY_PROCESS_NAMES
+    for proc_name in process_names:
+        for candidate in _sandbox_process_name_candidates(proc_name):
+            subprocess.run(
+                ["taskkill", "/IM", candidate, "/F", "/T"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+    # Fallback kill path for renamed/host-specific process wrappers.
+    try:
+        subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                (
+                    "$names=@('WindowsSandbox','WindowsSandboxClient','WindowsSandboxRemoteSession',"
+                    "'WindowsSandboxServer','codex-windows-sandbox','vmmemWindowsSandbox'); "
+                    "Get-Process -ErrorAction SilentlyContinue | "
+                    "Where-Object { $names -contains $_.ProcessName } | "
+                    "Stop-Process -Force -ErrorAction SilentlyContinue"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        # taskkill path above is primary; powershell path is best-effort.
+        pass
+
+
+def close_windows_sandbox(wait_timeout_seconds: int = 25) -> bool:
     """Terminate any running Windows Sandbox process and wait until fully stopped."""
     try:
-        for proc_name in SANDBOX_PROCESS_NAMES:
-            for candidate in _sandbox_process_name_candidates(proc_name):
-                subprocess.run(
-                    ["taskkill", "/IM", candidate, "/F", "/T"],
-                    capture_output=True,
-                    text=True,
-                )
-        deadline = time.time() + max(1, int(wait_timeout_seconds))
-        while time.time() < deadline:
-            if not _sandbox_alive():
-                return True
-            time.sleep(0.5)
-        if not _sandbox_alive(include_auxiliary=True):
-            return True
-        logger.warning("Timed out waiting for active Windows Sandbox processes to exit")
-        return not _sandbox_alive()
+        attempts = 3
+        per_attempt_wait = max(4, int(wait_timeout_seconds // attempts))
+        for attempt in range(1, attempts + 1):
+            _kill_sandbox_processes_once()
+            deadline = time.time() + per_attempt_wait
+            while time.time() < deadline:
+                if not _sandbox_alive(include_auxiliary=True):
+                    return True
+                time.sleep(0.5)
+            logger.warning(
+                "Sandbox processes still running after close attempt %s/%s",
+                attempt,
+                attempts,
+            )
+        return not _sandbox_alive(include_auxiliary=True)
     except Exception as e:
         logger.error(f"Error closing sandbox: {e}")
         return False
@@ -890,44 +1496,151 @@ def _monitor_heartbeat_recent(max_age_seconds: int = MONITOR_HEARTBEAT_SECONDS) 
         return False
 
 
-def _normalise_processes(raw) -> list:
+DYNAMIC_PROCESS_BACKGROUND_NAMES = {
+    "backgroundtaskhost", "cexecsvc", "csrss", "ctfmon", "dllhost", "dwm",
+    "explorer", "fontdrvhost", "idle", "logonui", "lsaiso", "lsass",
+    "memory compression", "rdpclip", "registry", "runtimebroker", "searchhost",
+    "secure system", "services", "shellhost", "sihost", "smartscreen", "smss",
+    "spoolsv", "startmenuexperiencehost", "svchost", "system", "taskhostw",
+    "tiworker", "trustedinstaller", "vmcomputeagent", "wininit", "winlogon",
+    "wmiprvse",
+}
+DYNAMIC_PROCESS_HIGH_RISK_NAMES = {
+    "rundll32", "regsvr32", "wscript", "cscript", "mshta", "certutil",
+    "bitsadmin", "wmic", "msbuild", "installutil",
+}
+DYNAMIC_PROCESS_CONTEXTUAL_NAMES = {"powershell", "pwsh", "cmd"}
+DYNAMIC_NETWORK_WEB_PORTS = {80, 443, 8080, 8443}
+DYNAMIC_NETWORK_HIGH_RISK_PORTS = {
+    21, 22, 23, 25, 110, 135, 137, 138, 139, 143, 445,
+    1433, 1521, 3306, 3389, 4444, 5432, 5900, 5985, 5986,
+}
+DYNAMIC_DOCUMENT_EXTENSIONS = {
+    ".pdf", ".txt", ".rtf", ".doc", ".docx", ".xls", ".xlsx",
+    ".ppt", ".pptx", ".csv", ".json", ".xml", ".ini", ".cfg", ".log",
+}
+
+
+def _is_public_ip_address(value: str) -> bool:
+    raw = (value or "").strip()
+    if not raw:
+        return False
+    # Windows can emit IPv6 zone index (example: fe80::1%12).
+    host = raw.split("%", 1)[0]
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # Hostname: treat as external unless proven otherwise.
+        return True
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    ):
+        return False
+    return True
+
+
+def _normalise_processes(raw) -> tuple[list, int]:
     """Convert PowerShell Get-Process JSON to frontend format."""
     results = []
+    filtered_background = 0
     if not raw:
-        return results
+        return results, filtered_background
     if isinstance(raw, dict):
         raw = [raw]
-    suspicious_names = {"cmd", "powershell", "rundll32", "regsvr32", "wscript",
-                        "cscript", "mshta", "certutil", "bitsadmin"}
+    seen = set()
     for p in raw:
         if not isinstance(p, dict):
             continue
         name = p.get("ProcessName") or p.get("Name") or "unknown"
+        base_name = str(name).lower().split(".")[0]
+        if base_name in DYNAMIC_PROCESS_BACKGROUND_NAMES:
+            filtered_background += 1
+            continue
         pid = p.get("Id") or p.get("pid") or 0
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            pid = 0
+        dedupe_key = (pid, base_name)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
         cpu = p.get("CPU") or 0
         action = f"Running â€” CPU: {round(float(cpu), 2)}s" if cpu else "Running"
-        suspicious = name.lower().split(".")[0] in suspicious_names
-        results.append({"pid": int(pid), "name": name, "action": action, "suspicious": suspicious})
-    return results
+        if base_name in DYNAMIC_PROCESS_HIGH_RISK_NAMES:
+            risk_level = "high"
+        elif base_name in DYNAMIC_PROCESS_CONTEXTUAL_NAMES:
+            risk_level = "contextual"
+            action = f"{action} (contextual shell activity)"
+        else:
+            risk_level = "low"
+        suspicious = risk_level == "high"
+        results.append(
+            {
+                "pid": pid,
+                "name": name,
+                "action": action,
+                "suspicious": suspicious,
+                "riskLevel": risk_level,
+            }
+        )
+    return results, filtered_background
 
 
-def _normalise_network(raw) -> list:
+def _normalise_network(raw) -> tuple[list, int]:
     """Convert PowerShell Get-NetTCPConnection JSON to frontend format."""
     results = []
+    filtered_background = 0
     if not raw:
-        return results
+        return results, filtered_background
     if isinstance(raw, dict):
         raw = [raw]
-    local_prefixes = ("127.", "0.0.0.0", "::1", "::")
+    seen = set()
     for n in raw:
         if not isinstance(n, dict):
             continue
-        remote = n.get("RemoteAddress") or n.get("destination") or ""
+        remote = str(n.get("RemoteAddress") or n.get("destination") or "").strip()
+        if not remote or remote in {"0.0.0.0", "::", "::1", "127.0.0.1"}:
+            filtered_background += 1
+            continue
         port = n.get("RemotePort") or n.get("port") or 0
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            port = 0
         proto = n.get("protocol") or "TCP"
-        suspicious = not any(remote.startswith(p) for p in local_prefixes) and remote not in ("", "0.0.0.0")
-        results.append({"protocol": proto, "destination": remote, "port": int(port), "suspicious": suspicious})
-    return [r for r in results if r["destination"] not in ("", "0.0.0.0")]
+        dedupe_key = (proto, remote, port)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        if not _is_public_ip_address(remote):
+            filtered_background += 1
+            continue
+        is_web = port in DYNAMIC_NETWORK_WEB_PORTS
+        classification = "public-web" if is_web else "public-nonweb"
+        if is_web:
+            network_risk = "low"
+        elif port in DYNAMIC_NETWORK_HIGH_RISK_PORTS:
+            network_risk = "high"
+        else:
+            network_risk = "medium"
+        suspicious = network_risk in {"medium", "high"}
+        results.append(
+            {
+                "protocol": proto,
+                "destination": remote,
+                "port": port,
+                "suspicious": suspicious,
+                "classification": classification,
+                "networkRisk": network_risk,
+            }
+        )
+    return results, filtered_background
 
 
 def _normalise_files(raw) -> list:
@@ -973,54 +1686,95 @@ def _compute_verdict(
     registry,
     open_action: Optional[str] = None,
     open_success: Optional[bool] = None,
+    target_filename: Optional[str] = None,
 ) -> tuple:
     """Heuristic scoring on normalised data."""
     score = 0
     findings = []
     action = (open_action or "").lower()
-    is_document_open = action in {"msedge-pdf", "notepad", "invoke-item"}
+    ext = get_file_extension(target_filename or "")
+    is_document_open = action in {"msedge-pdf", "notepad", "invoke-item"} or ext in DYNAMIC_DOCUMENT_EXTENSIONS
 
-    # Suspicious processes
-    susp_procs = [p for p in processes if p.get("suspicious")]
-    monitor_like = [p for p in susp_procs if str(p.get("name", "")).lower().split(".")[0] == "powershell"]
-    if open_success and is_document_open and monitor_like and len(susp_procs) == len(monitor_like) and len(monitor_like) <= 1:
-        findings.append("Monitor PowerShell activity detected and ignored for document-open scenario")
-        susp_procs = []
-    if susp_procs:
-        score += 25
-        findings.append(f"{len(susp_procs)} suspicious process(es) spawned: {', '.join(p['name'] for p in susp_procs)}")
-
-    # Suspicious file writes
+    # Suspicious file writes and registry activity.
     susp_files = [f for f in files if f.get("suspicious")]
+    susp_reg = [r for r in registry if r.get("suspicious")]
     if susp_files:
         score += 20
         findings.append(f"{len(susp_files)} suspicious file system change(s)")
-
-    # Registry persistence keys
-    susp_reg = [r for r in registry if r.get("suspicious")]
     if susp_reg:
         score += 30
         findings.append(f"{len(susp_reg)} suspicious registry write(s) - possible persistence")
 
-    # External network connections
-    ext_net = [n for n in network if n.get("suspicious")]
-    if ext_net:
-        web_ports_only = all(int(n.get("port") or 0) in {80, 443} for n in ext_net)
-        has_other_categories = bool(susp_procs or susp_files or susp_reg)
-        if web_ports_only and not has_other_categories and open_success and is_document_open:
-            score += 8
-            findings.append(f"{len(ext_net)} outbound web connection(s) observed during document open")
+    high_risk_procs = [p for p in processes if p.get("riskLevel") == "high" or p.get("suspicious")]
+    contextual_shell = [
+        p
+        for p in processes
+        if str(p.get("name", "")).lower().split(".")[0] in DYNAMIC_PROCESS_CONTEXTUAL_NAMES
+    ]
+    non_web_net = [n for n in network if n.get("classification") == "public-nonweb"]
+    web_net = [n for n in network if n.get("classification") == "public-web"]
+    high_risk_non_web = [n for n in non_web_net if n.get("networkRisk") == "high"]
+
+    if high_risk_procs:
+        score += 35
+        findings.append(
+            f"{len(high_risk_procs)} high-risk process(es) observed: "
+            + ", ".join(p["name"] for p in high_risk_procs[:8])
+        )
+
+    if contextual_shell:
+        if high_risk_procs or susp_files or susp_reg or non_web_net:
+            score += 12
+            findings.append(f"{len(contextual_shell)} shell process(es) correlated with other suspicious indicators")
         else:
-            score += 30
-            findings.append(f"{len(ext_net)} external network connection(s) made")
-        for n in ext_net:
+            findings.append("Contextual shell activity observed but treated as low-confidence monitor noise")
+
+    # External network connections.
+    if non_web_net:
+        score += 30 if high_risk_non_web else 20
+        if high_risk_non_web:
+            findings.append(f"{len(high_risk_non_web)} high-risk non-web external connection(s) made")
+        findings.append(f"{len(non_web_net)} non-web external connection(s) made")
+        for n in non_web_net[:8]:
             findings.append(f"   -> {n['protocol']} {n['destination']}:{n['port']}")
+    elif web_net:
+        has_other_categories = bool(high_risk_procs or susp_files or susp_reg)
+        if is_document_open:
+            findings.append(f"{len(web_net)} outbound web connection(s) observed during document open (filtered as likely background)")
+        elif open_success is False and not has_other_categories:
+            findings.append("Launch failed; outbound web traffic treated as background baseline")
+        elif has_other_categories:
+            score += 10
+            findings.append(f"{len(web_net)} outbound web connection(s) alongside local suspicious indicators")
+        elif action in {"execute", "test"}:
+            score += 8
+            findings.append(f"{len(web_net)} outbound web connection(s) during executable/script run")
+        else:
+            score += 4
+            findings.append(f"{len(web_net)} outbound web connection(s) observed (low-confidence)")
+
+    if open_success is False and not (high_risk_procs or susp_files or susp_reg or non_web_net):
+        score = min(score, 10)
+        findings.append("Sample launch was not successful; verdict confidence reduced")
+
+    if is_document_open and not (high_risk_procs or susp_files or susp_reg or non_web_net):
+        if open_success is False:
+            findings = ["Document launch failed; no malicious behaviour observed in sandbox"]
+        else:
+            findings = ["Only expected document-open activity observed in sandbox"]
 
     if not findings:
         findings.append("No suspicious behaviour detected during sandbox execution")
 
+    if high_risk_procs or susp_reg or non_web_net:
+        findings.append("Signal confidence: high")
+    elif susp_files or (web_net and contextual_shell and action in {"execute", "test"}):
+        findings.append("Signal confidence: medium")
+    else:
+        findings.append("Signal confidence: low")
+
     score = min(100, score)
-    verdict = "malicious" if score >= 50 else "suspicious" if score >= 20 else "clean"
+    verdict = "malicious" if score >= 60 else "suspicious" if score >= 25 else "clean"
     return verdict, score, findings
 
 
@@ -1060,6 +1814,7 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
             logger.error(f"Failed to parse JSON file {path}: {exc}")
             return []
 
+    sandbox_closed_in_try = False
     try:
         update("Preparing sandbox environment...", 5)
         scan_duration = _dynamic_observation_seconds(filename)
@@ -1188,8 +1943,8 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
         registry_raw = []
 
         update("Analyzing collected behaviour...", 90)
-        processes = _normalise_processes(processes_raw)
-        network = _normalise_network(network_raw)
+        processes, filtered_processes = _normalise_processes(processes_raw)
+        network, filtered_network = _normalise_network(network_raw)
         files = _normalise_files(files_raw)
         registry = _normalise_registry(registry_raw)
 
@@ -1203,13 +1958,43 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
             registry,
             open_action=open_action,
             open_success=open_success,
+            target_filename=filename,
         )
+        processes_for_ui = processes
+        network_for_ui = network
+        files_for_ui = files
+        registry_for_ui = registry
+        if verdict == "clean":
+            processes_for_ui = [p for p in processes if p.get("suspicious") or p.get("riskLevel") == "high"]
+            network_for_ui = [n for n in network if n.get("suspicious") or n.get("classification") == "public-nonweb"]
+            files_for_ui = [f for f in files if f.get("suspicious")]
+            registry_for_ui = [r for r in registry if r.get("suspicious")]
+            hidden_count = (
+                max(0, len(processes) - len(processes_for_ui))
+                + max(0, len(network) - len(network_for_ui))
+                + max(0, len(files) - len(files_for_ui))
+                + max(0, len(registry) - len(registry_for_ui))
+            )
+            if hidden_count > 0:
+                summary.append(
+                    f"Suppressed {hidden_count} low-risk telemetry event(s) from UI because verdict is clean"
+                )
+        if filtered_processes:
+            summary.append(f"Filtered {filtered_processes} background process entries from sandbox telemetry")
+        if filtered_network:
+            summary.append(f"Filtered {filtered_network} local/background network entries from sandbox telemetry")
         if open_action:
             launch_state = "success" if open_success is True else "failed" if open_success is False else "unknown"
             summary.insert(0, f"Launch action: {open_action} ({launch_state})")
         if open_error:
             summary.append(f"Launch error: {str(open_error)[:220]}")
         duration = int(time.time() - start_time)
+
+        if AUTO_CLOSE_SANDBOX:
+            update("Shutting down sandbox VM...", 97)
+            sandbox_closed_in_try = close_windows_sandbox(wait_timeout_seconds=35)
+            if not sandbox_closed_in_try:
+                summary.append("Warning: sandbox VM did not fully close; backend will retry cleanup")
 
         update("Analysis complete.", 100)
         job["status"] = "done"
@@ -1218,10 +2003,10 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
             "verdict": verdict,
             "threatScore": threat_score,
             "duration": duration,
-            "processes": processes,
-            "network": network,
-            "files": files,
-            "registry": registry,
+            "processes": processes_for_ui,
+            "network": network_for_ui,
+            "files": files_for_ui,
+            "registry": registry_for_ui,
             "summary": summary,
         }
 
@@ -1232,8 +2017,12 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
         job["finished_at"] = datetime.utcnow().isoformat()
 
     finally:
-        if AUTO_CLOSE_SANDBOX:
-            close_windows_sandbox()
+        if AUTO_CLOSE_SANDBOX and not sandbox_closed_in_try:
+            if not close_windows_sandbox(wait_timeout_seconds=20):
+                logger.warning(
+                    "Auto-close requested but sandbox processes are still running. "
+                    "Manual cleanup may be required."
+                )
         elif KEEP_SANDBOX_OPEN:
             logger.info("Leaving Windows Sandbox running for reuse.")
 
@@ -1329,7 +2118,7 @@ async def cancel_dynamic_analysis(
             except OSError:
                 pass
 
-    close_windows_sandbox()
+    close_windows_sandbox(wait_timeout_seconds=35)
     return {"job_id": job_id, "status": "cancelling"}
 
 

@@ -240,7 +240,7 @@ const buildLayers = async (file: File): Promise<ScanResult['details']['layers']>
     layer4_code: {
       suspiciousStrings,
       packerDetected: cat === 'executable' && highEntropy ? 'Possible packed binary' : null,
-      obfuscated: looksObfuscated,
+      obfuscated: codeLikeCategory && looksObfuscated,
       imports,
       anomalies,
     },
@@ -446,25 +446,63 @@ export function FileScannerView() {
     setError(null); setCurrentLayer(0);
     try {
       for (let i = 1; i <= 4; i++) { setCurrentLayer(i); await new Promise(r => setTimeout(r, 600)); }
-      const layers = await buildLayers(file);
-      let score = 0;
-      if (layers.layer2_hashes.databaseMatch) score += 50;
-      if (layers.layer1_info.entropy > 7) score += 20; else if (layers.layer1_info.entropy > 6) score += 10;
-      score += layers.layer3_threats.totalScore;
-      if (layers.layer4_code.packerDetected && layers.layer4_code.packerDetected !== 'Unknown packer') score += 10;
-      if (layers.layer4_code.obfuscated) score += 8;
-      score = Math.min(100, score);
-      const status: Status = score >= 60 ? 'malicious' : score >= 25 ? 'suspicious' : 'clean';
-      const scanResult: ScanResult = { status, threatScore: score, details: { fileName: file.name, fileSize: file.size, fileType: file.type || 'application/octet-stream', layers } };
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('scan_type', 'file');
+      const response = await fetch('http://127.0.0.1:8000/scan', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: fd,
+      });
+      if (!response.ok) {
+        throw new Error(`File scan failed (${response.status})`);
+      }
+
+      const payload = await response.json();
+      const details = typeof payload.details === 'string' ? JSON.parse(payload.details) : payload.details;
+      if (!details?.layers) {
+        throw new Error('Backend returned an invalid scan payload.');
+      }
+      const scanResult: ScanResult = {
+        status: payload.status as Status,
+        threatScore: Number(payload.threat_score ?? 0),
+        details,
+      };
       setPreviousStaticResult(result);
       setResult(scanResult);
       refreshHookFact(scanResult, undefined);
       setScanning(false);
-      const fd = new FormData();
-      fd.append('file', file); fd.append('scan_type', 'file'); fd.append('status', status);
-      fd.append('threat_score', score.toString()); fd.append('details', JSON.stringify(scanResult.details));
-      await fetch('http://127.0.0.1:8000/scan', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd });
-    } catch (err) { setError(err instanceof Error ? err.message : 'An error occurred'); setScanning(false); }
+    } catch (err) {
+      // Fallback to local heuristic analysis if backend static scanner is unavailable.
+      try {
+        const layers = await buildLayers(file);
+        let score = 0;
+        if (layers.layer2_hashes.databaseMatch) score += 50;
+        if (layers.layer1_info.entropy > 7) score += 20; else if (layers.layer1_info.entropy > 6) score += 10;
+        score += layers.layer3_threats.totalScore;
+        if (layers.layer4_code.packerDetected && layers.layer4_code.packerDetected !== 'Unknown packer') score += 10;
+        if (layers.layer4_code.obfuscated) score += 8;
+        score = Math.min(100, score);
+        const status: Status = score >= 60 ? 'malicious' : score >= 25 ? 'suspicious' : 'clean';
+        const scanResult: ScanResult = {
+          status,
+          threatScore: score,
+          details: {
+            fileName: file.name,
+            fileSize: file.size,
+            fileType: file.type || 'application/octet-stream',
+            layers,
+          },
+        };
+        setPreviousStaticResult(result);
+        setResult(scanResult);
+        refreshHookFact(scanResult, undefined);
+      } catch {
+        setError(err instanceof Error ? err.message : 'An error occurred');
+      } finally {
+        setScanning(false);
+      }
+    }
   };
 
   // ── Dynamic sandbox scan — REAL POLLING, no fake steps ───────────────────────

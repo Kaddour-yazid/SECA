@@ -22,12 +22,14 @@ SANDBOX_PROCESS_NAMES = (
     "WindowsSandboxClient",
     "WindowsSandboxRemoteSession",
     "WindowsSandboxServer",
+    "codex-windows-sandbox",
 )
 SANDBOX_ACTIVE_PROCESS_NAMES = (
     "WindowsSandbox",
     "WindowsSandboxClient",
     "WindowsSandboxRemoteSession",
     "WindowsSandboxServer",
+    "codex-windows-sandbox",
 )
 SANDBOX_AUXILIARY_PROCESS_NAMES = (
     "vmmemWindowsSandbox",
