@@ -21,7 +21,7 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
 
   // Admin-only menu items
   const adminMenuItems = [
-    { id: 'start', label: 'Start Gateway', icon: Network },
+    { id: 'start', label: 'Monitoring', icon: Network },
     { id: 'audit', label: 'Audit Logs', icon: ScrollText },
   ];
 
