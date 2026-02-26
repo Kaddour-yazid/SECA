@@ -17,6 +17,7 @@ OUT = SHARE_ROOT / "out"
 TOOLS = SHARE_ROOT / "tools"
 WSB_PATH = SHARE_ROOT / "session_launch.wsb"
 MONITOR_SCRIPT = SHARE_ROOT / "monitor.ps1"
+REPO_MONITOR_SCRIPT = Path(__file__).with_name("monitor.ps1")
 SANDBOX_PROCESS_NAMES = (
     "WindowsSandbox",
     "WindowsSandboxClient",
@@ -53,6 +54,28 @@ def _clear_stale_triggers() -> None:
     for pattern in ("*.scan.json", "*.scan.tmp"):
         for path in INBOX.glob(pattern):
             _safe_unlink(path)
+
+
+def _ensure_monitor_script() -> None:
+    """
+    Keep host-side monitor script in sync with repository-managed version.
+    This guarantees support for trigger flags such as shutdownAfterDone.
+    """
+    if not REPO_MONITOR_SCRIPT.exists():
+        return
+    try:
+        desired = REPO_MONITOR_SCRIPT.read_text(encoding="utf-8")
+    except Exception:
+        return
+
+    current = None
+    if MONITOR_SCRIPT.exists():
+        try:
+            current = MONITOR_SCRIPT.read_text(encoding="utf-8")
+        except Exception:
+            current = None
+    if current != desired:
+        MONITOR_SCRIPT.write_text(desired, encoding="utf-8")
 
 
 def _write_session_wsb() -> Path:
@@ -104,7 +127,12 @@ def _host_diagnostics(session_id: str) -> Dict[str, object]:
     }
 
 
-def create_trigger(session_id: str, filename: str, duration: int = 60) -> Path:
+def create_trigger(
+    session_id: str,
+    filename: str,
+    duration: int = 60,
+    shutdown_after_done: bool = False,
+) -> Path:
     """
     Write trigger atomically so sandbox monitor never sees a partial file.
     """
@@ -112,6 +140,7 @@ def create_trigger(session_id: str, filename: str, duration: int = 60) -> Path:
         "sessionId": session_id,
         "targetRelativePath": filename,
         "durationSeconds": duration,
+        "shutdownAfterDone": bool(shutdown_after_done),
     }
     trigger_path = INBOX / f"{session_id}.scan.json"
     tmp_path = INBOX / f"{session_id}.scan.tmp"
@@ -266,6 +295,7 @@ def run_dynamic_scan(
     done_grace: int = 45,
     launch_wsb_file: bool = True,
     allow_existing_monitor: bool = False,
+    shutdown_after_done: bool = True,
     on_progress: Optional[Callable[[str, int], None]] = None,
     session_id: Optional[str] = None,
     abort_if: Optional[Callable[[], bool]] = None,
@@ -283,6 +313,7 @@ def run_dynamic_scan(
             on_progress(step, bounded)
 
     _ensure_dirs()
+    _ensure_monitor_script()
     report("Preparing sandbox workspace...", 6)
     session = session_id or uuid.uuid4().hex
     safe_name = Path(filename).name or "uploaded.bin"
@@ -309,7 +340,12 @@ def run_dynamic_scan(
     # Keep queue deterministic: a previous failed sample may leave stale triggers behind.
     _clear_stale_triggers()
 
-    trigger_path = create_trigger(session, safe_name, duration)
+    trigger_path = create_trigger(
+        session_id=session,
+        filename=safe_name,
+        duration=duration,
+        shutdown_after_done=shutdown_after_done,
+    )
     report("Writing sandbox trigger...", 15)
     diagnostics = _host_diagnostics(session)
     diagnostics["trigger_path"] = str(trigger_path)

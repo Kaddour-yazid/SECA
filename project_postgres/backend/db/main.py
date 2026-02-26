@@ -1868,6 +1868,7 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
                 done_grace=DYNAMIC_DONE_GRACE_SECONDS,
                 launch_wsb_file=not reuse_existing_monitor,
                 allow_existing_monitor=reuse_existing_monitor,
+                shutdown_after_done=not reuse_existing_monitor,
                 on_progress=update,
                 session_id=attempt_session_id,
                 abort_if=is_cancel_requested,
