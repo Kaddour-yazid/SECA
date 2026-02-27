@@ -15,6 +15,13 @@ npm run dev
 npm run build
 ```
 
+Backend (PostgreSQL) quick start:
+
+```powershell
+cd backend
+.\run_backend.bat
+```
+
 Default dev URL:
 
 - `http://127.0.0.1:5173`
