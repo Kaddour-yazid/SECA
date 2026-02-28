@@ -60,3 +60,14 @@ class ThreatUrl(Base):
     source = Column(String, nullable=True)
     verified = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ProxyBlockRule(Base):
+    __tablename__ = "proxy_block_rules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    pattern = Column(String, unique=True, index=True, nullable=False)
+    enabled = Column(Boolean, default=True, nullable=False)
+    note = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
