@@ -8,6 +8,7 @@ import { URLScannerView } from './URLScannerView';
 import { HashCheckerView } from './HashCheckerView';
 import { AuditLogsView } from './AuditLogsView';
 import { GatewayStartView } from './GatewayStartView';
+import { AccessControlView } from './AccessControlView';
 import { Sidebar } from './Sidebar';
 
 function AppContent() {
@@ -24,6 +25,10 @@ function AppContent() {
       return;
     }
     if (view === 'audit' && !user?.is_admin) {
+      setActiveView('dashboard');
+      return;
+    }
+    if (view === 'access-control' && !user?.is_admin) {
       setActiveView('dashboard');
       return;
     }
@@ -54,6 +59,11 @@ function AppContent() {
         {user?.is_admin && (
           <div className={activeView === 'audit' ? 'h-full' : 'hidden h-full'}>
             <AuditLogsView />
+          </div>
+        )}
+        {user?.is_admin && (
+          <div className={activeView === 'access-control' ? 'h-full' : 'hidden h-full'}>
+            <AccessControlView />
           </div>
         )}
       </main>
