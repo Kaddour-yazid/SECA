@@ -1,4 +1,4 @@
-import { Shield, FileText, Globe, Hash, LayoutDashboard, ScrollText, LogOut, Sun, Moon, User, Network } from 'lucide-react';
+import { Shield, FileText, Globe, Hash, LayoutDashboard, ScrollText, LogOut, Sun, Moon, User, Network, ShieldBan } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
 
@@ -23,6 +23,7 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
   const adminMenuItems = [
     { id: 'start', label: 'Monitoring', icon: Network },
     { id: 'audit', label: 'Audit Logs', icon: ScrollText },
+    { id: 'access-control', label: 'Access Control', icon: ShieldBan },
   ];
 
   // Combine menu items based on user role
