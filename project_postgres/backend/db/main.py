@@ -1,11 +1,15 @@
-﻿from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Query, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Query, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from typing import Dict, Any, Optional, List, Tuple
+from pydantic import BaseModel
+from collections import deque
 import asyncio
 import uuid
+import fnmatch
 from concurrent.futures import ThreadPoolExecutor
 import json
 import ipaddress
@@ -17,11 +21,12 @@ import shutil
 import subprocess
 import time
 import logging
+import threading
 from urllib.parse import urlparse
 from datetime import datetime, timedelta
 
 from database import get_db, engine, Base
-from models import User, Scan, AuditLog, PhishTankEntry, ThreatUrl
+from models import User, Scan, AuditLog, PhishTankEntry, ThreatUrl, ProxyBlockRule
 import schemas
 from auth import get_current_user, require_admin, create_access_token, router as auth_router
 from sandbox_runner import run_dynamic_scan as sandbox_run_dynamic_scan
@@ -45,6 +50,408 @@ logger = logging.getLogger(__name__)
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Security Analyzer API")
+
+gateway_history = deque(maxlen=1000)
+gateway_clients: Dict[str, int] = {}
+gateway_devices: Dict[str, Dict[str, Any]] = {}
+gateway_device_aliases: Dict[str, str] = {}
+gateway_method_counts: Dict[str, int] = {}
+gateway_blocked_count = 0
+gateway_allowed_count = 0
+gateway_device_counter = 0
+gateway_state_lock = threading.Lock()
+gateway_started_at = datetime.utcnow()
+GATEWAY_INGEST_TOKEN = os.environ.get("SECA_GATEWAY_INGEST_TOKEN", "").strip()
+DEFAULT_PROXY_BLOCK_RULES = [
+    ("*.youtube.com", "Starter default rule"),
+    ("*.facebook.com", "Starter default rule"),
+]
+SECA_PROXY_AUTOSTART = os.environ.get("SECA_PROXY_AUTOSTART", "true").strip().lower() in {"1", "true", "yes", "on"}
+SECA_PROXY_LISTEN_HOST = os.environ.get("SECA_PROXY_LISTEN_HOST", "0.0.0.0").strip() or "0.0.0.0"
+SECA_PROXY_LISTEN_PORT = int(os.environ.get("SECA_PROXY_LISTEN_PORT", "3128"))
+SECA_PROXY_BLOCKLIST_REFRESH_SECONDS = max(2, int(os.environ.get("SECA_PROXY_BLOCKLIST_REFRESH_SECONDS", "10")))
+proxy_server = None
+proxy_blocklist_cache: List[str] = []
+proxy_blocklist_last_fetch = 0.0
+
+
+class GatewayBlockRuleCreate(BaseModel):
+    pattern: str
+    note: Optional[str] = None
+    enabled: bool = True
+
+
+class GatewayBlockRuleUpdate(BaseModel):
+    pattern: Optional[str] = None
+    note: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+def _require_gateway_ingest_token(x_gateway_token: Optional[str]) -> None:
+    if GATEWAY_INGEST_TOKEN and x_gateway_token != GATEWAY_INGEST_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid gateway token")
+
+
+def _effective_blocklist(db: Session) -> List[str]:
+    rows = (
+        db.query(ProxyBlockRule)
+        .filter(ProxyBlockRule.enabled.is_(True))
+        .order_by(ProxyBlockRule.pattern.asc())
+        .all()
+    )
+    return [r.pattern for r in rows]
+
+
+def _gateway_protocol(method: str, target: Optional[str], port: int) -> str:
+    method_u = (method or "").upper()
+    target_s = (target or "").lower()
+    if method_u == "CONNECT":
+        return "https"
+    if target_s.startswith("https://") or port == 443:
+        return "https"
+    return "http"
+
+
+def _get_or_create_device_alias(client_ip: str) -> str:
+    global gateway_device_counter
+    alias = gateway_device_aliases.get(client_ip)
+    if alias:
+        return alias
+    gateway_device_counter += 1
+    alias = f"PC {gateway_device_counter}"
+    gateway_device_aliases[client_ip] = alias
+    return alias
+
+
+def _gateway_event_for_history(event: Dict[str, Any]) -> Dict[str, Any]:
+    now = datetime.utcnow()
+    method = (event.get("method") or "").upper()
+    port = int(event.get("port") or 0)
+    target = event.get("target")
+    protocol = _gateway_protocol(method, target, port)
+    client_ip = event.get("client_ip", "unknown")
+    return {
+        "time": now.strftime("%H:%M:%S"),
+        "timestamp": now.isoformat(),
+        "type": event.get("type", "proxy"),
+        "client_ip": client_ip,
+        "method": method,
+        "protocol": protocol,
+        "host": (event.get("host") or "").strip(),
+        "port": port,
+        "target": target,
+        "blocked": bool(event.get("blocked", False)),
+        "device": event.get("device") or "PC-CLIENT",
+        "audit": event.get("audit") or "realtime",
+        "company_mode": bool(event.get("company_mode", True)),
+    }
+
+
+def _gateway_audit_action(event: Dict[str, Any]) -> str:
+    protocol = str(event.get("protocol") or "http").upper()
+    method = str(event.get("method") or "?").upper()
+    verdict = "Block" if bool(event.get("blocked", False)) else "Allow"
+    return f"Gateway {protocol} {method} {verdict}"
+
+
+def _gateway_audit_details(event: Dict[str, Any]) -> str:
+    status = "BLOCKED" if event.get("blocked") else "ALLOWED"
+    protocol = str(event.get("protocol") or "http").upper()
+    method = (event.get("method") or "?").upper()
+    host = event.get("host") or "unknown-host"
+    client_ip = event.get("client_ip") or "unknown"
+    device_name = event.get("device_name") or "unknown-device"
+    port = event.get("port") or 0
+    target = event.get("target")
+    parts = [f"{status} {protocol} {method} {host}:{port}", f"client={client_ip}", f"device={device_name}"]
+    if target:
+        parts.append(f"target={target}")
+    return " | ".join(parts)
+
+
+def _update_gateway_runtime_state(normalized: Dict[str, Any]) -> Dict[str, Any]:
+    global gateway_blocked_count, gateway_allowed_count
+    client_ip = normalized.get("client_ip") or "unknown"
+    method = (normalized.get("method") or "UNKNOWN").upper()
+    host = normalized.get("host") or ""
+    blocked = bool(normalized.get("blocked", False))
+    now = datetime.utcnow().isoformat()
+
+    with gateway_state_lock:
+        device_name = _get_or_create_device_alias(client_ip)
+        normalized["device_name"] = device_name
+        gateway_history.appendleft(normalized)
+        gateway_clients[client_ip] = gateway_clients.get(client_ip, 0) + 1
+
+        if blocked:
+            gateway_blocked_count += 1
+        else:
+            gateway_allowed_count += 1
+
+        gateway_method_counts[method] = gateway_method_counts.get(method, 0) + 1
+
+        device = gateway_devices.get(client_ip)
+        if not device:
+            device = {
+                "device_name": device_name,
+                "client_ip": client_ip,
+                "first_seen": now,
+                "last_seen": now,
+                "total_requests": 0,
+                "blocked_requests": 0,
+                "allowed_requests": 0,
+                "methods": {},
+                "last_host": "",
+            }
+            gateway_devices[client_ip] = device
+
+        device["last_seen"] = now
+        device["last_host"] = host or device.get("last_host") or ""
+        device["total_requests"] = int(device.get("total_requests", 0)) + 1
+        if blocked:
+            device["blocked_requests"] = int(device.get("blocked_requests", 0)) + 1
+        else:
+            device["allowed_requests"] = int(device.get("allowed_requests", 0)) + 1
+
+        methods = dict(device.get("methods", {}))
+        methods[method] = int(methods.get(method, 0)) + 1
+        device["methods"] = methods
+
+    return normalized
+
+
+def _record_gateway_event_sync(event: Dict[str, Any], db: Optional[Session] = None) -> Dict[str, Any]:
+    normalized = _gateway_event_for_history(event)
+    normalized = _update_gateway_runtime_state(normalized)
+
+    action = _gateway_audit_action(normalized)
+    if db is None:
+        with Session(engine) as local_db:
+            create_system_audit_log(local_db, action, _gateway_audit_details(normalized))
+    else:
+        create_system_audit_log(db, action, _gateway_audit_details(normalized))
+    return normalized
+
+
+def _load_proxy_blocklist_sync() -> List[str]:
+    with Session(engine) as db:
+        return _effective_blocklist(db)
+
+
+async def _proxy_get_blocklist() -> List[str]:
+    global proxy_blocklist_last_fetch, proxy_blocklist_cache
+    now = time.time()
+    if now - proxy_blocklist_last_fetch < SECA_PROXY_BLOCKLIST_REFRESH_SECONDS:
+        return proxy_blocklist_cache
+    try:
+        proxy_blocklist_cache = await asyncio.to_thread(_load_proxy_blocklist_sync)
+        proxy_blocklist_last_fetch = now
+    except Exception as exc:
+        logger.warning("Failed to refresh proxy blocklist: %s", exc)
+    return proxy_blocklist_cache
+
+
+async def _proxy_is_blocked(host: str) -> bool:
+    host = (host or "").lower().strip().strip(".")
+    if not host:
+        return False
+    patterns = await _proxy_get_blocklist()
+    for pat in patterns:
+        p = str(pat).lower().strip().strip(".")
+        if fnmatch.fnmatch(host, p) or fnmatch.fnmatch(host, p.lstrip("*.")):
+            return True
+    return False
+
+
+async def _proxy_tunnel(c_reader, c_writer, u_reader, u_writer):
+    async def pump(src, dst, peer_to_close=None):
+        try:
+            while True:
+                data = await src.read(65536)
+                if not data:
+                    break
+                dst.write(data)
+                await dst.drain()
+        except Exception:
+            pass
+        finally:
+            try:
+                dst.close()
+            except Exception:
+                pass
+            if peer_to_close is not None:
+                try:
+                    peer_to_close.close()
+                except Exception:
+                    pass
+
+    t1 = asyncio.create_task(pump(c_reader, u_writer, c_writer))
+    t2 = asyncio.create_task(pump(u_reader, c_writer, u_writer))
+    await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
+
+
+async def _proxy_handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    peer = writer.get_extra_info("peername")
+    client_ip = peer[0] if peer else "unknown"
+
+    try:
+        head = await reader.readuntil(b"\r\n\r\n")
+    except Exception:
+        writer.close()
+        return
+
+    try:
+        lines = head.split(b"\r\n")
+        first = lines[0].decode("utf-8", "ignore")
+        method, target, _version = first.split(" ", 2)
+    except Exception:
+        writer.close()
+        return
+
+    method_u = method.upper()
+
+    if method_u == "CONNECT":
+        if ":" in target:
+            host, p = target.split(":", 1)
+            port = int(p)
+        else:
+            host, port = target, 443
+
+        blocked = await _proxy_is_blocked(host)
+        asyncio.create_task(asyncio.to_thread(_record_gateway_event_sync, {
+            "type": "proxy",
+            "client_ip": client_ip,
+            "method": "CONNECT",
+            "host": host,
+            "port": port,
+            "blocked": blocked,
+        }))
+
+        if blocked:
+            writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+            await writer.drain()
+            writer.close()
+            return
+
+        try:
+            u_reader, u_writer = await asyncio.open_connection(host, port)
+        except Exception:
+            writer.write(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+            await writer.drain()
+            writer.close()
+            return
+
+        writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        await writer.drain()
+        await _proxy_tunnel(reader, writer, u_reader, u_writer)
+        return
+
+    headers = {}
+    for ln in lines[1:]:
+        if b":" in ln:
+            k, v = ln.split(b":", 1)
+            headers[k.decode("utf-8", "ignore").strip().lower()] = v.decode("utf-8", "ignore").strip()
+
+    host = headers.get("host", "")
+    port = 80
+    if ":" in host:
+        host, p = host.split(":", 1)
+        try:
+            port = int(p)
+        except ValueError:
+            port = 80
+
+    blocked = await _proxy_is_blocked(host)
+    asyncio.create_task(asyncio.to_thread(_record_gateway_event_sync, {
+        "type": "proxy",
+        "client_ip": client_ip,
+        "method": method_u,
+        "host": host,
+        "port": port,
+        "target": target,
+        "blocked": blocked,
+    }))
+
+    if blocked:
+        body = b"Blocked by SECA gateway proxy\r\n"
+        writer.write(
+            b"HTTP/1.1 403 Forbidden\r\n"
+            + f"Content-Length: {len(body)}\r\n".encode("ascii")
+            + b"Content-Type: text/plain\r\n\r\n"
+            + body
+        )
+        await writer.drain()
+        writer.close()
+        return
+
+    try:
+        u_reader, u_writer = await asyncio.open_connection(host, port)
+    except Exception:
+        writer.write(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+        await writer.drain()
+        writer.close()
+        return
+
+    u_writer.write(head)
+    await u_writer.drain()
+    await _proxy_tunnel(reader, writer, u_reader, u_writer)
+
+
+async def start_embedded_proxy() -> None:
+    global proxy_server
+    if proxy_server is not None:
+        return
+    try:
+        proxy_server = await asyncio.start_server(
+            _proxy_handle_client,
+            SECA_PROXY_LISTEN_HOST,
+            SECA_PROXY_LISTEN_PORT,
+        )
+        sockets = proxy_server.sockets or []
+        addrs = ", ".join(str(sock.getsockname()) for sock in sockets)
+        logger.info("Embedded proxy listening on %s", addrs)
+    except OSError as exc:
+        logger.error(
+            "Embedded proxy failed to start on %s:%s (%s)",
+            SECA_PROXY_LISTEN_HOST,
+            SECA_PROXY_LISTEN_PORT,
+            exc,
+        )
+        proxy_server = None
+        return
+
+    async with proxy_server:
+        await proxy_server.serve_forever()
+
+
+def seed_default_proxy_rules() -> None:
+    try:
+        with Session(engine) as db:
+            for pattern, note in DEFAULT_PROXY_BLOCK_RULES:
+                exists = db.query(ProxyBlockRule).filter(ProxyBlockRule.pattern == pattern).first()
+                if exists:
+                    continue
+                db.add(ProxyBlockRule(pattern=pattern, note=note, enabled=True))
+            db.commit()
+    except Exception as exc:
+        logger.warning("Failed to seed default proxy block rules: %s", exc)
+
+
+@app.on_event("startup")
+async def on_startup():
+    seed_default_proxy_rules()
+    if SECA_PROXY_AUTOSTART:
+        app.state.proxy_task = asyncio.create_task(start_embedded_proxy())
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    task = getattr(app.state, "proxy_task", None)
+    if proxy_server is not None:
+        proxy_server.close()
+        await proxy_server.wait_closed()
+    if task and not task.done():
+        task.cancel()
 
 @app.middleware("http")
 async def log_requests(request, call_next):
@@ -73,6 +480,12 @@ app.include_router(auth_router, tags=["auth"])
 
 def create_audit_log(db: Session, user_id: int, action: str, details: str):
     audit_log = AuditLog(user_id=user_id, action=action, details=details)
+    db.add(audit_log)
+    db.commit()
+
+
+def create_system_audit_log(db: Session, action: str, details: str):
+    audit_log = AuditLog(user_id=None, action=action, details=details)
     db.add(audit_log)
     db.commit()
 
@@ -1042,6 +1455,211 @@ async def get_scans(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/gateway/log")
+async def gateway_log_ingest(
+        event: Dict[str, Any],
+        x_gateway_token: Optional[str] = Header(None, alias="X-Gateway-Token"),
+        db: Session = Depends(get_db)
+):
+    """Ingest proxy events (allow/block) from the gateway proxy."""
+    _require_gateway_ingest_token(x_gateway_token)
+
+    try:
+        normalized = _record_gateway_event_sync(event, db=db)
+    except Exception as exc:
+        logger.exception("Failed to persist gateway audit event: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to persist gateway event")
+
+    return {"ok": True, "event": normalized}
+
+
+@app.get("/gateway/api/history")
+async def gateway_api_history(
+        limit: int = Query(200, ge=1, le=1000),
+        current_user: User = Depends(require_admin)
+):
+    del current_user
+    return list(gateway_history)[:limit]
+
+
+@app.get("/gateway/api/stats")
+async def gateway_api_stats(current_user: User = Depends(require_admin)):
+    del current_user
+    with gateway_state_lock:
+        requests_by_ip = dict(gateway_clients)
+        methods = dict(gateway_method_counts)
+        total_events = len(gateway_history)
+        unique_clients = len(gateway_devices)
+        blocked = gateway_blocked_count
+        allowed = gateway_allowed_count
+    return {
+        "total_events": total_events,
+        "unique_clients": unique_clients,
+        "blocked_requests": blocked,
+        "allowed_requests": allowed,
+        "methods": methods,
+        "requests_by_ip": requests_by_ip,
+    }
+
+
+@app.get("/gateway/api/devices")
+async def gateway_api_devices(current_user: User = Depends(require_admin)):
+    del current_user
+    with gateway_state_lock:
+        devices = [dict(v) for v in gateway_devices.values()]
+    devices.sort(key=lambda d: d.get("last_seen") or "", reverse=True)
+    return devices
+
+
+@app.get("/gateway/proxy/health")
+async def gateway_proxy_health(current_user: User = Depends(require_admin)):
+    del current_user
+    sockets = proxy_server.sockets if proxy_server else None
+    running = bool(sockets)
+    with gateway_state_lock:
+        connected_devices = len(gateway_devices)
+        total_events = len(gateway_history)
+    return {
+        "running": running,
+        "autostart": SECA_PROXY_AUTOSTART,
+        "listen_host": SECA_PROXY_LISTEN_HOST,
+        "listen_port": SECA_PROXY_LISTEN_PORT,
+        "connected_devices": connected_devices,
+        "total_events": total_events,
+        "started_at": gateway_started_at.isoformat(),
+        "uptime_seconds": int((datetime.utcnow() - gateway_started_at).total_seconds()),
+    }
+
+
+@app.get("/gateway/stream")
+async def gateway_stream(current_user: User = Depends(require_admin)):
+    del current_user
+
+    async def event_gen():
+        last_seen = -1
+        while True:
+            if len(gateway_history) and len(gateway_history) != last_seen:
+                last_seen = len(gateway_history)
+                payload = json.dumps(gateway_history[0])
+                yield f"data: {payload}\n\n"
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+@app.get("/gateway/blocklist/effective")
+async def gateway_effective_blocklist(
+        x_gateway_token: Optional[str] = Header(None, alias="X-Gateway-Token"),
+        db: Session = Depends(get_db)
+):
+    _require_gateway_ingest_token(x_gateway_token)
+    return {"patterns": _effective_blocklist(db)}
+
+
+@app.get("/gateway/blocklist")
+async def gateway_blocklist_list(
+        current_user: User = Depends(require_admin),
+        db: Session = Depends(get_db)
+):
+    del current_user
+    rows = db.query(ProxyBlockRule).order_by(ProxyBlockRule.created_at.desc()).all()
+    return [{
+        "id": r.id,
+        "pattern": r.pattern,
+        "enabled": r.enabled,
+        "note": r.note,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+    } for r in rows]
+
+
+@app.post("/gateway/blocklist")
+async def gateway_blocklist_create(
+        payload: GatewayBlockRuleCreate,
+        current_user: User = Depends(require_admin),
+        db: Session = Depends(get_db)
+):
+    pattern = payload.pattern.strip().lower().strip(".")
+    if not pattern:
+        raise HTTPException(status_code=400, detail="Pattern is required")
+
+    existing = db.query(ProxyBlockRule).filter(ProxyBlockRule.pattern == pattern).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Pattern already exists")
+
+    row = ProxyBlockRule(pattern=pattern, note=(payload.note or "").strip() or None, enabled=payload.enabled)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    create_audit_log(db, current_user.id, "Gateway Blocklist Add", f"Added rule {pattern}")
+    return {
+        "id": row.id,
+        "pattern": row.pattern,
+        "enabled": row.enabled,
+        "note": row.note,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+@app.patch("/gateway/blocklist/{rule_id}")
+async def gateway_blocklist_update(
+        rule_id: int,
+        payload: GatewayBlockRuleUpdate,
+        current_user: User = Depends(require_admin),
+        db: Session = Depends(get_db)
+):
+    row = db.query(ProxyBlockRule).filter(ProxyBlockRule.id == rule_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    if payload.pattern is not None:
+        pattern = payload.pattern.strip().lower().strip(".")
+        if not pattern:
+            raise HTTPException(status_code=400, detail="Pattern cannot be empty")
+        dupe = db.query(ProxyBlockRule).filter(ProxyBlockRule.pattern == pattern, ProxyBlockRule.id != rule_id).first()
+        if dupe:
+            raise HTTPException(status_code=400, detail="Pattern already exists")
+        row.pattern = pattern
+
+    if payload.note is not None:
+        row.note = payload.note.strip() or None
+
+    if payload.enabled is not None:
+        row.enabled = payload.enabled
+
+    db.commit()
+    db.refresh(row)
+    create_audit_log(db, current_user.id, "Gateway Blocklist Update", f"Updated rule {row.pattern} (id={row.id})")
+
+    return {
+        "id": row.id,
+        "pattern": row.pattern,
+        "enabled": row.enabled,
+        "note": row.note,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+@app.delete("/gateway/blocklist/{rule_id}")
+async def gateway_blocklist_delete(
+        rule_id: int,
+        current_user: User = Depends(require_admin),
+        db: Session = Depends(get_db)
+):
+    row = db.query(ProxyBlockRule).filter(ProxyBlockRule.id == rule_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    pattern = row.pattern
+    db.delete(row)
+    db.commit()
+    create_audit_log(db, current_user.id, "Gateway Blocklist Delete", f"Deleted rule {pattern} (id={rule_id})")
+    return {"ok": True}
+
+
 @app.get("/audit")
 async def get_audit_logs(
         current_user: User = Depends(get_current_user),
@@ -1103,7 +1721,12 @@ async def get_audit_logs(
         response = []
         for l in logs:
             user_email = user_email_map.get(l.user_id)
-            user_name = (user_email.split("@", 1)[0] if user_email else f"User #{l.user_id}")
+            if user_email:
+                user_name = user_email.split("@", 1)[0]
+            elif l.user_id is None:
+                user_name = "System"
+            else:
+                user_name = f"User #{l.user_id}"
             response.append({
                 "id": l.id,
                 "user_id": l.user_id,
