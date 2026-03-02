@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Hash, AlertCircle, CheckCircle, AlertTriangle, Loader2, Search, Database } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { apiUrl } from '../config/api';
 
 type ScanResultType = {
   status: 'clean' | 'malicious' | 'suspicious';
@@ -79,7 +80,7 @@ export function HashCheckerView() {
       formData.append('threat_score', mockResult.threatScore.toString());
       formData.append('details', JSON.stringify(mockResult.details));
 
-      const response = await fetch('http://127.0.0.1:8000/hash-scan', {
+      const response = await fetch(apiUrl('/hash-scan'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',

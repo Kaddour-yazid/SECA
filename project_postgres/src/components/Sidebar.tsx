@@ -1,3 +1,4 @@
+import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { Shield, FileText, Globe, Hash, LayoutDashboard, ScrollText, LogOut, Sun, Moon, User, Network, ShieldBan } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
@@ -10,6 +11,13 @@ type SidebarProps = {
 export function Sidebar({ activeView, onViewChange }: SidebarProps) {
   const { user, signOut } = useAuth();
   const { theme, toggleTheme } = useTheme();
+  const navRef = useRef<HTMLElement | null>(null);
+  const itemRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const [activeIndicator, setActiveIndicator] = useState({
+    top: 0,
+    height: 0,
+    ready: false,
+  });
 
   // Base menu items (available to all users)
   const baseMenuItems = [
@@ -30,6 +38,42 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
   const menuItems = user?.is_admin
     ? [...baseMenuItems, ...adminMenuItems]
     : baseMenuItems;
+
+  const updateActiveIndicator = useCallback(() => {
+    const navEl = navRef.current;
+    const activeEl = itemRefs.current[activeView];
+
+    if (!navEl || !activeEl) {
+      setActiveIndicator((prev) => ({ ...prev, ready: false }));
+      return;
+    }
+
+    const navRect = navEl.getBoundingClientRect();
+    const activeRect = activeEl.getBoundingClientRect();
+    const top = activeRect.top - navRect.top + navEl.scrollTop;
+
+    setActiveIndicator({
+      top,
+      height: activeRect.height,
+      ready: true,
+    });
+  }, [activeView]);
+
+  useLayoutEffect(() => {
+    updateActiveIndicator();
+
+    const navEl = navRef.current;
+    const onResize = () => updateActiveIndicator();
+    const onScroll = () => updateActiveIndicator();
+
+    window.addEventListener('resize', onResize);
+    navEl?.addEventListener('scroll', onScroll, { passive: true });
+
+    return () => {
+      window.removeEventListener('resize', onResize);
+      navEl?.removeEventListener('scroll', onScroll);
+    };
+  }, [updateActiveIndicator, menuItems.length]);
 
   return (
     <div className="w-64 bg-slate-800 light:bg-white dark:bg-slate-800 border-r border-slate-700 light:border-slate-200 flex flex-col">
@@ -66,7 +110,16 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
+      <nav ref={navRef} className="relative flex-1 p-4 space-y-1 overflow-y-auto">
+        <div
+          className={`pointer-events-none absolute left-4 right-4 rounded-lg bg-cyan-500 shadow-lg transition-all duration-300 ease-out ${
+            activeIndicator.ready ? 'opacity-100' : 'opacity-0'
+          }`}
+          style={{
+            top: activeIndicator.top,
+            height: activeIndicator.height,
+          }}
+        />
         {menuItems.map((item) => {
           const Icon = item.icon;
           const isActive = activeView === item.id;
@@ -74,10 +127,13 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
           return (
             <button
               key={item.id}
+              ref={(el) => {
+                itemRefs.current[item.id] = el;
+              }}
               onClick={() => onViewChange(item.id)}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
+              className={`relative z-10 w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
                 isActive
-                  ? 'bg-cyan-500 text-white shadow-lg'
+                  ? 'text-white'
                   : 'text-slate-300 bg-transparent hover:bg-cyan-500/10 hover:text-cyan-400'
               }`}
             >

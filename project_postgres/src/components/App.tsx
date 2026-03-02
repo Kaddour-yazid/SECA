@@ -40,7 +40,7 @@ function AppContent() {
       <Sidebar activeView={activeView} onViewChange={handleViewChange} />
       <main className="flex-1 overflow-hidden">
         <div className={activeView === 'dashboard' ? 'h-full' : 'hidden h-full'}>
-          <DashboardView />
+          <DashboardView isActive={activeView === 'dashboard'} />
         </div>
         <div className={activeView === 'file' ? 'h-full' : 'hidden h-full'}>
           <FileScannerView />

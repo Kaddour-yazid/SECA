@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { FileText, Calendar, User, Filter, Download, Search, ChevronDown, Server, Laptop, ShieldAlert, Activity } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { apiUrl } from '../config/api';
 
 type AuditLog = {
   id: number;
@@ -50,8 +51,6 @@ type TrafficMeta = {
   method: string;
   verdict: 'ALLOW' | 'BLOCK' | 'N/A';
 };
-
-const API_BASE = 'http://127.0.0.1:8000';
 
 function parseTrafficMeta(log: AuditLog): TrafficMeta {
   const action = (log.action || '').toUpperCase();
@@ -149,7 +148,7 @@ export function AuditLogsView() {
         throw new Error('No authentication token');
       }
 
-      const res = await fetch(`${API_BASE}/audit?${params}`, {
+      const res = await fetch(apiUrl(`/audit?${params.toString()}`), {
         headers: {
           'Authorization': `Bearer ${token}`
         }
@@ -176,9 +175,9 @@ export function AuditLogsView() {
         return;
       }
       const [healthRes, devicesRes, statsRes] = await Promise.all([
-        fetch(`${API_BASE}/gateway/proxy/health`, { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(`${API_BASE}/gateway/api/devices`, { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(`${API_BASE}/gateway/api/stats`, { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(apiUrl('/gateway/proxy/health'), { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(apiUrl('/gateway/api/devices'), { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(apiUrl('/gateway/api/stats'), { headers: { Authorization: `Bearer ${token}` } }),
       ]);
 
       if (!healthRes.ok || !devicesRes.ok || !statsRes.ok) {

@@ -467,6 +467,7 @@ async def get_scans(
         scan_type: Optional[str] = Query(None),
         status: Optional[str] = Query(None),
         limit: int = Query(100, le=500),
+        include_details: bool = Query(False),
         db: Session = Depends(get_db)
 ):
     try:
@@ -483,14 +484,81 @@ async def get_scans(
 
         scans = query.order_by(Scan.created_at.desc()).limit(limit).all()
 
-        return [{
-            "id": s.id,
-            "scan_type": s.scan_type,
-            "target": s.target,
-            "status": s.status,
-            "threat_score": s.threat_score,
-            "created_at": s.created_at.isoformat()
-        } for s in scans]
+        response = []
+        for s in scans:
+            row = {
+                "id": s.id,
+                "scan_type": s.scan_type,
+                "target": s.target,
+                "status": s.status,
+                "threat_score": s.threat_score,
+                "created_at": s.created_at.isoformat(),
+            }
+            if include_details:
+                row["details"] = s.details
+            response.append(row)
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/scans/stats")
+async def get_scan_stats(
+        current_user: User = Depends(get_current_user),
+        scan_type: Optional[str] = Query(None),
+        db: Session = Depends(get_db)
+):
+    try:
+        base_query = db.query(Scan)
+
+        if not current_user.is_admin:
+            base_query = base_query.filter(Scan.user_id == current_user.id)
+
+        if scan_type:
+            base_query = base_query.filter(Scan.scan_type == scan_type)
+
+        total = base_query.count()
+        clean = base_query.filter(Scan.status == "clean").count()
+        malicious = base_query.filter(Scan.status == "malicious").count()
+        suspicious = base_query.filter(Scan.status == "suspicious").count()
+
+        return {
+            "total": total,
+            "clean": clean,
+            "malicious": malicious,
+            "suspicious": suspicious,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/scans/{scan_id}")
+async def get_scan_by_id(
+        scan_id: int,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    try:
+        query = db.query(Scan).filter(Scan.id == scan_id)
+        if not current_user.is_admin:
+            query = query.filter(Scan.user_id == current_user.id)
+
+        scan = query.first()
+        if not scan:
+            raise HTTPException(status_code=404, detail="Scan not found")
+
+        return {
+            "id": scan.id,
+            "scan_type": scan.scan_type,
+            "target": scan.target,
+            "status": scan.status,
+            "threat_score": scan.threat_score,
+            "details": scan.details,
+            "created_at": scan.created_at.isoformat(),
+            "user_id": scan.user_id,
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

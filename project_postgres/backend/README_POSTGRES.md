@@ -11,6 +11,9 @@ DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/sonprj
 SECA_DB_SSLMODE=prefer
 SECA_PBKDF2_ITERATIONS=600000
 SECA_URL_ENCRYPTION_KEY=<FERNET_KEY>
+SECA_PROXY_AUTOSTART=false
+SECA_PROXY_LISTEN_HOST=127.0.0.1
+SECA_PROXY_LISTEN_PORT=3128
 ```
 
 You can copy from `.env.example`.

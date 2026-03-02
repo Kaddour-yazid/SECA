@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ShieldBan, Plus, Trash2, RefreshCw, Link as LinkIcon } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { apiUrl } from '../config/api';
 
 type BlockRule = {
   id: number;
@@ -11,7 +12,6 @@ type BlockRule = {
   updated_at?: string | null;
 };
 
-const API_BASE = 'http://127.0.0.1:8000';
 function normalizePattern(input: string): string | null {
   let value = input.trim().toLowerCase();
   if (!value) {
@@ -58,7 +58,7 @@ export function AccessControlView() {
       if (showLoader) {
         setLoading(true);
       }
-      const res = await fetch(`${API_BASE}/gateway/blocklist`, {
+      const res = await fetch(apiUrl('/gateway/blocklist'), {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -94,7 +94,7 @@ export function AccessControlView() {
 
     try {
       setSaving(true);
-      const res = await fetch(`${API_BASE}/gateway/blocklist`, {
+      const res = await fetch(apiUrl('/gateway/blocklist'), {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -125,7 +125,7 @@ export function AccessControlView() {
       return;
     }
     try {
-      const res = await fetch(`${API_BASE}/gateway/blocklist/${rule.id}`, {
+      const res = await fetch(apiUrl(`/gateway/blocklist/${rule.id}`), {
         method: 'PATCH',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -148,7 +148,7 @@ export function AccessControlView() {
       return;
     }
     try {
-      const res = await fetch(`${API_BASE}/gateway/blocklist/${ruleId}`, {
+      const res = await fetch(apiUrl(`/gateway/blocklist/${ruleId}`), {
         method: 'DELETE',
         headers: {
           Authorization: `Bearer ${token}`,

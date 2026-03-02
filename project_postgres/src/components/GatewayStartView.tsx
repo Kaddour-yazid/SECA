@@ -13,6 +13,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { apiUrl } from '../config/api';
 
 type EmployeeUsage = {
   name: string;
@@ -132,7 +133,7 @@ export function GatewayStartView() {
 
     const loadScanRows = async () => {
       try {
-        const res = await fetch('http://127.0.0.1:8000/scans?limit=500', {
+        const res = await fetch(apiUrl('/scans?limit=500'), {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!res.ok) return;

@@ -6,6 +6,7 @@ import {
   Sparkles, BarChart3, TrendingUp,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { apiUrl } from '../config/api';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -308,7 +309,7 @@ export function FileScannerView() {
       pollAbortRef.current = controller;
 
       try {
-        const pollRes = await fetch(`http://127.0.0.1:8000/analyze/dynamic/status/${jobId}`, {
+        const pollRes = await fetch(apiUrl(`/analyze/dynamic/status/${jobId}`), {
           headers: { Authorization: `Bearer ${authToken}` },
           signal: controller.signal,
         });
@@ -419,7 +420,7 @@ export function FileScannerView() {
 
     const loadStats = async () => {
       try {
-        const res = await fetch('http://127.0.0.1:8000/threat-feed/stats', {
+        const res = await fetch(apiUrl('/threat-feed/stats'), {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!res.ok) return;
@@ -449,7 +450,7 @@ export function FileScannerView() {
       const fd = new FormData();
       fd.append('file', file);
       fd.append('scan_type', 'file');
-      const response = await fetch('http://127.0.0.1:8000/scan', {
+      const response = await fetch(apiUrl('/scan'), {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: fd,
@@ -527,7 +528,7 @@ export function FileScannerView() {
       // Step 1: POST file → server launches sandbox in background, returns job_id immediately
       const fd = new FormData();
       fd.append('file', file);
-      const startRes = await fetch('http://127.0.0.1:8000/analyze/dynamic', {
+      const startRes = await fetch(apiUrl('/analyze/dynamic'), {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: fd,
@@ -566,7 +567,7 @@ export function FileScannerView() {
     setDynCancelling(true);
     if (dynJobId && token) {
       try {
-        await fetch(`http://127.0.0.1:8000/analyze/dynamic/cancel/${dynJobId}`, {
+        await fetch(apiUrl(`/analyze/dynamic/cancel/${dynJobId}`), {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}` },
         });

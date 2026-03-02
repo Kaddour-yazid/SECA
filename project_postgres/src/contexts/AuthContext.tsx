@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useEffect } from 'react';
+import { apiUrl } from '../config/api';
 
 type User = {
   id: number;
@@ -22,7 +23,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (token) {
-      fetch('http://127.0.0.1:8000/me', {
+      fetch(apiUrl('/me'), {
         headers: { 'Authorization': `Bearer ${token}` }
       })
         .then(res => {
@@ -39,7 +40,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [token]);
 
   const signIn = async (email: string, password: string): Promise<boolean> => {
-    const res = await fetch('http://127.0.0.1:8000/login', {
+    const res = await fetch(apiUrl('/login'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password })
@@ -61,7 +62,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const signUp = async (email: string, password: string): Promise<boolean> => {
-    const res = await fetch('http://127.0.0.1:8000/register', {
+    const res = await fetch(apiUrl('/register'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password })

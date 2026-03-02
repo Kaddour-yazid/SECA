@@ -15,6 +15,7 @@ import {
   TrendingUp,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { apiUrl } from '../config/api';
 
 type LayerResult = {
   passed?: boolean;
@@ -119,7 +120,7 @@ export function URLScannerView() {
 
     const loadStats = async () => {
       try {
-        const res = await fetch('http://127.0.0.1:8000/threat-feed/stats', {
+        const res = await fetch(apiUrl('/threat-feed/stats'), {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!res.ok) return;
@@ -156,7 +157,7 @@ export function URLScannerView() {
 
       const formData = new URLSearchParams({ url });
 
-      const res = await fetch('http://127.0.0.1:8000/url-scan-advanced', {
+      const res = await fetch(apiUrl('/url-scan-advanced'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
