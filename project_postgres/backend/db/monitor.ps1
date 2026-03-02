@@ -88,16 +88,33 @@ while ($true) {
         try {
             $json = Get-Content -Path $t.FullName -Raw | ConvertFrom-Json
             $session = if ($json.sessionId) { "$($json.sessionId)" } else { [guid]::NewGuid().ToString() }
-            $targetRel = "$($json.targetRelativePath)"
+
+            $scanMode = "file"
+            if ($json.PSObject.Properties.Name -contains "scanMode" -and "$($json.scanMode)" -ne "") {
+                $scanMode = "$($json.scanMode)".ToLowerInvariant()
+            }
+
+            $targetRel = ""
+            if ($json.PSObject.Properties.Name -contains "targetRelativePath" -and "$($json.targetRelativePath)" -ne "") {
+                $targetRel = "$($json.targetRelativePath)"
+            }
+
+            $targetUrl = ""
+            if ($json.PSObject.Properties.Name -contains "targetUrl" -and "$($json.targetUrl)" -ne "") {
+                $targetUrl = "$($json.targetUrl)".Trim()
+            }
+
             $duration = 60
-            if ($null -ne $json.durationSeconds -and "$($json.durationSeconds)" -ne "") {
+            if ($json.PSObject.Properties.Name -contains "durationSeconds" -and $null -ne $json.durationSeconds -and "$($json.durationSeconds)" -ne "") {
                 $duration = [int]$json.durationSeconds
             }
             if ($duration -le 0) { $duration = 60 }
             $shutdownAfterDone = $false
-            if ($null -ne $json.shutdownAfterDone) {
+            if ($json.PSObject.Properties.Name -contains "shutdownAfterDone" -and $null -ne $json.shutdownAfterDone) {
                 $shutdownAfterDone = [bool]$json.shutdownAfterDone
             }
+
+            Log "Processing trigger: $($t.Name) mode=$scanMode session=$session duration=${duration}s shutdownAfterDone=$shutdownAfterDone"
 
             $targetPath = Join-Path $ToAnalyze $targetRel
             $sessionOut = Join-Path $OutRoot "session_$session"
@@ -108,6 +125,8 @@ while ($true) {
                 start_time = (Get-Date).ToString("o")
                 duration = $duration
                 target = $targetPath
+                scan_mode = $scanMode
+                target_url = $targetUrl
                 shutdown_after_done = $shutdownAfterDone
             } | ConvertTo-Json | Out-File -FilePath (Join-Path $sessionOut "meta_$session.json") -Encoding UTF8
 
@@ -115,43 +134,71 @@ while ($true) {
             $openSuccess = $false
             $openError = ""
 
-            if (Test-Path $targetPath) {
-                $ext = [System.IO.Path]::GetExtension($targetPath).ToLowerInvariant()
-                try {
-                    if ($ext -in @(".txt", ".log", ".ini", ".cfg")) {
-                        Start-Process -FilePath "notepad.exe" -ArgumentList "`"$targetPath`"" -ErrorAction Stop
-                        $openAction = "notepad"
+            if ($scanMode -eq "url") {
+                if ([string]::IsNullOrWhiteSpace($targetUrl) -or -not ($targetUrl -match '^https?://')) {
+                    $openAction = "url-invalid"
+                    $openError = "targetUrl is missing or invalid"
+                } else {
+                    try {
+                        Start-Process -FilePath "msedge.exe" -ArgumentList @("--inprivate", "--disable-extensions", "--no-first-run", "--new-window", "`"$targetUrl`"") -ErrorAction Stop
+                        $openAction = "msedge-url"
                         $openSuccess = $true
-                    } elseif ($ext -eq ".pdf") {
-                        Start-Process -FilePath "msedge.exe" -ArgumentList "`"$targetPath`"" -ErrorAction Stop
-                        $openAction = "msedge-pdf"
-                        $openSuccess = $true
-                    } elseif ($ext -in @(".exe", ".com", ".scr", ".pif", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".wsf")) {
-                        Start-Process -FilePath $targetPath -ErrorAction Stop
-                        $openAction = "execute"
-                        $openSuccess = $true
-                    } else {
-                        Invoke-Item $targetPath -ErrorAction Stop
-                        $openAction = "invoke-item"
-                        $openSuccess = $true
-                    }
-                } catch {
-                    $openError = "$_"
-                    if ($ext -in @(".txt", ".log", ".ini", ".cfg")) {
-                        $openAction = "notepad"
-                    } else {
+                        Log "URL launch succeeded via Edge: $targetUrl"
+                    } catch {
+                        $openAction = "msedge-url"
+                        $openError = "$_"
+                        Log "Edge URL launch failed, trying shell fallback: $openError"
                         try {
-                            Start-Process -FilePath $targetPath -ErrorAction Stop
-                            $openAction = "fallback-start-process"
+                            Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "start", "", "`"$targetUrl`"") -ErrorAction Stop
+                            $openAction = "default-browser-url"
                             $openSuccess = $true
+                            $openError = ""
+                            Log "URL launch succeeded via shell fallback: $targetUrl"
                         } catch {
                             $openError = "$_"
+                            Log "Shell URL launch failed: $openError"
                         }
                     }
                 }
             } else {
-                $openAction = "target-missing"
-                $openError = "Target file not found at $targetPath"
+                if (Test-Path $targetPath) {
+                    $ext = [System.IO.Path]::GetExtension($targetPath).ToLowerInvariant()
+                    try {
+                        if ($ext -in @(".txt", ".log", ".ini", ".cfg")) {
+                            Start-Process -FilePath "notepad.exe" -ArgumentList "`"$targetPath`"" -ErrorAction Stop
+                            $openAction = "notepad"
+                            $openSuccess = $true
+                        } elseif ($ext -eq ".pdf") {
+                            Start-Process -FilePath "msedge.exe" -ArgumentList "`"$targetPath`"" -ErrorAction Stop
+                            $openAction = "msedge-pdf"
+                            $openSuccess = $true
+                        } elseif ($ext -in @(".exe", ".com", ".scr", ".pif", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".wsf")) {
+                            Start-Process -FilePath $targetPath -ErrorAction Stop
+                            $openAction = "execute"
+                            $openSuccess = $true
+                        } else {
+                            Invoke-Item $targetPath -ErrorAction Stop
+                            $openAction = "invoke-item"
+                            $openSuccess = $true
+                        }
+                    } catch {
+                        $openError = "$_"
+                        if ($ext -in @(".txt", ".log", ".ini", ".cfg")) {
+                            $openAction = "notepad"
+                        } else {
+                            try {
+                                Start-Process -FilePath $targetPath -ErrorAction Stop
+                                $openAction = "fallback-start-process"
+                                $openSuccess = $true
+                            } catch {
+                                $openError = "$_"
+                            }
+                        }
+                    }
+                } else {
+                    $openAction = "target-missing"
+                    $openError = "Target file not found at $targetPath"
+                }
             }
 
             Start-Sleep -Seconds $duration
@@ -169,6 +216,8 @@ while ($true) {
                 session = $session
                 end_time = (Get-Date).ToString("o")
                 out_dir = $sessionOut
+                scan_mode = $scanMode
+                target_url = $targetUrl
                 open_action = $openAction
                 open_success = $openSuccess
                 open_error = $openError
@@ -176,6 +225,7 @@ while ($true) {
             } | ConvertTo-Json | Out-File -FilePath (Join-Path $sessionOut "done_$session.json") -Encoding UTF8
 
             Remove-Item -Path $t.FullName -Force -ErrorAction SilentlyContinue
+            Log "Trigger consumed: $($t.Name)"
 
             if ($shutdownAfterDone) {
                 RequestSandboxShutdown

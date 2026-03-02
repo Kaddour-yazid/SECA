@@ -698,6 +698,63 @@ def layer4_content_analysis(url: str) -> Dict[str, Any]:
     }
 
 
+def _evaluate_url_static(url: str, db: Session) -> Dict[str, Any]:
+    """Compute 4-layer URL static verdict once and reuse for both static + dynamic flows."""
+    # Layer 1: Format Validation
+    layer1 = layer1_format_validation(url)
+
+    # Layer 2: Threat DB check
+    layer2 = layer2_phishtank_check(url, db)
+
+    # Layer 3: Domain reputation
+    layer3 = layer3_domain_reputation(url)
+
+    # Layer 4: Content analysis
+    layer4 = layer4_content_analysis(url)
+
+    threat_score = 0
+    status = "clean"
+
+    if not layer1.get("passed", False):
+        threat_score += 20
+
+    if layer2.get("found"):
+        if layer2.get("verified"):
+            threat_score += 60
+        else:
+            threat_score += 40
+
+    layer3_score = 100 - int(layer3.get("reputation_score", 100))
+    threat_score += int(layer3_score * 0.25)
+    threat_score += int(layer4.get("threat_score", 0))
+
+    if threat_score >= 60 or layer2.get("found"):
+        status = "malicious"
+    elif threat_score >= 35:
+        status = "suspicious"
+    else:
+        status = "clean"
+
+    scan_details = {
+        "url": url,
+        "layers": {
+            "layer1_format": layer1,
+            "layer2_phishtank": layer2,
+            "layer3_reputation": layer3,
+            "layer4_content": layer4,
+        },
+        "overall_threat_score": min(100, threat_score),
+        "status": status,
+        "scan_timestamp": datetime.utcnow().isoformat(),
+    }
+
+    return {
+        "status": status,
+        "threat_score": min(100, threat_score),
+        "details": scan_details,
+    }
+
+
 @app.post("/url-scan-advanced")
 async def url_scan_advanced(
         url: str = Form(...),
@@ -707,62 +764,10 @@ async def url_scan_advanced(
     """Advanced 4-layer URL scanning (authenticated)"""
     try:
         user_id = current_user.id
-
-        # Layer 1: Format Validation
-        layer1 = layer1_format_validation(url)
-
-        # Layer 2: PhishTank Check
-        layer2 = layer2_phishtank_check(url, db)
-
-        # Layer 3: Domain Reputation
-        layer3 = layer3_domain_reputation(url)
-
-        # Layer 4: Content Analysis
-        layer4 = layer4_content_analysis(url)
-
-        # Calculate overall threat score
-        threat_score = 0
-        status = "clean"
-
-        # Layer 1: Format validation issues
-        if not layer1["passed"]:
-            threat_score += 20
-
-        # Layer 2: Database check (MOST IMPORTANT)
-        if layer2["found"]:
-            if layer2.get("verified"):
-                threat_score += 60  # Verified threat = HIGH
-            else:
-                threat_score += 40  # Unverified but found = MEDIUM
-
-        # Layer 3: Domain reputation
-        layer3_score = 100 - layer3["reputation_score"]
-        threat_score += int(layer3_score * 0.25)
-
-        # Layer 4: Content analysis
-        threat_score += layer4["threat_score"]
-
-        # Determine status - FIXED THRESHOLDS
-        if threat_score >= 60 or layer2.get("found"):  # Database hit = auto malicious
-            status = "malicious"
-        elif threat_score >= 35:
-            status = "suspicious"
-        else:
-            status = "clean"
-
-        # Prepare detailed results
-        scan_details = {
-            "url": url,
-            "layers": {
-                "layer1_format": layer1,
-                "layer2_phishtank": layer2,
-                "layer3_reputation": layer3,
-                "layer4_content": layer4
-            },
-            "overall_threat_score": min(100, threat_score),
-            "status": status,
-            "scan_timestamp": datetime.utcnow().isoformat()
-        }
+        static_eval = _evaluate_url_static(url, db)
+        status = static_eval["status"]
+        threat_score = int(static_eval["threat_score"])
+        scan_details = static_eval["details"]
 
         # Save scan to database
         scan = Scan(
@@ -770,7 +775,7 @@ async def url_scan_advanced(
             scan_type="url_advanced",
             target=url,
             status=status,
-            threat_score=min(100, threat_score),
+            threat_score=threat_score,
             details=json.dumps(scan_details)
         )
         db.add(scan)
@@ -784,7 +789,7 @@ async def url_scan_advanced(
             "success": True,
             "scan_id": scan.id,
             "status": status,
-            "threat_score": min(100, threat_score),
+            "threat_score": threat_score,
             "details": scan_details
         }
 
@@ -1981,12 +1986,23 @@ DYNAMIC_DURATION_DOC_SECONDS = max(10, int(os.environ.get("SECA_DYNAMIC_DOC_DURA
 DYNAMIC_DURATION_DEFAULT_SECONDS = max(15, int(os.environ.get("SECA_DYNAMIC_DEFAULT_DURATION_SECONDS", "30")))
 DYNAMIC_DONE_GRACE_SECONDS = max(20, int(os.environ.get("SECA_DYNAMIC_DONE_GRACE_SECONDS", "45")))
 MONITOR_HEARTBEAT_SECONDS = max(5, int(os.environ.get("SECA_MONITOR_HEARTBEAT_SECONDS", "8")))
+URL_DYNAMIC_OBSERVATION_SECONDS = min(
+    90,
+    max(12, int(os.environ.get("SECA_URL_DYNAMIC_OBSERVATION_SECONDS", "25"))),
+)
+URL_DYNAMIC_ALLOWED_DOMAINS = {
+    d.strip().lower()
+    for d in os.environ.get("SECA_URL_DYNAMIC_ALLOWED_DOMAINS", "").split(",")
+    if d.strip()
+}
 logger.info(
-    "Sandbox config: reuse=%s auto_close=%s keep_open=%s heartbeat=%ss",
+    "Sandbox config: reuse=%s auto_close=%s keep_open=%s heartbeat=%ss url_observation=%ss allowlist_size=%s",
     REUSE_SANDBOX_SESSION,
     AUTO_CLOSE_SANDBOX,
     KEEP_SANDBOX_OPEN,
     MONITOR_HEARTBEAT_SECONDS,
+    URL_DYNAMIC_OBSERVATION_SECONDS,
+    len(URL_DYNAMIC_ALLOWED_DOMAINS),
 )
 
 # Job tracking: {job_id: {status, step, progress, result, error}}
@@ -2186,6 +2202,65 @@ def _dynamic_observation_seconds(filename: str) -> int:
     if ext in document_exts:
         return DYNAMIC_DURATION_DOC_SECONDS
     return DYNAMIC_DURATION_DEFAULT_SECONDS
+
+
+def _is_private_or_local_target_url(target_url: str) -> bool:
+    try:
+        parsed = urlparse(target_url)
+    except Exception:
+        return True
+
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        return True
+
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return True
+
+    if host.endswith(".local"):
+        return True
+
+    try:
+        ip = ipaddress.ip_address(host)
+        return bool(
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        )
+    except ValueError:
+        # Hostname (non-IP): permit unless explicitly local-only style.
+        return False
+
+
+def _validate_dynamic_url_target(target_url: str) -> tuple[bool, str]:
+    raw = (target_url or "").strip()
+    if not raw:
+        return False, "URL is required for dynamic analysis."
+
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return False, "Invalid URL."
+
+    if parsed.scheme not in {"http", "https"}:
+        return False, "Only http:// and https:// URLs are allowed for sandbox URL analysis."
+
+    if _is_private_or_local_target_url(raw):
+        return False, "Refusing to analyze local/private network targets in sandbox URL mode."
+
+    host = (parsed.hostname or "").strip().lower()
+    if URL_DYNAMIC_ALLOWED_DOMAINS:
+        host_allowed = any(
+            host == allowed or host.endswith(f".{allowed}")
+            for allowed in URL_DYNAMIC_ALLOWED_DOMAINS
+        )
+        if not host_allowed:
+            return False, "URL host is not in SECA_URL_DYNAMIC_ALLOWED_DOMAINS allowlist."
+
+    return True, ""
 
 
 def _ready_marker_available(max_age_seconds: int = 3600) -> bool:
@@ -2401,11 +2476,14 @@ def _compute_verdict(
     open_action: Optional[str] = None,
     open_success: Optional[bool] = None,
     target_filename: Optional[str] = None,
+    scan_mode: str = "file",
 ) -> tuple:
     """Heuristic scoring on normalised data."""
     score = 0
     findings = []
     action = (open_action or "").lower()
+    mode = (scan_mode or "file").lower()
+    is_url_mode = mode == "url"
     ext = get_file_extension(target_filename or "")
     is_document_open = action in {"msedge-pdf", "notepad", "invoke-item"} or ext in DYNAMIC_DOCUMENT_EXTENSIONS
 
@@ -2453,7 +2531,9 @@ def _compute_verdict(
             findings.append(f"   -> {n['protocol']} {n['destination']}:{n['port']}")
     elif web_net:
         has_other_categories = bool(high_risk_procs or susp_files or susp_reg)
-        if is_document_open:
+        if is_url_mode:
+            findings.append(f"{len(web_net)} outbound web connection(s) observed while browsing target URL")
+        elif is_document_open:
             findings.append(f"{len(web_net)} outbound web connection(s) observed during document open (filtered as likely background)")
         elif open_success is False and not has_other_categories:
             findings.append("Launch failed; outbound web traffic treated as background baseline")
@@ -2674,6 +2754,7 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
             open_action=open_action,
             open_success=open_success,
             target_filename=filename,
+            scan_mode="file",
         )
         processes_for_ui = processes
         network_for_ui = network
@@ -2742,6 +2823,224 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
             logger.info("Leaving Windows Sandbox running for reuse.")
 
 
+def _run_url_sandbox_blocking(job_id: str, target_url: str):
+    """
+    Run dynamic URL analysis in sandbox (Edge InPrivate) with strict backend policy gating.
+    """
+    job = _sandbox_jobs[job_id]
+    start_time = time.time()
+    session_id = str(job.get("session_id") or job_id.replace("-", ""))
+
+    def update(step: str, progress: int):
+        job["step"] = step
+        job["progress"] = progress
+        logger.info(f"[job {job_id[:8]}][url] {step}")
+
+    def read_json_file(path: str) -> list:
+        try:
+            with open(path, "rb") as handle:
+                payload = handle.read()
+            if not payload:
+                return []
+            decoded: Optional[str] = None
+            for encoding in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-8"):
+                try:
+                    text = payload.decode(encoding).strip()
+                    decoded = text
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if decoded is None or not decoded:
+                return []
+            parsed = json.loads(decoded)
+            return parsed if isinstance(parsed, list) else [parsed]
+        except Exception as exc:
+            logger.error(f"Failed to parse JSON file {path}: {exc}")
+            return []
+
+    sandbox_closed_in_try = False
+    try:
+        update("Preparing URL sandbox environment...", 5)
+        scan_duration = URL_DYNAMIC_OBSERVATION_SECONDS
+        update(f"Using restricted URL observation window: {scan_duration}s", 8)
+
+        # URL dynamic scans always launch a fresh visible sandbox VM.
+        # This avoids stale-monitor races and guarantees deterministic URL execution.
+        reuse_existing_monitor = False
+        if _sandbox_alive(include_auxiliary=True):
+            if not close_windows_sandbox():
+                logger.warning("Could not fully stop previous Sandbox session before URL run.")
+
+        update("Launching URL sandbox job...", 16)
+
+        def is_cancel_requested() -> bool:
+            return bool(job.get("cancel_requested"))
+
+        max_attempts = 2
+        retryable_reasons = {
+            "sandbox-not-ready",
+            "sandbox-launch-failed",
+            "sandbox-exited",
+            "monitor-unresponsive",
+        }
+        run_result: Dict[str, Any] = {}
+        last_reason: Optional[str] = None
+        last_diagnostics: Optional[Dict[str, Any]] = None
+
+        for attempt in range(1, max_attempts + 1):
+            attempt_session_id = session_id if attempt == 1 else f"{session_id}_retry{attempt - 1}"
+            if attempt > 1:
+                update("Retrying URL sandbox with fresh VM...", 18)
+                close_windows_sandbox(wait_timeout_seconds=30)
+                reuse_existing_monitor = False
+
+            run_result = sandbox_run_dynamic_scan(
+                file_bytes=b"",
+                filename="url_target.txt",
+                duration=scan_duration,
+                done_grace=DYNAMIC_DONE_GRACE_SECONDS,
+                launch_wsb_file=True,
+                allow_existing_monitor=False,
+                shutdown_after_done=True,
+                on_progress=update,
+                session_id=attempt_session_id,
+                abort_if=is_cancel_requested,
+                scan_mode="url",
+                target_url=target_url,
+            )
+
+            if run_result.get("status") == "done":
+                break
+
+            last_reason = str(run_result.get("reason", "unknown-error"))
+            raw_diagnostics = run_result.get("diagnostics")
+            if isinstance(raw_diagnostics, dict):
+                last_diagnostics = raw_diagnostics
+            else:
+                last_diagnostics = None
+
+            if last_reason == "cancelled":
+                job["status"] = "error"
+                job["error"] = "URL sandbox scan cancelled by user."
+                job["finished_at"] = datetime.utcnow().isoformat()
+                update("URL sandbox scan cancelled.", max(0, job.get("progress", 0)))
+                return
+
+            if last_reason in retryable_reasons and attempt < max_attempts:
+                logger.warning(
+                    "URL sandbox attempt %s/%s failed with reason=%s. Retrying.",
+                    attempt,
+                    max_attempts,
+                    last_reason,
+                )
+                continue
+            break
+
+        if run_result.get("status") != "done":
+            reason = last_reason or str(run_result.get("reason", "unknown-error"))
+            diagnostics = last_diagnostics if last_diagnostics is not None else run_result.get("diagnostics")
+            if reason == "sandbox-not-ready":
+                message = "Sandbox started but URL monitor did not become ready."
+            elif reason == "sandbox-launch-failed":
+                message = "Windows Sandbox did not launch successfully for URL dynamic analysis."
+            elif reason == "sandbox-exited":
+                message = "Sandbox session exited before URL telemetry was collected."
+            elif reason == "scan-timeout":
+                message = "URL dynamic analysis timed out before completion."
+            elif reason == "monitor-unresponsive":
+                message = "Sandbox monitor did not consume URL trigger in time."
+            else:
+                message = f"URL dynamic runner failed: {reason}"
+            if diagnostics:
+                message = f"{message} | diagnostics={json.dumps(diagnostics)}"
+            raise RuntimeError(message)
+
+        update("Reading sandbox URL telemetry...", 80)
+        session = run_result.get("session")
+        out_dir = run_result.get("out_dir")
+        if not session or not out_dir:
+            raise RuntimeError(f"Sandbox runner returned invalid output: {run_result}")
+
+        processes_raw = read_json_file(os.path.join(out_dir, f"processes_{session}.json"))
+        network_raw = read_json_file(os.path.join(out_dir, f"network_{session}.json"))
+        done_raw = read_json_file(os.path.join(out_dir, f"done_{session}.json"))
+        done_info = done_raw[0] if done_raw and isinstance(done_raw[0], dict) else {}
+
+        files_raw = []
+        registry_raw = []
+
+        update("Analyzing URL telemetry...", 90)
+        processes, filtered_processes = _normalise_processes(processes_raw)
+        network, filtered_network = _normalise_network(network_raw)
+        files = _normalise_files(files_raw)
+        registry = _normalise_registry(registry_raw)
+
+        open_action = done_info.get("open_action")
+        open_success = done_info.get("open_success")
+        open_error = done_info.get("open_error")
+        verdict, threat_score, summary = _compute_verdict(
+            processes,
+            network,
+            files,
+            registry,
+            open_action=open_action,
+            open_success=open_success,
+            target_filename=None,
+            scan_mode="url",
+        )
+
+        if filtered_processes:
+            summary.append(f"Filtered {filtered_processes} background process entries from sandbox telemetry")
+        if filtered_network:
+            summary.append(f"Filtered {filtered_network} local/background network entries from sandbox telemetry")
+        summary.insert(0, "Restricted mode: external HTTP(S) target only; private/local addresses blocked by policy")
+        if open_action:
+            launch_state = "success" if open_success is True else "failed" if open_success is False else "unknown"
+            summary.insert(1, f"Launch action: {open_action} ({launch_state})")
+        if open_error:
+            summary.append(f"Launch error: {str(open_error)[:220]}")
+
+        duration = int(time.time() - start_time)
+
+        if AUTO_CLOSE_SANDBOX:
+            update("Shutting down sandbox VM...", 97)
+            sandbox_closed_in_try = close_windows_sandbox(wait_timeout_seconds=35)
+            if not sandbox_closed_in_try:
+                summary.append("Warning: sandbox VM did not fully close; backend will retry cleanup")
+
+        update("URL dynamic analysis complete.", 100)
+        job["status"] = "done"
+        job["finished_at"] = datetime.utcnow().isoformat()
+        job["result"] = {
+            "verdict": verdict,
+            "threatScore": threat_score,
+            "duration": duration,
+            "processes": processes,
+            "network": network,
+            "files": files,
+            "registry": registry,
+            "summary": summary,
+            "targetUrl": target_url,
+            "scanMode": "url",
+        }
+
+    except Exception as e:
+        logger.error(f"URL sandbox job {job_id} failed: {e}", exc_info=True)
+        job["status"] = "error"
+        job["error"] = str(e)
+        job["finished_at"] = datetime.utcnow().isoformat()
+
+    finally:
+        if AUTO_CLOSE_SANDBOX and not sandbox_closed_in_try:
+            if not close_windows_sandbox(wait_timeout_seconds=20):
+                logger.warning(
+                    "Auto-close requested but sandbox processes are still running after URL scan. "
+                    "Manual cleanup may be required."
+                )
+        elif KEEP_SANDBOX_OPEN:
+            logger.info("Leaving Windows Sandbox running for reuse.")
+
+
 @app.post("/analyze/dynamic")
 async def start_dynamic_analysis(
     file: UploadFile = File(...),
@@ -2804,12 +3103,93 @@ async def start_dynamic_analysis(
     return {"job_id": job_id, "status": "running"}
 
 
-@app.post("/analyze/dynamic/cancel/{job_id}")
-async def cancel_dynamic_analysis(
-    job_id: str,
+@app.post("/analyze/url/dynamic")
+async def start_url_dynamic_analysis(
+    url: str = Form(...),
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    """Request cancellation for a running sandbox job."""
+    """
+    Dynamic URL analysis in sandbox.
+    Security policy:
+    - Run static URL analysis first.
+    - If static verdict is malicious => do not execute in sandbox.
+    - Only external http(s) targets allowed (no localhost/private ranges).
+    """
+    sandbox_exe = "C:\\Windows\\System32\\WindowsSandbox.exe"
+    if not os.path.exists(sandbox_exe):
+        raise HTTPException(
+            status_code=500,
+            detail="Windows Sandbox is not installed or not enabled. "
+                   "Enable it via: Turn Windows features on/off -> Windows Sandbox"
+        )
+
+    static_eval = _evaluate_url_static(url, db)
+    static_status = str(static_eval.get("status", "clean"))
+    static_score = int(static_eval.get("threat_score", 0))
+
+    if static_status == "malicious":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Dynamic URL analysis blocked by policy: static verdict is malicious.",
+                "static_status": static_status,
+                "static_threat_score": static_score,
+            },
+        )
+
+    allowed, reason = _validate_dynamic_url_target(url)
+    if not allowed:
+        raise HTTPException(status_code=422, detail=reason)
+
+    _cleanup_terminal_sandbox_jobs()
+    active = [jid for jid, j in _sandbox_jobs.items() if j.get("status") == "running"]
+    if active:
+        raise HTTPException(
+            status_code=409,
+            detail="Another dynamic analysis is already running. Cancel or wait for it to finish."
+        )
+
+    job_id = str(uuid.uuid4())
+    session_id = job_id.replace("-", "")
+
+    _sandbox_jobs[job_id] = {
+        "status": "running",
+        "step": "Preparing URL sandbox environment...",
+        "progress": 3,
+        "result": None,
+        "error": None,
+        "filename": url,
+        "session_id": session_id,
+        "cancel_requested": False,
+        "user_id": current_user.id,
+        "started_at": datetime.utcnow().isoformat(),
+        "finished_at": None,
+        "scan_mode": "url",
+        "target_url": url,
+        "static_status": static_status,
+        "static_threat_score": static_score,
+    }
+
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(
+        _executor,
+        _run_url_sandbox_blocking,
+        job_id,
+        url,
+    )
+
+    logger.info(f"URL dynamic job {job_id[:8]} created for {url} - returning to client immediately")
+    return {
+        "job_id": job_id,
+        "status": "running",
+        "static_status": static_status,
+        "static_threat_score": static_score,
+    }
+
+
+def _cancel_dynamic_job_for_user(job_id: str, current_user: User) -> Dict[str, Any]:
+    """Shared cancel helper for file + URL sandbox jobs."""
     job = _sandbox_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -2837,12 +3217,8 @@ async def cancel_dynamic_analysis(
     return {"job_id": job_id, "status": "cancelling"}
 
 
-@app.get("/analyze/dynamic/status/{job_id}")
-async def get_dynamic_status(
-    job_id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Poll this endpoint every 2s to get sandbox progress and results."""
+def _get_dynamic_job_status_for_user(job_id: str, current_user: User) -> Dict[str, Any]:
+    """Shared status helper for file + URL sandbox jobs."""
     _cleanup_terminal_sandbox_jobs()
     job = _sandbox_jobs.get(job_id)
     if not job:
@@ -2852,11 +3228,15 @@ async def get_dynamic_status(
 
     response = {
         "job_id": job_id,
-        "status": job["status"],   # "running" | "done" | "error"
+        "status": job["status"],
         "step": job.get("step", ""),
         "progress": job.get("progress", 0),
         "filename": job.get("filename", ""),
         "finished_at": job.get("finished_at"),
+        "scan_mode": job.get("scan_mode", "file"),
+        "target_url": job.get("target_url"),
+        "static_status": job.get("static_status"),
+        "static_threat_score": job.get("static_threat_score"),
     }
 
     if job["status"] == "done":
@@ -2865,6 +3245,42 @@ async def get_dynamic_status(
         response["error"] = job.get("error", "Unknown error")
 
     return response
+
+
+@app.post("/analyze/dynamic/cancel/{job_id}")
+async def cancel_dynamic_analysis(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Request cancellation for a running sandbox job."""
+    return _cancel_dynamic_job_for_user(job_id, current_user)
+
+
+@app.post("/analyze/url/dynamic/cancel/{job_id}")
+async def cancel_url_dynamic_analysis(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Request cancellation for a running URL sandbox job."""
+    return _cancel_dynamic_job_for_user(job_id, current_user)
+
+
+@app.get("/analyze/dynamic/status/{job_id}")
+async def get_dynamic_status(
+    job_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Poll this endpoint every 2s to get sandbox progress and results."""
+    return _get_dynamic_job_status_for_user(job_id, current_user)
+
+
+@app.get("/analyze/url/dynamic/status/{job_id}")
+async def get_url_dynamic_status(
+    job_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Poll this endpoint every 2s to get URL sandbox progress and results."""
+    return _get_dynamic_job_status_for_user(job_id, current_user)
 
 
 if __name__ == "__main__":

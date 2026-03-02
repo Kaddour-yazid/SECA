@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Globe,
   AlertCircle,
@@ -10,6 +10,9 @@ import {
   Lock,
   Database,
   Eye,
+  Play,
+  XCircle,
+  Monitor,
   Sparkles,
   BarChart3,
   TrendingUp,
@@ -49,6 +52,63 @@ type ScanResult = {
   };
 };
 
+type DynamicProcess = {
+  pid?: number;
+  name: string;
+  action?: string;
+  suspicious?: boolean;
+  riskLevel?: string;
+  cpu?: number | null;
+};
+
+type DynamicNetwork = {
+  protocol?: string;
+  destination?: string;
+  port?: number;
+  suspicious?: boolean;
+  classification?: string;
+};
+
+type DynamicFile = {
+  path?: string;
+  action?: string;
+  suspicious?: boolean;
+};
+
+type DynamicRegistry = {
+  key?: string;
+  action?: string;
+  suspicious?: boolean;
+};
+
+type DynamicResult = {
+  verdict: 'clean' | 'malicious' | 'suspicious';
+  threatScore: number;
+  duration: number;
+  processes: DynamicProcess[];
+  network: DynamicNetwork[];
+  files: DynamicFile[];
+  registry: DynamicRegistry[];
+  summary: string[];
+  targetUrl?: string;
+  scanMode?: string;
+};
+
+type DynamicPollResponse = {
+  job_id: string;
+  status: 'running' | 'done' | 'error';
+  step: string;
+  progress: number;
+  filename: string;
+  result?: DynamicResult;
+  error?: string;
+  finished_at?: string | null;
+  scan_mode?: string;
+  target_url?: string;
+  static_status?: string;
+  static_threat_score?: number;
+};
+
 type ThreatFeedStats = {
   total_threat_urls: number;
   verified_threat_urls: number;
@@ -68,7 +128,7 @@ const pickRandom = (items: string[]): string => {
 };
 
 export function URLScannerView() {
-  const { user, token } = useAuth();
+  const { user, token, signOut } = useAuth();
   const [url, setUrl] = useState('');
   const [scanning, setScanning] = useState(false);
   const [result, setResult] = useState<ScanResult | null>(null);
@@ -77,6 +137,17 @@ export function URLScannerView() {
   const [currentLayer, setCurrentLayer] = useState(0);
   const [feedStats, setFeedStats] = useState<ThreatFeedStats | null>(null);
   const [hookFact, setHookFact] = useState('Security fact: every URL is checked through four independent risk layers.');
+  const [dynState, setDynState] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  const [dynStep, setDynStep] = useState('');
+  const [dynProgress, setDynProgress] = useState(0);
+  const [dynResult, setDynResult] = useState<DynamicResult | null>(null);
+  const [dynError, setDynError] = useState<string | null>(null);
+  const [dynJobId, setDynJobId] = useState<string | null>(null);
+  const [dynCancelling, setDynCancelling] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollGenerationRef = useRef(0);
+  const activePollJobRef = useRef<string | null>(null);
+  const pollAbortRef = useRef<AbortController | null>(null);
 
   const layerIcons = [Lock, Database, Shield, Eye];
   const layerNames = ['Format Validation', 'Threat Feed Lookup', 'Domain Reputation', 'Content Analysis'];
@@ -85,6 +156,186 @@ export function URLScannerView() {
   const layer2 = result?.details?.layers?.layer2_phishtank || {};
   const layer3 = result?.details?.layers?.layer3_reputation || {};
   const layer4 = result?.details?.layers?.layer4_content || {};
+
+  const clearPoll = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    if (pollAbortRef.current) {
+      pollAbortRef.current.abort();
+      pollAbortRef.current = null;
+    }
+    activePollJobRef.current = null;
+    pollGenerationRef.current += 1;
+  };
+
+  const startPolling = (jobId: string, authToken: string) => {
+    clearPoll();
+    activePollJobRef.current = jobId;
+    const pollGeneration = pollGenerationRef.current;
+
+    const isCurrentPoll = () =>
+      activePollJobRef.current === jobId && pollGenerationRef.current === pollGeneration;
+
+    const pollOnce = async () => {
+      if (!isCurrentPoll()) return;
+
+      if (pollAbortRef.current) pollAbortRef.current.abort();
+      const controller = new AbortController();
+      pollAbortRef.current = controller;
+
+      try {
+        const pollRes = await fetch(apiUrl(`/analyze/url/dynamic/status/${jobId}`), {
+          headers: { Authorization: `Bearer ${authToken}` },
+          signal: controller.signal,
+        });
+        if (!isCurrentPoll()) return;
+
+        if (!pollRes.ok) {
+          if (pollRes.status === 401) {
+            clearPoll();
+            setDynError('Session expired. Please sign in again.');
+            setDynState('error');
+            setDynJobId(null);
+            setDynCancelling(false);
+            signOut();
+            return;
+          }
+          if (pollRes.status === 404) {
+            clearPoll();
+            setDynError('URL dynamic job not found anymore. Start a new run.');
+            setDynState('error');
+            setDynJobId(null);
+            setDynCancelling(false);
+            return;
+          }
+          throw new Error(`Poll error ${pollRes.status}`);
+        }
+
+        const poll: DynamicPollResponse = await pollRes.json();
+        if (!isCurrentPoll()) return;
+
+        setDynStep(poll.step || '');
+        setDynProgress(typeof poll.progress === 'number' ? poll.progress : 0);
+
+        if (poll.status === 'done' && poll.result) {
+          clearPoll();
+          setDynState('done');
+          setDynResult(poll.result);
+          setDynJobId(null);
+          setDynCancelling(false);
+          setDynError(null);
+        } else if (poll.status === 'error') {
+          clearPoll();
+          setDynState('error');
+          setDynError(poll.error || 'Dynamic URL analysis failed.');
+          setDynJobId(null);
+          setDynCancelling(false);
+        } else {
+          setDynState('running');
+        }
+      } catch (e) {
+        if (!isCurrentPoll()) return;
+        if ((e as Error).name === 'AbortError') return;
+        clearPoll();
+        setDynState('error');
+        setDynError(e instanceof Error ? e.message : 'Polling failed.');
+        setDynJobId(null);
+        setDynCancelling(false);
+      }
+    };
+
+    void pollOnce();
+    pollRef.current = setInterval(() => {
+      void pollOnce();
+    }, 1500);
+  };
+
+  const startDynamicUrlScan = async () => {
+    if (!token || !result) {
+      setDynError('Run static scan first, then start dynamic analysis.');
+      return;
+    }
+
+    if (result.status === 'malicious') {
+      setDynError('Dynamic URL analysis blocked by policy: static verdict is malicious.');
+      return;
+    }
+
+    setDynState('running');
+    setDynError(null);
+    setDynResult(null);
+    setDynStep('Preparing URL sandbox environment...');
+    setDynProgress(5);
+    setDynCancelling(false);
+
+    try {
+      const formData = new URLSearchParams({ url: result.details.url || url });
+      const res = await fetch(apiUrl('/analyze/url/dynamic'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Authorization: `Bearer ${token}`,
+        },
+        body: formData,
+      });
+
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (res.status === 401) {
+          signOut();
+          throw new Error('Session expired. Please sign in again.');
+        }
+        if (res.status === 409) {
+          throw new Error('Another dynamic analysis is already running. Cancel or wait for completion.');
+        }
+        if (res.status === 422) {
+          const detail = payload?.detail;
+          if (typeof detail === 'string') {
+            throw new Error(detail);
+          }
+          if (detail?.message) {
+            throw new Error(detail.message);
+          }
+        }
+        throw new Error(payload?.detail || payload?.message || `Dynamic scan failed (${res.status})`);
+      }
+
+      const jobId = String(payload.job_id || '');
+      if (!jobId) {
+        throw new Error('Backend did not return a dynamic job id.');
+      }
+      setDynJobId(jobId);
+      startPolling(jobId, token);
+    } catch (e) {
+      clearPoll();
+      setDynState('error');
+      setDynError(e instanceof Error ? e.message : 'Failed to start dynamic URL analysis.');
+      setDynJobId(null);
+      setDynCancelling(false);
+    }
+  };
+
+  const cancelDynamic = async () => {
+    if (!token || !dynJobId) return;
+    setDynCancelling(true);
+    try {
+      await fetch(apiUrl(`/analyze/url/dynamic/cancel/${dynJobId}`), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch {
+      // Best effort cancellation.
+    } finally {
+      clearPoll();
+      setDynState('idle');
+      setDynStep('');
+      setDynProgress(0);
+      setDynJobId(null);
+      setDynCancelling(false);
+    }
+  };
 
   const refreshHookFact = (nextResult?: ScanResult | null, statsOverride?: ThreatFeedStats | null) => {
     const stats = statsOverride ?? feedStats;
@@ -135,6 +386,8 @@ export function URLScannerView() {
     void loadStats();
   }, [token]);
 
+  useEffect(() => () => clearPoll(), []);
+
   const handleScan = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!url || !user || !token) {
@@ -146,6 +399,14 @@ export function URLScannerView() {
     setResult(null);
     setError(null);
     setCurrentLayer(0);
+    clearPoll();
+    setDynState('idle');
+    setDynStep('');
+    setDynProgress(0);
+    setDynResult(null);
+    setDynError(null);
+    setDynJobId(null);
+    setDynCancelling(false);
 
     try {
       new URL(url);
@@ -400,6 +661,15 @@ export function URLScannerView() {
             </div>
           )}
 
+          {dynError && (
+            <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 mb-6">
+              <div className="flex items-center gap-2 text-red-400">
+                <AlertCircle className="w-5 h-5" />
+                <p className="font-medium">{dynError}</p>
+              </div>
+            </div>
+          )}
+
           {result && !scanning && (
             <div className="space-y-6">
               <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-8 text-center">
@@ -473,6 +743,132 @@ export function URLScannerView() {
                     </div>
                   )}
                 </div>
+              </div>
+
+              <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-6">
+                <div className="flex items-center justify-between gap-4 mb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 bg-purple-500/10 border border-purple-500/30 rounded-lg flex items-center justify-center text-purple-400">
+                      <Monitor className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h4 className="text-white font-semibold">Layer 5: Dynamic URL Analysis (Sandbox)</h4>
+                      <p className="text-slate-400 text-sm">Runs only for static clean/suspicious URLs. Local/private targets are blocked.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {dynState === 'running' ? (
+                      <button
+                        onClick={cancelDynamic}
+                        disabled={dynCancelling}
+                        className="px-4 py-2 rounded-lg border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-60 transition flex items-center gap-2"
+                      >
+                        <XCircle className="w-4 h-4" />
+                        {dynCancelling ? 'Cancelling...' : 'Cancel'}
+                      </button>
+                    ) : (
+                      <button
+                        onClick={startDynamicUrlScan}
+                        disabled={result.status === 'malicious'}
+                        className="px-4 py-2 rounded-lg bg-gradient-to-r from-purple-600 to-indigo-600 text-white font-semibold hover:from-purple-700 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition flex items-center gap-2"
+                      >
+                        <Play className="w-4 h-4" />
+                        Run Dynamic URL Scan
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {result.status === 'malicious' && (
+                  <div className="mb-4 bg-red-500/10 border border-red-500/30 rounded-lg p-3 text-red-300 text-sm">
+                    Policy block active: this URL is statically malicious, so sandbox launch is refused.
+                  </div>
+                )}
+
+                {dynState === 'running' && (
+                  <div className="rounded-lg border border-purple-500/30 bg-slate-900/50 p-4 space-y-3">
+                    <div className="flex items-center justify-between text-sm">
+                      <p className="text-slate-300">{dynStep || 'Running sandbox URL analysis...'}</p>
+                      <p className="text-purple-300 font-semibold">{dynProgress}%</p>
+                    </div>
+                    <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-purple-600 to-indigo-600 transition-all duration-500"
+                        style={{ width: `${Math.max(0, Math.min(100, dynProgress))}%` }}
+                      />
+                    </div>
+                    {dynJobId && <p className="text-xs text-slate-500">Job ID: {dynJobId}</p>}
+                  </div>
+                )}
+
+                {dynResult && dynState === 'done' && (
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                      <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-3">
+                        <p className="text-slate-400 text-xs">Verdict</p>
+                        <p className={`font-semibold ${
+                          dynResult.verdict === 'malicious' ? 'text-red-400' : dynResult.verdict === 'suspicious' ? 'text-yellow-400' : 'text-green-400'
+                        }`}>{dynResult.verdict.toUpperCase()}</p>
+                      </div>
+                      <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-3">
+                        <p className="text-slate-400 text-xs">Dynamic Threat Score</p>
+                        <p className="text-white font-semibold">{dynResult.threatScore}/100</p>
+                      </div>
+                      <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-3">
+                        <p className="text-slate-400 text-xs">Duration</p>
+                        <p className="text-white font-semibold">{dynResult.duration}s</p>
+                      </div>
+                      <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-3">
+                        <p className="text-slate-400 text-xs">Observed Connections</p>
+                        <p className="text-white font-semibold">{dynResult.network.length}</p>
+                      </div>
+                    </div>
+
+                    {dynResult.summary.length > 0 && (
+                      <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-white font-medium mb-2">Dynamic Summary</p>
+                        <ul className="space-y-1">
+                          {dynResult.summary.slice(0, 8).map((item, idx) => (
+                            <li key={idx} className="text-sm text-slate-300">- {item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                      <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-white font-medium mb-2">Top Processes</p>
+                        {dynResult.processes.length === 0 ? (
+                          <p className="text-sm text-slate-400">No notable process activity.</p>
+                        ) : (
+                          <div className="space-y-1">
+                            {dynResult.processes.slice(0, 6).map((p, idx) => (
+                              <div key={`${p.name}-${p.pid ?? idx}`} className="text-sm text-slate-300 flex items-center justify-between">
+                                <span>{p.name}{p.pid ? ` (PID ${p.pid})` : ''}</span>
+                                {p.suspicious ? <span className="text-red-400">suspicious</span> : <span className="text-slate-500">normal</span>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-white font-medium mb-2">Top Network Connections</p>
+                        {dynResult.network.length === 0 ? (
+                          <p className="text-sm text-slate-400">No external network telemetry captured.</p>
+                        ) : (
+                          <div className="space-y-1">
+                            {dynResult.network.slice(0, 6).map((n, idx) => (
+                              <div key={`${n.destination ?? 'dest'}-${n.port ?? idx}`} className="text-sm text-slate-300 flex items-center justify-between">
+                                <span>{n.protocol ?? 'TCP'}{' -> '}{n.destination ?? 'unknown'}:{n.port ?? 0}</span>
+                                {n.suspicious ? <span className="text-red-400">suspicious</span> : <span className="text-slate-500">{n.classification ?? 'normal'}</span>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-6">
