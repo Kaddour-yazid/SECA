@@ -757,9 +757,9 @@ async def on_shutdown():
 
 @app.middleware("http")
 async def log_requests(request, call_next):
-    logger.info(f"âž¡ï¸ Incoming request: {request.method} {request.url.path}")
+    logger.info(f"Incoming request: {request.method} {request.url.path}")
     response = await call_next(request)
-    logger.info(f"â¬…ï¸ Response status: {response.status_code}")
+    logger.info(f"Response status: {response.status_code}")
     return response
 
 # CORS Configuration
@@ -947,6 +947,7 @@ def layer3_domain_reputation(url: str) -> Dict[str, Any]:
 def layer4_content_analysis(url: str) -> Dict[str, Any]:
     """Layer 4: Content Analysis (simulated)"""
     parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
 
     indicators = []
     threat_score = 0
@@ -970,6 +971,38 @@ def layer4_content_analysis(url: str) -> Dict[str, Any]:
     if 'token' in url.lower() or 'session' in url.lower():
         indicators.append("Contains authentication parameters")
         threat_score += 10
+
+    # Open-source-inspired URL heuristics used by many scanners.
+    if host.startswith("xn--") or any(ord(char) > 127 for char in host):
+        indicators.append("Internationalized/punycode host detected")
+        threat_score += 15
+
+    if host and re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", host):
+        indicators.append("Direct IPv4 host used instead of domain")
+        threat_score += 20
+
+    if "@" in url:
+        indicators.append("URL contains '@' userinfo obfuscation pattern")
+        threat_score += 15
+
+    if len(url) >= 200:
+        indicators.append("Very long URL length")
+        threat_score += 20
+    elif len(url) >= 120:
+        indicators.append("Long URL length")
+        threat_score += 10
+
+    if url.count("%") >= 6:
+        indicators.append("Heavy URL encoding detected")
+        threat_score += 8
+
+    if parsed.port and parsed.port not in {80, 443}:
+        indicators.append("Non-standard destination port")
+        threat_score += 8
+
+    if host.count(".") >= 4:
+        indicators.append("Deep subdomain chain detected")
+        threat_score += 8
 
     return {
         "indicators": indicators,
@@ -1740,7 +1773,7 @@ async def get_scans(
     try:
         query = db.query(Scan)
 
-        # Nonâ€‘admins see only their own scans; admins see all
+        # Non-admins see only their own scans; admins see all
         if not current_user.is_admin:
             query = query.filter(Scan.user_id == current_user.id)
 
@@ -2176,7 +2209,7 @@ async def get_users(
 @app.get("/me")
 async def read_users_me(current_user: User = Depends(get_current_user)):
     """Get current authenticated user info"""
-    logger.info("âœ… /me endpoint called")
+    logger.info("/me endpoint called")
     return {
         "id": current_user.id,
         "email": current_user.email,
@@ -2483,20 +2516,37 @@ def _kill_sandbox_processes_once() -> None:
 def close_windows_sandbox(wait_timeout_seconds: int = 25) -> bool:
     """Terminate any running Windows Sandbox process and wait until fully stopped."""
     try:
+        if not _sandbox_alive(include_auxiliary=True):
+            return True
+
+        total_timeout = max(12, int(wait_timeout_seconds))
+        primary_deadline = time.time() + max(8, int(total_timeout * 0.6))
+        auxiliary_deadline = time.time() + total_timeout
+
         attempts = 3
-        per_attempt_wait = max(4, int(wait_timeout_seconds // attempts))
         for attempt in range(1, attempts + 1):
             _kill_sandbox_processes_once()
-            deadline = time.time() + per_attempt_wait
-            while time.time() < deadline:
+
+            while time.time() < primary_deadline:
+                if not _sandbox_alive(include_auxiliary=False):
+                    break
+                time.sleep(0.5)
+
+            if not _sandbox_alive(include_auxiliary=False):
+                while time.time() < auxiliary_deadline:
+                    if not _sandbox_alive(include_auxiliary=True):
+                        return True
+                    time.sleep(0.5)
                 if not _sandbox_alive(include_auxiliary=True):
                     return True
-                time.sleep(0.5)
-            logger.warning(
-                "Sandbox processes still running after close attempt %s/%s",
-                attempt,
-                attempts,
-            )
+                logger.info(
+                    "Sandbox guest closed but auxiliary VM memory process is still draining. "
+                    "Final cleanup will continue in the background."
+                )
+                return False
+
+            logger.warning("Sandbox primary processes still running after close attempt %s/%s", attempt, attempts)
+
         return not _sandbox_alive(include_auxiliary=True)
     except Exception as e:
         logger.error(f"Error closing sandbox: {e}")
@@ -3066,6 +3116,8 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
         open_action = done_info.get("open_action")
         open_success = done_info.get("open_success")
         open_error = done_info.get("open_error")
+        file_extension = str(done_info.get("file_extension") or "").strip().lower()
+        file_category = str(done_info.get("file_category") or "").strip().lower()
         verdict, threat_score, summary = _compute_verdict(
             processes,
             network,
@@ -3102,6 +3154,12 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
         if open_action:
             launch_state = "success" if open_success is True else "failed" if open_success is False else "unknown"
             summary.insert(0, f"Launch action: {open_action} ({launch_state})")
+        if file_category:
+            ext_label = file_extension or get_file_extension(filename)
+            if ext_label:
+                summary.insert(1, f"Sandbox opened file as {file_category} ({ext_label})")
+            else:
+                summary.insert(1, f"Sandbox opened file as {file_category}")
         if open_error:
             summary.append(f"Launch error: {str(open_error)[:220]}")
         duration = int(time.time() - start_time)
@@ -3109,7 +3167,7 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
         if AUTO_CLOSE_SANDBOX:
             update("Shutting down sandbox VM...", 97)
             sandbox_closed_in_try = close_windows_sandbox(wait_timeout_seconds=35)
-            if not sandbox_closed_in_try:
+            if not sandbox_closed_in_try and _sandbox_alive(include_auxiliary=False):
                 summary.append("Warning: sandbox VM did not fully close; backend will retry cleanup")
 
         update("Analysis complete.", 100)
@@ -3119,6 +3177,9 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
             "verdict": verdict,
             "threatScore": threat_score,
             "duration": duration,
+            "openAction": open_action,
+            "fileCategory": file_category,
+            "fileExtension": file_extension,
             "processes": processes_for_ui,
             "network": network_for_ui,
             "files": files_for_ui,
@@ -3325,7 +3386,7 @@ def _run_url_sandbox_blocking(job_id: str, target_url: str):
         if AUTO_CLOSE_SANDBOX:
             update("Shutting down sandbox VM...", 97)
             sandbox_closed_in_try = close_windows_sandbox(wait_timeout_seconds=35)
-            if not sandbox_closed_in_try:
+            if not sandbox_closed_in_try and _sandbox_alive(include_auxiliary=False):
                 summary.append("Warning: sandbox VM did not fully close; backend will retry cleanup")
 
         update("URL dynamic analysis complete.", 100)

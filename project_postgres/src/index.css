@@ -5,13 +5,13 @@
 /* Root variables for both themes */
 :root {
   /* Light mode colors */
-  --bg-primary: #f8fafc;
-  --bg-secondary: #f1f5f9;
-  --bg-tertiary: #e2e8f0;
+  --bg-primary: #f4f7fb;
+  --bg-secondary: #edf3fa;
+  --bg-tertiary: #e2ebf6;
   --text-primary: #0f172a;
-  --text-secondary: #475569;
-  --text-tertiary: #64748b;
-  --border-color: #cbd5e1;
+  --text-secondary: #243447;
+  --text-tertiary: #4b5f75;
+  --border-color: #d6e2ee;
 }
 
 .dark {
@@ -33,29 +33,29 @@ body {
 
 /* Light mode overrides for specific elements */
 .light .bg-slate-900 {
-  background-color: #f8fafc !important;
+  background-color: #f4f7fb !important;
 }
 
 .light .bg-slate-800 {
-  background-color: #ffffff !important;
+  background-color: #fbfdff !important;
 }
 
 .light .bg-slate-800\/50 {
-  background-color: #f1f5f9 !important;
+  background-color: #eef3fa !important;
 }
 
 .light .bg-slate-800\/60,
 .light .bg-slate-800\/70 {
-  background-color: #e9eef5 !important;
+  background-color: #e8eff8 !important;
 }
 
 .light .bg-slate-900\/50 {
-  background-color: #e2e8f0 !important;
+  background-color: #e2ebf6 !important;
 }
 
 .light .bg-slate-900\/60,
 .light .bg-slate-900\/70 {
-  background-color: #dce4ef !important;
+  background-color: #d9e5f2 !important;
 }
 
 .light .text-white {
@@ -68,23 +68,88 @@ body {
 }
 
 .light .text-slate-300 {
-  color: #475569 !important;
+  color: #2f435a !important;
 }
 
 .light .text-slate-400 {
-  color: #64748b !important;
+  color: #3f536b !important;
 }
 
 .light .text-slate-500 {
-  color: #64748b !important;
+  color: #4b5f75 !important;
+}
+
+.light .text-slate-600 {
+  color: #5a6f86 !important;
 }
 
 .light .border-slate-700 {
-  border-color: #cbd5e1 !important;
+  border-color: #d6e2ee !important;
 }
 
 .light .border-slate-600 {
-  border-color: #cbd5e1 !important;
+  border-color: #d6e2ee !important;
+}
+
+/* Better interaction colors in light mode */
+.light .hover\:bg-slate-700:hover {
+  background-color: #e6edf8 !important;
+}
+
+.light .hover\:text-white:hover {
+  color: #0f172a !important;
+}
+
+.light .hover\:border-slate-400:hover {
+  border-color: #aac0db !important;
+}
+
+.light .bg-cyan-500 {
+  background-color: #0ea5c6 !important;
+}
+
+.light .hover\:bg-cyan-600:hover {
+  background-color: #0b8fae !important;
+}
+
+/* Darker accent text for readability in light mode */
+.light .text-cyan-300,
+.light .text-cyan-400 {
+  color: #0b6f8f !important;
+}
+
+.light .text-blue-300,
+.light .text-blue-400 {
+  color: #1d4f9e !important;
+}
+
+.light .text-violet-300,
+.light .text-violet-400,
+.light .text-purple-300,
+.light .text-purple-400 {
+  color: #5b3ea8 !important;
+}
+
+.light .text-green-400 {
+  color: #1f7a3d !important;
+}
+
+.light .text-yellow-400 {
+  color: #9a6b00 !important;
+}
+
+.light .text-red-400 {
+  color: #b4374d !important;
+}
+
+/* Keep light-mode badge backgrounds readable with darker text */
+.light .bg-cyan-500\/10 {
+  background-color: rgba(14, 165, 198, 0.12) !important;
+}
+
+.light .bg-purple-500\/10,
+.light .bg-violet-500\/10 {
+  background-color: rgba(109, 82, 196, 0.12) !important;
 }
 
 /* Gateway page tune-ups for light mode */

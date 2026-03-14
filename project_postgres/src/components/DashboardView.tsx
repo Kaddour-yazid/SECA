@@ -153,6 +153,23 @@ const toneClass = (tone: HighlightTone = 'neutral'): string => {
   return 'text-slate-200 border-slate-700 bg-slate-800/60';
 };
 
+const normalizeScanType = (scanType: string | undefined): { label: string; accentClass: string } => {
+  const raw = (scanType || '').toLowerCase();
+  if (raw.includes('url')) {
+    return { label: 'URL Scanning', accentClass: 'text-violet-300' };
+  }
+  if (raw.includes('file')) {
+    return { label: 'File Scanning', accentClass: 'text-cyan-300' };
+  }
+  if (raw.includes('hash')) {
+    return { label: 'Hash Checking', accentClass: 'text-amber-300' };
+  }
+  if (raw.includes('gateway')) {
+    return { label: 'Gateway Monitoring', accentClass: 'text-emerald-300' };
+  }
+  return { label: 'Security Scan', accentClass: 'text-slate-200' };
+};
+
 export function DashboardView({ isActive = true }: DashboardViewProps) {
   const { token } = useAuth();
   const [scans, setScans] = useState<ScanRow[]>([]);
@@ -376,39 +393,46 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
 
           {!loading && !error && scans.length > 0 && (
             <ul className="space-y-3">
-              {scans.slice(0, 10).map((scan) => (
-                <li
-                  key={scan.id}
-                  className="bg-slate-900/50 rounded-lg border border-slate-700 hover:border-cyan-500/40 transition"
-                >
-                  <button
-                    onClick={() => void openScanReport(scan.id)}
-                    className="w-full flex items-center justify-between p-4 text-left"
+              {scans.slice(0, 10).map((scan) => {
+                const scanType = normalizeScanType(scan.scan_type);
+                return (
+                  <li
+                    key={scan.id}
+                    className="bg-slate-900/50 rounded-lg border border-slate-700 hover:border-cyan-500/40 transition"
                   >
-                    <div className="flex items-center gap-4">
-                      <div className={`w-2 h-2 rounded-full ${
-                        scan.status === 'clean' ? 'bg-green-400' :
-                        scan.status === 'malicious' ? 'bg-red-400' :
-                        'bg-yellow-400'
-                      }`} />
-                      <div>
-                        <p className="text-white font-medium">{scan.target || 'N/A'}</p>
-                        <p className="text-slate-400 text-sm">{scan.scan_type || 'Unknown'}</p>
+                    <button
+                      onClick={() => void openScanReport(scan.id)}
+                      className="w-full flex items-center justify-between p-4 text-left"
+                    >
+                      <div className="flex items-center gap-4 min-w-0">
+                        <div className={`w-2 h-2 rounded-full ${
+                          scan.status === 'clean' ? 'bg-green-400' :
+                          scan.status === 'malicious' ? 'bg-red-400' :
+                          'bg-yellow-400'
+                        }`} />
+                        <div className="min-w-0">
+                          <p className={`font-bold text-lg leading-tight ${scanType.accentClass}`}>
+                            {scanType.label}
+                          </p>
+                          <p className="text-slate-400 text-sm truncate" title={scan.target || 'N/A'}>
+                            {scan.target || 'N/A'}
+                          </p>
+                        </div>
                       </div>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <span className={`px-3 py-1 rounded-full text-sm font-medium ${
-                        scan.status === 'clean' ? 'bg-green-500/10 text-green-400 border border-green-500/30' :
-                        scan.status === 'malicious' ? 'bg-red-500/10 text-red-400 border border-red-500/30' :
-                        'bg-yellow-500/10 text-yellow-400 border border-yellow-500/30'
-                      }`}>
-                        {scan.status || 'Unknown'}
-                      </span>
-                      <span className="text-slate-500 text-sm">Open report</span>
-                    </div>
-                  </button>
-                </li>
-              ))}
+                      <div className="flex items-center gap-3">
+                        <span className={`px-3 py-1 rounded-full text-sm font-medium ${
+                          scan.status === 'clean' ? 'bg-green-500/10 text-green-400 border border-green-500/30' :
+                          scan.status === 'malicious' ? 'bg-red-500/10 text-red-400 border border-red-500/30' :
+                          'bg-yellow-500/10 text-yellow-400 border border-yellow-500/30'
+                        }`}>
+                          {scan.status || 'Unknown'}
+                        </span>
+                        <span className="text-slate-500 text-sm">Open report</span>
+                      </div>
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
@@ -458,7 +482,7 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
                     </div>
                     <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-4">
                       <p className="text-slate-400 text-xs mb-1 flex items-center gap-1"><Activity className="w-3 h-3" />Type</p>
-                      <p className="text-white font-medium">{selectedScan.scan_type || 'Unknown'}</p>
+                      <p className="text-white font-medium">{normalizeScanType(selectedScan.scan_type).label}</p>
                     </div>
                     <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-4">
                       <p className="text-slate-400 text-xs mb-1 flex items-center gap-1"><Calendar className="w-3 h-3" />Created</p>

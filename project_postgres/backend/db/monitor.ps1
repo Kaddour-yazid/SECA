@@ -37,6 +37,192 @@ function RequestSandboxShutdown {
     }
 }
 
+function Resolve-ToolPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Candidates
+    )
+
+    foreach ($candidate in $Candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+        }
+        $resolved = Join-Path $Tools $candidate
+        if (Test-Path $resolved) {
+            return $resolved
+        }
+    }
+
+    return $null
+}
+
+function Open-TargetFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TargetPath
+    )
+
+    $ext = [System.IO.Path]::GetExtension($TargetPath).ToLowerInvariant()
+    $textExts = @(".txt", ".log", ".ini", ".cfg", ".csv", ".json", ".xml", ".yaml", ".yml", ".md")
+    $pdfExts = @(".pdf")
+    $execExts = @(".exe", ".com", ".scr", ".pif", ".msi")
+    $scriptExts = @(".bat", ".cmd", ".ps1", ".vbs", ".js", ".wsf", ".hta")
+    $documentExts = @(".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".rtf")
+    $mediaExts = @(".png", ".jpg", ".jpeg", ".gif", ".bmp", ".mp4", ".mp3", ".wav", ".avi", ".mkv")
+    $archiveExts = @(".zip", ".rar", ".7z", ".cab", ".iso")
+
+    $fileCategory = "generic"
+    if ($textExts -contains $ext) {
+        $fileCategory = "text"
+    } elseif ($pdfExts -contains $ext) {
+        $fileCategory = "pdf"
+    } elseif (($execExts + $scriptExts) -contains $ext) {
+        $fileCategory = "executable"
+    } elseif ($documentExts -contains $ext) {
+        $fileCategory = "document"
+    } elseif ($mediaExts -contains $ext) {
+        $fileCategory = "media"
+    } elseif ($archiveExts -contains $ext) {
+        $fileCategory = "archive"
+    }
+
+    $result = @{
+        action = "none"
+        success = $false
+        error = ""
+        extension = $ext
+        category = $fileCategory
+    }
+
+    $notepadPath = Join-Path $env:WINDIR "System32\notepad.exe"
+    $cmdPath = Join-Path $env:WINDIR "System32\cmd.exe"
+    $explorerPath = Join-Path $env:WINDIR "explorer.exe"
+    $edgePath = Join-Path $env:ProgramFiles "Microsoft\Edge\Application\msedge.exe"
+    $paintPath = Join-Path $env:WINDIR "System32\mspaint.exe"
+    $sumatraPath = Resolve-ToolPath @(
+        "SumatraPDF.exe",
+        "sumatrapdf\SumatraPDF.exe",
+        "sumatra\SumatraPDF.exe"
+    )
+    $sevenZipPath = Resolve-ToolPath @(
+        "7zFM.exe",
+        "7zip\7zFM.exe",
+        "7-Zip\7zFM.exe"
+    )
+    $vlcPath = Resolve-ToolPath @(
+        "vlc.exe",
+        "vlc\vlc.exe"
+    )
+    $libreOfficePath = Resolve-ToolPath @(
+        "soffice.exe",
+        "LibreOffice\program\soffice.exe",
+        "libreoffice\program\soffice.exe"
+    )
+
+    try {
+        if ($fileCategory -eq "text") {
+            if ($sumatraPath) {
+                Start-Process -FilePath $sumatraPath -ArgumentList @("`"$TargetPath`"") -ErrorAction Stop
+                $result.action = "sumatra-text"
+                $result.success = $true
+                return $result
+            }
+            if (Test-Path $notepadPath) {
+                Start-Process -FilePath $notepadPath -ArgumentList @($TargetPath) -ErrorAction Stop
+                $result.action = "notepad"
+                $result.success = $true
+                return $result
+            }
+        }
+
+        if ($fileCategory -eq "pdf") {
+            if ($sumatraPath) {
+                Start-Process -FilePath $sumatraPath -ArgumentList @("`"$TargetPath`"") -ErrorAction Stop
+                $result.action = "sumatra-pdf"
+                $result.success = $true
+                return $result
+            }
+            Start-Process -FilePath $edgePath -ArgumentList @("--inprivate", "--disable-extensions", "--no-first-run", "--new-window", "`"$TargetPath`"") -ErrorAction Stop
+            $result.action = "msedge-pdf"
+            $result.success = $true
+            return $result
+        }
+
+        if ($fileCategory -eq "executable") {
+            Start-Process -FilePath $TargetPath -ErrorAction Stop
+            $result.action = "execute"
+            $result.success = $true
+            return $result
+        }
+
+        if ($fileCategory -eq "document") {
+            if ($libreOfficePath) {
+                Start-Process -FilePath $libreOfficePath -ArgumentList @("`"$TargetPath`"") -ErrorAction Stop
+                $result.action = "libreoffice"
+                $result.success = $true
+                return $result
+            }
+            if ($sumatraPath) {
+                Start-Process -FilePath $sumatraPath -ArgumentList @("`"$TargetPath`"") -ErrorAction Stop
+                $result.action = "sumatra-document"
+                $result.success = $true
+                return $result
+            }
+        }
+
+        if ($fileCategory -eq "archive" -and $sevenZipPath) {
+            Start-Process -FilePath $sevenZipPath -ArgumentList @("`"$TargetPath`"") -ErrorAction Stop
+            $result.action = "7zip"
+            $result.success = $true
+            return $result
+        }
+
+        if ($fileCategory -eq "media") {
+            if ($vlcPath) {
+                Start-Process -FilePath $vlcPath -ArgumentList @("`"$TargetPath`"") -ErrorAction Stop
+                $result.action = "vlc"
+                $result.success = $true
+                return $result
+            }
+            if (@(".png", ".jpg", ".jpeg", ".gif", ".bmp") -contains $ext -and (Test-Path $paintPath)) {
+                Start-Process -FilePath $paintPath -ArgumentList @("`"$TargetPath`"") -ErrorAction Stop
+                $result.action = "mspaint"
+                $result.success = $true
+                return $result
+            }
+        }
+
+        Start-Process -FilePath $cmdPath -ArgumentList @("/c", "start", "", "`"$TargetPath`"") -ErrorAction Stop
+        $result.action = "shell-open"
+        $result.success = $true
+        return $result
+    } catch {
+        $result.error = "$_"
+    }
+
+    try {
+        Start-Process -FilePath $explorerPath -ArgumentList "/select,`"$TargetPath`"" -ErrorAction Stop
+        $result.action = "explorer-select"
+        $result.success = $true
+        $result.error = ""
+        return $result
+    } catch {
+        $result.error = "$_"
+    }
+
+    try {
+        Invoke-Item $TargetPath -ErrorAction Stop
+        $result.action = "invoke-item"
+        $result.success = $true
+        $result.error = ""
+        return $result
+    } catch {
+        $result.error = "$_"
+    }
+
+    return $result
+}
+
 $deadline = (Get-Date).AddSeconds($StartupTimeoutSec)
 while (-not (Test-Path -Path $ShareRoot)) {
     LogBootstrap "Waiting for mapped share root: $ShareRoot"
@@ -130,9 +316,14 @@ while ($true) {
                 shutdown_after_done = $shutdownAfterDone
             } | ConvertTo-Json | Out-File -FilePath (Join-Path $sessionOut "meta_$session.json") -Encoding UTF8
 
+            Remove-Item -Path $t.FullName -Force -ErrorAction SilentlyContinue
+            Log "Trigger consumed: $($t.Name)"
+
             $openAction = "none"
             $openSuccess = $false
             $openError = ""
+            $fileExtension = ""
+            $fileCategory = ""
 
             if ($scanMode -eq "url") {
                 if ([string]::IsNullOrWhiteSpace($targetUrl) -or -not ($targetUrl -match '^https?://')) {
@@ -162,38 +353,16 @@ while ($true) {
                 }
             } else {
                 if (Test-Path $targetPath) {
-                    $ext = [System.IO.Path]::GetExtension($targetPath).ToLowerInvariant()
-                    try {
-                        if ($ext -in @(".txt", ".log", ".ini", ".cfg")) {
-                            Start-Process -FilePath "notepad.exe" -ArgumentList "`"$targetPath`"" -ErrorAction Stop
-                            $openAction = "notepad"
-                            $openSuccess = $true
-                        } elseif ($ext -eq ".pdf") {
-                            Start-Process -FilePath "msedge.exe" -ArgumentList "`"$targetPath`"" -ErrorAction Stop
-                            $openAction = "msedge-pdf"
-                            $openSuccess = $true
-                        } elseif ($ext -in @(".exe", ".com", ".scr", ".pif", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".wsf")) {
-                            Start-Process -FilePath $targetPath -ErrorAction Stop
-                            $openAction = "execute"
-                            $openSuccess = $true
-                        } else {
-                            Invoke-Item $targetPath -ErrorAction Stop
-                            $openAction = "invoke-item"
-                            $openSuccess = $true
-                        }
-                    } catch {
-                        $openError = "$_"
-                        if ($ext -in @(".txt", ".log", ".ini", ".cfg")) {
-                            $openAction = "notepad"
-                        } else {
-                            try {
-                                Start-Process -FilePath $targetPath -ErrorAction Stop
-                                $openAction = "fallback-start-process"
-                                $openSuccess = $true
-                            } catch {
-                                $openError = "$_"
-                            }
-                        }
+                    $openResult = Open-TargetFile -TargetPath $targetPath
+                    $openAction = "$($openResult.action)"
+                    $openSuccess = [bool]$openResult.success
+                    $openError = "$($openResult.error)"
+                    $fileExtension = "$($openResult.extension)"
+                    $fileCategory = "$($openResult.category)"
+                    if ($openSuccess) {
+                        Log "File launch succeeded via $openAction category=$fileCategory ext=$fileExtension path=$targetPath"
+                    } else {
+                        Log "File launch failed action=$openAction category=$fileCategory ext=$fileExtension error=$openError"
                     }
                 } else {
                     $openAction = "target-missing"
@@ -221,11 +390,10 @@ while ($true) {
                 open_action = $openAction
                 open_success = $openSuccess
                 open_error = $openError
+                file_extension = $fileExtension
+                file_category = $fileCategory
                 shutdown_after_done = $shutdownAfterDone
             } | ConvertTo-Json | Out-File -FilePath (Join-Path $sessionOut "done_$session.json") -Encoding UTF8
-
-            Remove-Item -Path $t.FullName -Force -ErrorAction SilentlyContinue
-            Log "Trigger consumed: $($t.Name)"
 
             if ($shutdownAfterDone) {
                 RequestSandboxShutdown
