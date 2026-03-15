@@ -14,9 +14,51 @@ SECA_URL_ENCRYPTION_KEY=<FERNET_KEY>
 SECA_PROXY_AUTOSTART=false
 SECA_PROXY_LISTEN_HOST=127.0.0.1
 SECA_PROXY_LISTEN_PORT=3128
+SECA_OTP_EXPIRE_MINUTES=10
+SECA_OTP_RESEND_COOLDOWN_SECONDS=60
+SECA_OTP_MAX_REQUESTS_PER_HOUR=5
+SECA_OTP_SECRET=<RANDOM_SECRET>
+SECA_SMTP_HOST=smtp.example.com
+SECA_SMTP_PORT=587
+SECA_SMTP_USERNAME=alerts@example.com
+SECA_SMTP_PASSWORD=<SMTP_PASSWORD>
+SECA_SMTP_FROM_EMAIL=alerts@example.com
+SECA_SMTP_FROM_NAME=SECA Security
+SECA_SMTP_USE_TLS=true
+SECA_SMTP_USE_SSL=false
 ```
 
 You can copy from `.env.example`.
+
+If SMTP is not configured, OTP delivery falls back to development mode and the backend logs the code. That is acceptable for local testing only. For production, configure SMTP and disable the fallback.
+
+Example provider settings:
+
+Gmail with App Password:
+
+```env
+SECA_SMTP_HOST=smtp.gmail.com
+SECA_SMTP_PORT=587
+SECA_SMTP_USERNAME=youraddress@gmail.com
+SECA_SMTP_PASSWORD=<16_CHAR_APP_PASSWORD>
+SECA_SMTP_FROM_EMAIL=youraddress@gmail.com
+SECA_SMTP_FROM_NAME=SECA Security
+SECA_SMTP_USE_TLS=true
+SECA_SMTP_USE_SSL=false
+```
+
+Outlook / Microsoft 365 with SMTP AUTH enabled:
+
+```env
+SECA_SMTP_HOST=smtp.office365.com
+SECA_SMTP_PORT=587
+SECA_SMTP_USERNAME=youraddress@outlook.com
+SECA_SMTP_PASSWORD=<ACCOUNT_PASSWORD_OR_APP_PASSWORD>
+SECA_SMTP_FROM_EMAIL=youraddress@outlook.com
+SECA_SMTP_FROM_NAME=SECA Security
+SECA_SMTP_USE_TLS=true
+SECA_SMTP_USE_SSL=false
+```
 
 Generate an encryption key:
 

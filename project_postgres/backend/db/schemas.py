@@ -13,6 +13,26 @@ class UserLogin(BaseModel):
     password: str
 
 
+class SignupOtpRequest(BaseModel):
+    email: str
+    password: str
+
+
+class SignupOtpVerify(BaseModel):
+    email: str
+    code: str
+
+
+class PasswordResetRequest(BaseModel):
+    email: str
+
+
+class PasswordResetConfirm(BaseModel):
+    email: str
+    code: str
+    new_password: str
+
+
 class UserResponse(BaseModel):
     id: int
     email: str

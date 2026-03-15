@@ -13,6 +13,7 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     scans = relationship("Scan", back_populates="user")
     audit_logs = relationship("AuditLog", back_populates="user")
+    otp_requests = relationship("EmailOtp", back_populates="user")
 
 class Scan(Base):
     __tablename__ = "scans"
@@ -71,3 +72,19 @@ class ProxyBlockRule(Base):
     note = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class EmailOtp(Base):
+    __tablename__ = "email_otps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    email = Column(String, index=True, nullable=False)
+    purpose = Column(String, index=True, nullable=False)
+    code_hash = Column(String, nullable=False)
+    password_hash = Column(String, nullable=True)
+    expires_at = Column(DateTime, nullable=False)
+    consumed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="otp_requests")

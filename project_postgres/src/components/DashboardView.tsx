@@ -96,6 +96,30 @@ const buildDetailSummary = (scan: ScanRow | null): ScanDetailSummary => {
     };
   }
 
+  if (type.includes('email')) {
+    const auth = parsed?.authentication ?? {};
+    const urls = parsed?.url_analysis ?? {};
+    const attachments = parsed?.attachment_analysis ?? {};
+    const signals = Array.isArray(parsed?.phishing_signals) ? parsed.phishing_signals : [];
+    const authFailures = [auth?.spf, auth?.dkim, auth?.dmarc].filter((value: string) => value === 'fail' || value === 'softfail').length;
+
+    return {
+      highlights: [
+        { label: 'Threat score', value: `${parsed?.overall_threat_score ?? scan.threat_score ?? 0}/100`, tone: scan.status === 'malicious' ? 'bad' : scan.status === 'suspicious' ? 'warn' : 'good' },
+        { label: 'Sender', value: String(parsed?.headers?.from || 'Unknown') },
+        { label: 'URLs extracted', value: `${Number(urls?.count ?? 0)}`, tone: Number(urls?.malicious ?? 0) > 0 ? 'bad' : Number(urls?.suspicious ?? 0) > 0 ? 'warn' : 'good' },
+        { label: 'Attachments', value: `${Number(attachments?.count ?? 0)}`, tone: Number(attachments?.malicious ?? 0) > 0 ? 'bad' : Number(attachments?.suspicious ?? 0) > 0 ? 'warn' : 'good' },
+        { label: 'Auth failures', value: `${authFailures}`, tone: authFailures > 0 ? 'bad' : 'good' },
+        { label: 'Phishing signals', value: `${signals.length}`, tone: signals.length > 0 ? 'warn' : 'good' },
+      ],
+      notes: uniqueStrings([
+        parsed?.subject ? `Subject: ${parsed.subject}` : '',
+        parsed?.headers?.reply_to && parsed?.headers?.reply_to !== parsed?.headers?.from ? `Reply-To: ${parsed.headers.reply_to}` : '',
+        ...signals.slice(0, 3),
+      ]),
+    };
+  }
+
   if (type.includes('hash')) {
     const detections = Number(parsed?.detections ?? 0);
     const engines = Number(parsed?.engines ?? 0);
@@ -157,6 +181,9 @@ const normalizeScanType = (scanType: string | undefined): { label: string; accen
   const raw = (scanType || '').toLowerCase();
   if (raw.includes('url')) {
     return { label: 'URL Scanning', accentClass: 'text-violet-300' };
+  }
+  if (raw.includes('email')) {
+    return { label: 'Email Scanning', accentClass: 'text-fuchsia-300' };
   }
   if (raw.includes('file')) {
     return { label: 'File Scanning', accentClass: 'text-cyan-300' };

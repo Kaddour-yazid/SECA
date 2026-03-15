@@ -7,6 +7,9 @@ from sqlalchemy.orm import Session
 from typing import Dict, Any, Optional, List, Tuple
 from pydantic import BaseModel
 from collections import deque
+from email import policy
+from email.parser import BytesParser, Parser
+from email.utils import getaddresses
 import asyncio
 import uuid
 import fnmatch
@@ -24,6 +27,8 @@ import logging
 import threading
 from urllib.parse import urlparse, urlsplit
 from datetime import datetime, timedelta
+from html import unescape
+import unicodedata
 
 from database import get_db, engine, Base
 from models import User, Scan, AuditLog, PhishTankEntry, ThreatUrl, ProxyBlockRule
@@ -792,6 +797,535 @@ def create_system_audit_log(db: Session, action: str, details: str):
     db.commit()
 
 
+EMAIL_URL_RE = re.compile(r"https?://[^\s<>'\"()]+", re.IGNORECASE)
+EMAIL_URGENCY_PATTERNS = [
+    "urgent",
+    "immediately",
+    "verify your account",
+    "confirm your identity",
+    "payment failed",
+    "invoice attached",
+    "reset your password",
+    "your mailbox",
+    "click here",
+    "limited time",
+    "suspended",
+    "security alert",
+]
+EMAIL_CREDENTIAL_PATTERNS = [
+    "password",
+    "login",
+    "signin",
+    "sign in",
+    "2fa",
+    "mfa",
+    "one-time code",
+    "otp",
+    "bank account",
+    "wallet",
+    "gift card",
+]
+EMAIL_BRAND_KEYWORDS = [
+    "microsoft",
+    "google",
+    "paypal",
+    "bank",
+    "amazon",
+    "apple",
+    "linkedin",
+    "facebook",
+    "instagram",
+    "github",
+]
+DOMAIN_ONLY_REPUTATION_HOSTS = {
+    "drive.google.com",
+    "docs.google.com",
+    "mail.google.com",
+    "accounts.google.com",
+    "ssl.gstatic.com",
+    "dropbox.com",
+    "www.dropbox.com",
+    "onedrive.live.com",
+    "1drv.ms",
+    "wetransfer.com",
+    "www.wetransfer.com",
+    "mega.nz",
+    "discord.com",
+    "cdn.discordapp.com",
+}
+
+
+def _clean_email_text(text: str) -> str:
+    cleaned = unescape(text or "")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _normalize_email_label(label: str) -> str:
+    normalized = unicodedata.normalize("NFKD", label or "")
+    normalized = normalized.encode("ascii", "ignore").decode("ascii")
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized.lower()).strip()
+    return normalized
+
+
+def _parse_pasted_email_summary(raw_text: str) -> Dict[str, Any]:
+    field_map = {
+        "de": "from",
+        "from": "from",
+        "a": "to",
+        "to": "to",
+        "date": "date",
+        "objet": "subject",
+        "subject": "subject",
+        "reply to": "reply_to",
+        "repondre a": "reply_to",
+        "envoye par": "mailed_by",
+        "envoy par": "mailed_by",
+        "signed by": "signed_by",
+        "signe par": "signed_by",
+        "sign par": "signed_by",
+        "securite": "security",
+        "securit": "security",
+        "security": "security",
+    }
+    parsed: Dict[str, str] = {}
+    body_lines: List[str] = []
+
+    for line in (raw_text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        match = re.match(r"^\s*([^:]+):\s*(.+?)\s*$", line)
+        if not match:
+            body_lines.append(stripped)
+            continue
+
+        normalized_label = _normalize_email_label(match.group(1))
+        field_key = field_map.get(normalized_label)
+        if not field_key:
+            body_lines.append(stripped)
+            continue
+        parsed[field_key] = match.group(2).strip()
+
+    from_name, from_address = ("", "")
+    to_name, to_address = ("", "")
+    reply_to_name, reply_to_address = ("", "")
+
+    if parsed.get("from"):
+        entries = getaddresses([parsed["from"]])
+        if entries:
+            from_name, from_address = entries[0]
+    if parsed.get("to"):
+        entries = getaddresses([parsed["to"]])
+        if entries:
+            to_name, to_address = entries[0]
+    if parsed.get("reply_to"):
+        entries = getaddresses([parsed["reply_to"]])
+        if entries:
+            reply_to_name, reply_to_address = entries[0]
+
+    return {
+        "subject": parsed.get("subject", "").strip(),
+        "from_name": from_name,
+        "from_address": from_address,
+        "to_name": to_name,
+        "to_address": to_address,
+        "reply_to_name": reply_to_name,
+        "reply_to_address": reply_to_address,
+        "date": parsed.get("date", "").strip(),
+        "mailed_by": parsed.get("mailed_by", "").strip(),
+        "signed_by": parsed.get("signed_by", "").strip(),
+        "security": parsed.get("security", "").strip(),
+        "body_text": "\n".join(body_lines).strip(),
+        "recognized_fields": len(parsed),
+    }
+
+
+def _strip_html_tags(html_text: str) -> str:
+    text = re.sub(r"(?is)<script.*?>.*?</script>", " ", html_text or "")
+    text = re.sub(r"(?is)<style.*?>.*?</style>", " ", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    return _clean_email_text(text)
+
+
+def _extract_urls_from_text(text: str) -> List[str]:
+    values = []
+    for match in EMAIL_URL_RE.findall(text or ""):
+        candidate = match.rstrip(".,);]>\"'")
+        if candidate:
+            values.append(candidate)
+    # preserve order
+    deduped: List[str] = []
+    seen = set()
+    for value in values:
+        if value not in seen:
+            deduped.append(value)
+            seen.add(value)
+    return deduped
+
+
+def _extract_html_link_indicators(html_text: str) -> List[Dict[str, str]]:
+    indicators: List[Dict[str, str]] = []
+    pattern = re.compile(r'(?is)<a\b[^>]*href=["\']?([^"\' >]+)[^>]*>(.*?)</a>')
+    for href, anchor_raw in pattern.findall(html_text or ""):
+        anchor_text = _strip_html_tags(anchor_raw)
+        href_clean = (href or "").strip()
+        if not href_clean:
+            continue
+        indicators.append({
+            "href": href_clean,
+            "text": anchor_text,
+            "mismatch": bool(anchor_text and anchor_text.startswith(("http://", "https://", "www.")) and anchor_text not in href_clean),
+        })
+    return indicators
+
+
+def _parse_auth_signal_from_headers(message: Any) -> Dict[str, str]:
+    auth_blob = " ".join(message.get_all("Authentication-Results", []) or [])
+    spf_blob = " ".join(message.get_all("Received-SPF", []) or [])
+    combined = f"{auth_blob} {spf_blob}".lower()
+
+    def pick(label: str) -> str:
+        patterns = [
+            rf"{label}\s*=\s*(pass|fail|softfail|neutral|temperror|permerror|none)",
+            rf"{label}\s+(pass|fail|softfail|neutral|temperror|permerror|none)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, combined)
+            if match:
+                return match.group(1)
+        return "unknown"
+
+    return {
+        "spf": pick("spf"),
+        "dkim": pick("dkim"),
+        "dmarc": pick("dmarc"),
+    }
+
+
+def _email_domain(address: str) -> str:
+    address = (address or "").strip().lower()
+    if "@" not in address:
+        return ""
+    return address.split("@", 1)[1]
+
+
+def _score_email_heuristics(
+    subject: str,
+    combined_text: str,
+    auth_results: Dict[str, str],
+    from_name: str,
+    from_domain: str,
+    reply_to_domain: str,
+    html_links: List[Dict[str, str]],
+    url_results: List[Dict[str, Any]],
+    attachment_results: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    indicators: List[str] = []
+    score = 0
+    lowered_subject = (subject or "").lower()
+    lowered_text = (combined_text or "").lower()
+
+    urgency_hits = [item for item in EMAIL_URGENCY_PATTERNS if item in lowered_subject or item in lowered_text]
+    if urgency_hits:
+        indicators.append(f"Urgency language detected ({', '.join(urgency_hits[:3])})")
+        score += min(18, 6 * len(urgency_hits))
+
+    credential_hits = [item for item in EMAIL_CREDENTIAL_PATTERNS if item in lowered_text]
+    if credential_hits:
+        indicators.append(f"Credential/payment lure language detected ({', '.join(credential_hits[:3])})")
+        score += min(20, 5 * len(credential_hits))
+
+    if auth_results.get("dmarc") == "fail":
+        indicators.append("DMARC failed")
+        score += 25
+    if auth_results.get("spf") in {"fail", "softfail"}:
+        indicators.append(f"SPF {auth_results.get('spf')}")
+        score += 15
+    if auth_results.get("dkim") == "fail":
+        indicators.append("DKIM failed")
+        score += 15
+
+    if reply_to_domain and from_domain and reply_to_domain != from_domain:
+        indicators.append("Reply-To domain does not match sender domain")
+        score += 18
+
+    brand_hits = [brand for brand in EMAIL_BRAND_KEYWORDS if brand in (from_name or "").lower()]
+    if brand_hits and from_domain and not any(brand in from_domain for brand in brand_hits):
+        indicators.append("Display name suggests brand impersonation")
+        score += 16
+
+    mismatch_count = sum(1 for item in html_links if item.get("mismatch"))
+    if mismatch_count:
+        indicators.append(f"{mismatch_count} HTML link text mismatch indicator(s)")
+        score += min(18, mismatch_count * 6)
+
+    malicious_urls = sum(1 for item in url_results if item.get("status") == "malicious")
+    suspicious_urls = sum(1 for item in url_results if item.get("status") == "suspicious")
+    if malicious_urls:
+        indicators.append(f"{malicious_urls} extracted URL(s) classified as malicious")
+        score += min(35, malicious_urls * 18)
+    if suspicious_urls:
+        indicators.append(f"{suspicious_urls} extracted URL(s) classified as suspicious")
+        score += min(20, suspicious_urls * 8)
+
+    bad_attachments = sum(1 for item in attachment_results if item.get("status") == "malicious")
+    suspicious_attachments = sum(1 for item in attachment_results if item.get("status") == "suspicious")
+    if bad_attachments:
+        indicators.append(f"{bad_attachments} attachment(s) classified as malicious")
+        score += min(35, bad_attachments * 18)
+    if suspicious_attachments:
+        indicators.append(f"{suspicious_attachments} attachment(s) classified as suspicious")
+        score += min(20, suspicious_attachments * 8)
+
+    if len(url_results) >= 6:
+        indicators.append("Email contains unusually high number of links")
+        score += 8
+
+    return {
+        "score": min(100, score),
+        "indicators": indicators,
+        "urgency_hits": urgency_hits[:5],
+        "credential_hits": credential_hits[:5],
+    }
+
+
+def _analyze_email_payload(
+    *,
+    email_bytes: Optional[bytes],
+    raw_email: Optional[str],
+    db: Session,
+    source_name: str,
+) -> Dict[str, Any]:
+    parsed_message = None
+    parse_source = "raw_text" if raw_email else "eml_file"
+    pasted_summary = _parse_pasted_email_summary(raw_email or "") if raw_email else None
+
+    if email_bytes:
+        parsed_message = BytesParser(policy=policy.default).parsebytes(email_bytes)
+    elif raw_email:
+        parsed_message = Parser(policy=policy.default).parsestr(raw_email)
+    else:
+        raise ValueError("Either email_bytes or raw_email must be provided.")
+
+    headers = {key: str(value) for key, value in parsed_message.items()}
+    subject = str(parsed_message.get("Subject") or "").strip() or "(No subject)"
+    from_entries = getaddresses(parsed_message.get_all("From", []))
+    reply_to_entries = getaddresses(parsed_message.get_all("Reply-To", []))
+    return_path_entries = getaddresses(parsed_message.get_all("Return-Path", []))
+
+    from_name, from_address = from_entries[0] if from_entries else ("", "")
+    reply_to_name, reply_to_address = reply_to_entries[0] if reply_to_entries else ("", "")
+    _, return_path_address = return_path_entries[0] if return_path_entries else ("", "")
+
+    plain_parts: List[str] = []
+    html_parts: List[str] = []
+    attachments: List[Dict[str, Any]] = []
+
+    if parsed_message.is_multipart():
+        for part in parsed_message.walk():
+            if part.is_multipart():
+                continue
+            content_disposition = (part.get_content_disposition() or "").lower()
+            filename = part.get_filename()
+            payload = part.get_payload(decode=True) or b""
+            content_type = part.get_content_type()
+
+            if content_disposition == "attachment" or filename:
+                if len(attachments) >= 5:
+                    continue
+                attachment_name = filename or f"attachment_{len(attachments) + 1}"
+                static_result = _build_file_scan_result(
+                    filename=attachment_name,
+                    content_type=content_type,
+                    file_bytes=payload,
+                    db=db,
+                )
+                attachments.append({
+                    "filename": attachment_name,
+                    "content_type": content_type,
+                    "size": len(payload),
+                    "status": static_result["status"],
+                    "threat_score": static_result["threat_score"],
+                    "risk_category": static_result["details"].get("layers", {}).get("layer1_info", {}).get("riskCategory", "unknown"),
+                })
+                continue
+
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                decoded = payload.decode(charset, errors="replace")
+            except Exception:
+                decoded = payload.decode("utf-8", errors="replace")
+
+            if content_type == "text/plain":
+                plain_parts.append(decoded)
+            elif content_type == "text/html":
+                html_parts.append(decoded)
+    else:
+        payload = parsed_message.get_payload(decode=True)
+        if payload is None:
+            payload = str(parsed_message.get_payload() or "").encode("utf-8", errors="replace")
+        charset = parsed_message.get_content_charset() or "utf-8"
+        try:
+            decoded = payload.decode(charset, errors="replace")
+        except Exception:
+            decoded = payload.decode("utf-8", errors="replace")
+        if parsed_message.get_content_type() == "text/html":
+            html_parts.append(decoded)
+        else:
+            plain_parts.append(decoded)
+
+    if (
+        raw_email
+        and pasted_summary
+        and pasted_summary.get("recognized_fields", 0) >= 3
+        and subject == "(No subject)"
+        and not from_address
+    ):
+        parse_source = "pasted_summary"
+        subject = pasted_summary.get("subject") or "(No subject)"
+        from_name = pasted_summary.get("from_name", "")
+        from_address = pasted_summary.get("from_address", "")
+        reply_to_name = pasted_summary.get("reply_to_name", "")
+        reply_to_address = pasted_summary.get("reply_to_address", "")
+        plain_parts = [pasted_summary.get("body_text", "") or raw_email]
+
+    plain_text = _clean_email_text("\n".join(plain_parts))
+    html_text = "\n".join(html_parts)
+    html_text_content = _strip_html_tags(html_text)
+    combined_text = _clean_email_text(" ".join([subject, plain_text, html_text_content]))
+
+    extracted_urls = _extract_urls_from_text(f"{plain_text}\n{html_text}")
+    html_link_details = _extract_html_link_indicators(html_text)
+    for item in html_link_details:
+        href = item.get("href")
+        if href and href not in extracted_urls:
+            extracted_urls.append(href)
+    extracted_urls = extracted_urls[:15]
+    web_urls: List[str] = []
+    ignored_links: List[str] = []
+    for extracted_url in extracted_urls:
+        scheme = urlparse(extracted_url).scheme.lower()
+        if scheme in {"http", "https"}:
+            web_urls.append(extracted_url)
+        else:
+            ignored_links.append(extracted_url)
+
+    url_results: List[Dict[str, Any]] = []
+    for extracted_url in web_urls:
+        static_eval = _evaluate_url_static(extracted_url, db)
+        url_results.append({
+            "url": extracted_url,
+            "status": static_eval["status"],
+            "threat_score": int(static_eval["threat_score"]),
+            "matched_feed": bool(static_eval["details"]["layers"]["layer2_phishtank"].get("found")),
+            "match_type": static_eval["details"]["layers"]["layer2_phishtank"].get("match_type"),
+        })
+
+    auth_results = _parse_auth_signal_from_headers(parsed_message)
+    if parse_source == "pasted_summary" and pasted_summary:
+        mailed_by = pasted_summary.get("mailed_by", "").lower()
+        signed_by = pasted_summary.get("signed_by", "").lower()
+        if mailed_by and from_address and mailed_by == _email_domain(from_address):
+            auth_results["spf"] = "pass"
+        if signed_by and from_address and signed_by == _email_domain(from_address):
+            auth_results["dkim"] = "pass"
+    from_domain = _email_domain(from_address)
+    reply_to_domain = _email_domain(reply_to_address)
+    return_path_domain = _email_domain(return_path_address)
+    heuristic_summary = _score_email_heuristics(
+        subject=subject,
+        combined_text=combined_text,
+        auth_results=auth_results,
+        from_name=from_name,
+        from_domain=from_domain,
+        reply_to_domain=reply_to_domain,
+        html_links=html_link_details,
+        url_results=url_results,
+        attachment_results=attachments,
+    )
+
+    max_url_score = max((item["threat_score"] for item in url_results), default=0)
+    max_attachment_score = max((item["threat_score"] for item in attachments), default=0)
+    combined_score = min(
+        100,
+        heuristic_summary["score"]
+        + min(25, round(max_url_score * 0.35))
+        + min(25, round(max_attachment_score * 0.35)),
+    )
+
+    status = "clean"
+    if combined_score >= 70 or any(item["status"] == "malicious" for item in url_results + attachments):
+        status = "malicious"
+    elif combined_score >= 35 or any(item["status"] == "suspicious" for item in url_results + attachments):
+        status = "suspicious"
+
+    target_label = subject
+    if subject == "(No subject)" and from_address:
+        target_label = from_address
+    if subject == "(No subject)" and not from_address:
+        target_label = source_name
+
+    details = {
+        "source": parse_source,
+        "source_name": source_name,
+        "subject": subject,
+        "headers": {
+            "from": from_address,
+            "from_name": from_name,
+            "to": pasted_summary.get("to_address", "") if pasted_summary else "",
+            "to_name": pasted_summary.get("to_name", "") if pasted_summary else "",
+            "reply_to": reply_to_address,
+            "reply_to_name": reply_to_name,
+            "return_path": return_path_address,
+            "from_domain": from_domain,
+            "reply_to_domain": reply_to_domain,
+            "return_path_domain": return_path_domain,
+            "message_id": str(parsed_message.get("Message-ID") or "").strip(),
+            "date": (
+                pasted_summary.get("date", "").strip()
+                if parse_source == "pasted_summary" and pasted_summary and pasted_summary.get("date")
+                else str(parsed_message.get("Date") or "").strip()
+            ),
+            "mailed_by": pasted_summary.get("mailed_by", "") if pasted_summary else "",
+            "signed_by": pasted_summary.get("signed_by", "") if pasted_summary else "",
+            "security": pasted_summary.get("security", "") if pasted_summary else "",
+        },
+        "authentication": auth_results,
+        "body_summary": {
+            "plain_text_chars": len(plain_text),
+            "html_chars": len(html_text),
+            "has_html": bool(html_text),
+            "preview": combined_text[:280],
+        },
+        "url_analysis": {
+            "count": len(url_results),
+            "ignored_non_web_links": ignored_links[:8],
+            "malicious": sum(1 for item in url_results if item["status"] == "malicious"),
+            "suspicious": sum(1 for item in url_results if item["status"] == "suspicious"),
+            "results": url_results,
+            "html_link_mismatches": [item for item in html_link_details if item.get("mismatch")][:8],
+        },
+        "attachment_analysis": {
+            "count": len(attachments),
+            "malicious": sum(1 for item in attachments if item["status"] == "malicious"),
+            "suspicious": sum(1 for item in attachments if item["status"] == "suspicious"),
+            "results": attachments,
+        },
+        "phishing_signals": heuristic_summary["indicators"],
+        "overall_threat_score": combined_score,
+        "status": status,
+        "scan_timestamp": datetime.utcnow().isoformat(),
+    }
+
+    return {
+        "status": status,
+        "threat_score": combined_score,
+        "details": details,
+        "target": target_label,
+    }
+
+
 # ============= URL SCANNER - 4 LAYER SYSTEM =============
 
 def layer1_format_validation(url: str) -> Dict[str, Any]:
@@ -842,7 +1376,8 @@ def layer1_format_validation(url: str) -> Dict[str, Any]:
 def layer2_phishtank_check(url: str, db: Session) -> Dict[str, Any]:
     """Layer 2: Malicious URL Database Check (75K+ URLs)"""
     normalized_url = url.strip()
-    domain = urlparse(normalized_url).netloc.lower()
+    parsed_url = urlparse(normalized_url)
+    domain = (parsed_url.netloc or parsed_url.hostname or "").lower()
 
     # Check imported threat feed entries stored in PostgreSQL.
     try:
@@ -858,6 +1393,7 @@ def layer2_phishtank_check(url: str, db: Session) -> Dict[str, Any]:
                 "threat_type": threat_type,
                 "source": source,
                 "threat_level": "high",
+                "match_type": "exact_url",
                 "message": f"URL found in imported threat feed ({source})",
             }
 
@@ -865,12 +1401,19 @@ def layer2_phishtank_check(url: str, db: Session) -> Dict[str, Any]:
             domain_matches = db.query(ThreatUrl).filter(ThreatUrl.domain == domain).count()
             if domain_matches > 0:
                 logger.info(f"DOMAIN MATCH: {domain} appears in {domain_matches} threat feed entries")
+                downgraded = domain in DOMAIN_ONLY_REPUTATION_HOSTS
                 return {
-                    "found": True,
+                    "found": not downgraded,
                     "verified": False,
                     "domain_matches": domain_matches,
-                    "threat_level": "medium",
-                    "message": f"Domain appears in {domain_matches} imported threat feed entries",
+                    "threat_level": "low" if downgraded else "medium",
+                    "match_type": "domain_only",
+                    "downgraded_shared_host": downgraded,
+                    "message": (
+                        f"Domain appears in {domain_matches} imported threat feed entries, but this is a shared hosting platform"
+                        if downgraded
+                        else f"Domain appears in {domain_matches} imported threat feed entries"
+                    ),
                 }
 
     except Exception as e:
@@ -887,12 +1430,14 @@ def layer2_phishtank_check(url: str, db: Session) -> Dict[str, Any]:
             "verified": phish_entry.verified,
             "phish_id": phish_entry.phish_id,
             "threat_level": "high",
+            "match_type": "exact_url",
             "message": "URL found in PhishTank database"
         }
 
     return {
         "found": False,
         "threat_level": "low",
+        "match_type": "none",
         "message": "URL not found in threat databases (75K+ URLs checked)"
     }
 
@@ -1037,12 +1582,14 @@ def _evaluate_url_static(url: str, db: Session) -> Dict[str, Any]:
             threat_score += 60
         else:
             threat_score += 40
+    elif layer2.get("match_type") == "domain_only":
+        threat_score += 10 if layer2.get("downgraded_shared_host") else 20
 
     layer3_score = 100 - int(layer3.get("reputation_score", 100))
     threat_score += int(layer3_score * 0.25)
     threat_score += int(layer4.get("threat_score", 0))
 
-    if threat_score >= 60 or layer2.get("found"):
+    if threat_score >= 60 or (layer2.get("found") and layer2.get("match_type") == "exact_url"):
         status = "malicious"
     elif threat_score >= 35:
         status = "suspicious"
@@ -1107,6 +1654,66 @@ async def url_scan_advanced(
             "details": scan_details
         }
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/email-scan")
+async def email_scan(
+        email_file: Optional[UploadFile] = File(None),
+        raw_email: Optional[str] = Form(None),
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    """Analyze an .eml or pasted raw email and combine phishing, URL, and attachment signals."""
+    try:
+        if email_file is None and not (raw_email or "").strip():
+            raise HTTPException(status_code=422, detail="Provide either an .eml file or raw email content.")
+
+        email_bytes: Optional[bytes] = None
+        source_name = "pasted_email.txt"
+        if email_file is not None:
+            email_bytes = await email_file.read()
+            source_name = email_file.filename or "uploaded_email.eml"
+            if not email_bytes:
+                raise HTTPException(status_code=422, detail="Uploaded email file is empty.")
+
+        analysis = _analyze_email_payload(
+            email_bytes=email_bytes,
+            raw_email=(raw_email or "").strip() or None,
+            db=db,
+            source_name=source_name,
+        )
+
+        scan = Scan(
+            user_id=current_user.id,
+            scan_type="email_scan",
+            target=analysis["target"],
+            status=analysis["status"],
+            threat_score=int(analysis["threat_score"]),
+            details=json.dumps(analysis["details"]),
+        )
+        db.add(scan)
+        db.commit()
+        db.refresh(scan)
+
+        create_audit_log(
+            db,
+            current_user.id,
+            "Email Scan",
+            f"Scanned email {analysis['target'][:80]}",
+        )
+
+        return {
+            "success": True,
+            "scan_id": scan.id,
+            "status": analysis["status"],
+            "threat_score": int(analysis["threat_score"]),
+            "target": analysis["target"],
+            "details": analysis["details"],
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

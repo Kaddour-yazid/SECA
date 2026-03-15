@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Globe,
+  Mail,
   AlertCircle,
   CheckCircle,
   AlertTriangle,
@@ -19,6 +20,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { apiUrl } from '../config/api';
+import { EmailScannerPanel } from './EmailScannerPanel';
 
 type LayerResult = {
   passed?: boolean;
@@ -129,6 +131,7 @@ const pickRandom = (items: string[]): string => {
 
 export function URLScannerView() {
   const { user, token, signOut } = useAuth();
+  const [activeMode, setActiveMode] = useState<'url' | 'email'>('url');
   const [url, setUrl] = useState('');
   const [scanning, setScanning] = useState(false);
   const [result, setResult] = useState<ScanResult | null>(null);
@@ -531,11 +534,50 @@ export function URLScannerView() {
       `}</style>
 
       <div className="p-8 pb-4 flex-shrink-0">
-        <h2 className="text-3xl font-bold text-white mb-2">Advanced URL Scanner</h2>
-        <p className="text-slate-400 mb-4">4-layer security analysis for comprehensive threat detection</p>
+        <div className="flex items-center justify-between gap-4 mb-4">
+          <div>
+            <h2 className="text-3xl font-bold text-white mb-2">
+              {activeMode === 'url' ? 'Advanced URL Scanner' : 'Email Threat Scanner'}
+            </h2>
+            <p className="text-slate-400">
+              {activeMode === 'url'
+                ? '4-layer security analysis for comprehensive threat detection'
+                : 'Analyze .eml email files for phishing, spoofing, malicious URLs, and risky attachments'}
+            </p>
+          </div>
+        </div>
+        <div className="inline-flex rounded-xl border border-slate-700 bg-slate-800/60 p-1">
+          <button
+            type="button"
+            onClick={() => setActiveMode('url')}
+            className={`px-4 py-2 rounded-lg text-sm font-medium transition flex items-center gap-2 ${
+              activeMode === 'url'
+                ? 'bg-cyan-500 text-white shadow'
+                : 'text-slate-300 hover:text-white hover:bg-slate-700/70'
+            }`}
+          >
+            <Globe className="w-4 h-4" />
+            URL Scan
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveMode('email')}
+            className={`px-4 py-2 rounded-lg text-sm font-medium transition flex items-center gap-2 ${
+              activeMode === 'email'
+                ? 'bg-fuchsia-600 text-white shadow'
+                : 'text-slate-300 hover:text-white hover:bg-slate-700/70'
+            }`}
+          >
+            <Mail className="w-4 h-4" />
+            Email Scan
+          </button>
+        </div>
       </div>
 
       <div className="overflow-y-auto px-8 pb-8 global-scroll" style={{ height: 'calc(100vh - 180px)' }}>
+        {activeMode === 'email' ? (
+          <EmailScannerPanel />
+        ) : (
         <div className="max-w-4xl mx-auto space-y-6">
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             <div className="lg:col-span-2 bg-slate-800/50 border border-slate-700 rounded-xl p-4">
@@ -1001,6 +1043,7 @@ export function URLScannerView() {
             </div>
           )}
         </div>
+        )}
       </div>
     </div>
   );
