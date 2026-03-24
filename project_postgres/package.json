@@ -3,12 +3,15 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "main": "desktop/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.app.json"
+    "typecheck": "tsc --noEmit -p tsconfig.app.json",
+    "desktop:start": "npm run build && electron .",
+    "desktop:pack": "npm run build && electron-builder --win portable"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",
@@ -22,6 +25,8 @@
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.18",
+    "electron": "^41.0.3",
+    "electron-builder": "^26.8.1",
     "eslint": "^9.9.1",
     "eslint-plugin-react-hooks": "^5.1.0-rc.0",
     "eslint-plugin-react-refresh": "^0.4.11",
@@ -31,5 +36,37 @@
     "typescript": "^5.5.3",
     "typescript-eslint": "^8.3.0",
     "vite": "^5.4.2"
+  },
+  "build": {
+    "appId": "com.seca.desktop",
+    "productName": "SECA",
+    "directories": {
+      "output": "desktop-release"
+    },
+    "files": [
+      "dist/**/*",
+      "desktop/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "backend",
+        "to": "backend",
+        "filter": [
+          "**/*",
+          ".env",
+          ".env.example",
+          ".venv/**/*",
+          "!**/__pycache__/**/*",
+          "!**/*.pyc"
+        ]
+      }
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        "portable"
+      ]
+    }
   }
 }

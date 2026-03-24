@@ -1,6 +1,7 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'react';
-import { Shield, FileText, Globe, Hash, LayoutDashboard, ScrollText, LogOut, Sun, Moon, User, Network, ShieldBan } from 'lucide-react';
+import { Shield, FileText, Globe, Hash, LayoutDashboard, User, Network, ShieldBan, ScrollText } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { useLanguage } from '../contexts/LanguageContext';
 import { useTheme } from '../contexts/ThemeContext';
 
 type SidebarProps = {
@@ -9,8 +10,9 @@ type SidebarProps = {
 };
 
 export function Sidebar({ activeView, onViewChange }: SidebarProps) {
-  const { user, signOut } = useAuth();
-  const { theme, toggleTheme } = useTheme();
+  const { user } = useAuth();
+  const { translateText } = useLanguage();
+  const { theme } = useTheme();
   const navRef = useRef<HTMLElement | null>(null);
   const itemRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const [activeIndicator, setActiveIndicator] = useState({
@@ -21,17 +23,17 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
 
   // Base menu items (available to all users)
   const baseMenuItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'file', label: 'File Scanner', icon: FileText },
-    { id: 'url', label: 'URL Scanner', icon: Globe },
-    { id: 'hash', label: 'Hash Checker', icon: Hash },
+    { id: 'dashboard', label: translateText('Dashboard'), icon: LayoutDashboard },
+    { id: 'file', label: translateText('File Scanner'), icon: FileText },
+    { id: 'url', label: translateText('URL Scanner'), icon: Globe },
+    { id: 'hash', label: translateText('Hash Checker'), icon: Hash },
   ];
 
   // Admin-only menu items
   const adminMenuItems = [
-    { id: 'start', label: 'Monitoring', icon: Network },
-    { id: 'audit', label: 'Audit Logs', icon: ScrollText },
-    { id: 'access-control', label: 'Access Control', icon: ShieldBan },
+    { id: 'start', label: translateText('Monitoring'), icon: Network },
+    { id: 'audit', label: translateText('Audit Logs'), icon: ScrollText },
+    { id: 'access-control', label: translateText('Access Control'), icon: ShieldBan },
   ];
 
   // Combine menu items based on user role
@@ -57,13 +59,9 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
   const navIndicatorClass = isLight
     ? 'pointer-events-none absolute left-4 right-4 rounded-lg bg-gradient-to-r from-sky-300 to-cyan-300 shadow-[0_6px_20px_rgba(56,189,248,0.25)] transition-all duration-300 ease-out'
     : 'pointer-events-none absolute left-4 right-4 rounded-lg bg-cyan-500 shadow-lg transition-all duration-300 ease-out';
-  const footerBorderClass = isLight ? 'border-t border-[#d9e6f2]' : 'border-t border-slate-700';
-  const themeButtonClass = isLight
-    ? 'w-full flex items-center gap-3 px-4 py-3 rounded-lg text-slate-700 hover:bg-sky-100 hover:text-sky-700 transition'
-    : 'w-full flex items-center gap-3 px-4 py-3 rounded-lg text-slate-300 hover:bg-slate-700 hover:text-white transition';
-  const signOutButtonClass = isLight
-    ? 'w-full flex items-center gap-3 px-4 py-3 rounded-lg text-rose-600 hover:bg-rose-50 hover:text-rose-700 transition'
-    : 'w-full flex items-center gap-3 px-4 py-3 rounded-lg text-red-400 hover:bg-red-500/10 hover:text-red-300 transition';
+  const settingsButtonClass = isLight
+    ? 'inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[#d9e6f2] bg-white text-slate-700 hover:border-sky-300 hover:text-sky-700 transition'
+    : 'inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-700 bg-slate-900/70 text-slate-200 hover:border-cyan-500/40 hover:text-cyan-200 transition';
 
   const updateActiveIndicator = useCallback(() => {
     const navEl = navRef.current;
@@ -105,13 +103,27 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
     <div className={sidebarShellClass}>
       {/* Logo */}
       <div className={`p-6 ${logoBorderClass}`}>
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-gradient-to-br from-cyan-500 to-blue-600 rounded-lg flex items-center justify-center">
-            <Shield className="w-6 h-6 text-white" />
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-gradient-to-br from-cyan-500 to-blue-600 rounded-lg flex items-center justify-center">
+              <Shield className="w-6 h-6 text-white" />
+            </div>
+            <div>
+              <h1 className={titleClass}>SECA</h1>
+              <p className={subtitleClass}>{translateText('Security Analyzer')}</p>
+            </div>
           </div>
-          <div>
-            <h1 className={titleClass}>SECA</h1>
-            <p className={subtitleClass}>Security Analyzer</p>
+
+          <div className="relative" data-no-i18n="true">
+            <button
+              type="button"
+              onClick={() => onViewChange('settings')}
+              className={`${settingsButtonClass} ${activeView === 'settings' ? (isLight ? 'border-sky-400 text-sky-700' : 'border-cyan-400 text-cyan-200') : ''}`}
+              aria-label={translateText('Parameters')}
+              title={translateText('Parameters')}
+            >
+              <Globe className="h-5 w-5" />
+            </button>
           </div>
         </div>
       </div>
@@ -126,9 +138,9 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
             <p className={emailClass}>{user?.email}</p>
             <p className={userRoleClass}>
               {user?.is_admin ? (
-                <span className="text-cyan-400 font-medium">Admin</span>
+                <span className="text-cyan-400 font-medium">{translateText('Admin')}</span>
               ) : (
-                'User'
+                translateText('User')
               )}
             </p>
           </div>
@@ -169,34 +181,6 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
           );
         })}
       </nav>
-
-      {/* Theme Toggle & Logout */}
-      <div className={`p-4 ${footerBorderClass} space-y-2`}>
-        <button
-          onClick={toggleTheme}
-          className={themeButtonClass}
-        >
-          {theme === 'dark' ? (
-            <>
-              <Sun className="w-5 h-5" />
-              <span className="font-medium">Light Mode</span>
-            </>
-          ) : (
-            <>
-              <Moon className="w-5 h-5" />
-              <span className="font-medium">Dark Mode</span>
-            </>
-          )}
-        </button>
-
-        <button
-          onClick={signOut}
-          className={signOutButtonClass}
-        >
-          <LogOut className="w-5 h-5" />
-          <span className="font-medium">Sign Out</span>
-        </button>
-      </div>
     </div>
   );
 }

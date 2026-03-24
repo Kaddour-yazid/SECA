@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { AuthProvider, useAuth } from '../contexts/AuthContext';
+import { LanguageProvider, useLanguage } from '../contexts/LanguageContext';
 import { ThemeProvider } from '../contexts/ThemeContext';
 import { LoginView } from './LoginView';
 import { DashboardView } from './DashboardView';
@@ -9,10 +10,12 @@ import { HashCheckerView } from './HashCheckerView';
 import { AuditLogsView } from './AuditLogsView';
 import { GatewayStartView } from './GatewayStartView';
 import { AccessControlView } from './AccessControlView';
+import { ParametersView } from './ParametersView';
 import { Sidebar } from './Sidebar';
 
 function AppContent() {
   const { user } = useAuth();
+  const { language } = useLanguage();
   const [activeView, setActiveView] = useState('dashboard');
 
   if (!user) {
@@ -36,9 +39,9 @@ function AppContent() {
   };
 
   return (
-    <div className="flex h-screen bg-slate-900 dark:bg-slate-900">
+    <div key={language} className="flex h-screen bg-slate-900 dark:bg-slate-900">
       <Sidebar activeView={activeView} onViewChange={handleViewChange} />
-      <main className="flex-1 overflow-hidden">
+      <main className="relative flex-1 overflow-hidden">
         <div className={activeView === 'dashboard' ? 'h-full' : 'hidden h-full'}>
           <DashboardView isActive={activeView === 'dashboard'} />
         </div>
@@ -66,6 +69,9 @@ function AppContent() {
             <AccessControlView />
           </div>
         )}
+        <div className={activeView === 'settings' ? 'h-full' : 'hidden h-full'}>
+          <ParametersView />
+        </div>
       </main>
     </div>
   );
@@ -73,11 +79,13 @@ function AppContent() {
 
 export function App() {
   return (
-    <ThemeProvider>
-      <AuthProvider>
-        <AppContent />
-      </AuthProvider>
-    </ThemeProvider>
+    <LanguageProvider>
+      <ThemeProvider>
+        <AuthProvider>
+          <AppContent />
+        </AuthProvider>
+      </ThemeProvider>
+    </LanguageProvider>
   );
 }
 

@@ -28,6 +28,9 @@ type ProxyDevice = {
   device_name: string;
   client_ip: string;
   connected?: boolean;
+  activity_online?: boolean;
+  activity_offline?: boolean;
+  activity_timeout_seconds?: number;
   seconds_since_last_activity?: number | null;
   total_requests: number;
   blocked_requests: number;
@@ -40,6 +43,8 @@ type ProxyStats = {
   blocked_requests: number;
   allowed_requests: number;
 };
+
+type VerdictFilter = "all" | "blocked" | "allowed";
 
 function tsvCell(value: unknown): string {
   const normalized = String(value ?? "")
@@ -60,7 +65,7 @@ function exportRows(rows: AuditLog[], filenamePrefix: string) {
       r.user_email || "",
       r.action,
       r.details,
-      new Date(r.timestamp).toLocaleString(),
+      formatTimestamp(r.timestamp),
     ]
       .map(tsvCell)
       .join("\t")
@@ -85,6 +90,36 @@ function formatSeconds(seconds?: number | null): string {
   return `${m}m ${s}s`;
 }
 
+function parseBackendTimestamp(value?: string | null): Date | null {
+  if (!value) return null;
+  const normalized = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value) ? value : `${value}Z`;
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function formatTimestamp(value?: string | null): string {
+  const parsed = parseBackendTimestamp(value);
+  if (!parsed) return "Unknown";
+  return parsed.toLocaleString();
+}
+
+function localDateValue(value?: string | null): string {
+  const parsed = parseBackendTimestamp(value);
+  if (!parsed) return "";
+  const year = parsed.getFullYear();
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function logVerdict(log: AuditLog): VerdictFilter | "other" {
+  const action = log.action.toLowerCase();
+  const details = log.details.toLowerCase();
+  if (action.includes("block") || details.includes("blocked")) return "blocked";
+  if (action.includes("allow") || details.includes("allowed")) return "allowed";
+  return "other";
+}
+
 export function AuditLogsView() {
   const { token } = useAuth();
   const [logs, setLogs] = useState<AuditLog[]>([]);
@@ -96,6 +131,8 @@ export function AuditLogsView() {
   const [stats, setStats] = useState<ProxyStats | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [actionFilter, setActionFilter] = useState("all");
+  const [verdictFilter, setVerdictFilter] = useState<VerdictFilter>("all");
+  const [dateFilter, setDateFilter] = useState("");
   const [showDevicesPage, setShowDevicesPage] = useState(false);
   const [selectedDeviceIp, setSelectedDeviceIp] = useState<string | null>(null);
   const [deviceLogs, setDeviceLogs] = useState<AuditLog[]>([]);
@@ -177,14 +214,37 @@ export function AuditLogsView() {
   const filteredLogs = useMemo(() => {
     return logs.filter((l) => {
       if (actionFilter !== "all" && l.action !== actionFilter) return false;
+      if (verdictFilter !== "all" && logVerdict(l) !== verdictFilter) return false;
+      if (dateFilter && localDateValue(l.timestamp) !== dateFilter) return false;
       if (!searchTerm) return true;
       const s = searchTerm.toLowerCase();
-      return l.action.toLowerCase().includes(s) || l.details.toLowerCase().includes(s);
+      return (
+        l.action.toLowerCase().includes(s) ||
+        l.details.toLowerCase().includes(s) ||
+        (l.user_name || "").toLowerCase().includes(s) ||
+        (l.user_email || "").toLowerCase().includes(s) ||
+        String(l.user_id ?? "").includes(s) ||
+        formatTimestamp(l.timestamp).toLowerCase().includes(s)
+      );
     });
-  }, [logs, actionFilter, searchTerm]);
+  }, [logs, actionFilter, verdictFilter, dateFilter, searchTerm]);
 
   const uniqueActions = useMemo(() => Array.from(new Set(logs.map((l) => l.action))), [logs]);
   const selectedDevice = useMemo(() => devices.find((d) => d.client_ip === selectedDeviceIp) || null, [devices, selectedDeviceIp]);
+  const detailsModal = detailsLog ? (
+    <div className="fixed inset-0 bg-black/60 z-50 p-4 flex items-center justify-center" onClick={() => setDetailsLog(null)}>
+      <div className="max-w-3xl w-full bg-slate-900 border border-slate-700 rounded-xl p-5" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3 mb-3">
+          <div>
+            <h3 className="text-white font-semibold">Log Details</h3>
+            <p className="text-slate-400 text-xs">{detailsLog.action} | {formatTimestamp(detailsLog.timestamp)}</p>
+          </div>
+          <button className="text-slate-400 hover:text-white text-sm" onClick={() => setDetailsLog(null)}>Close</button>
+        </div>
+        <pre className="text-slate-200 text-sm whitespace-pre-wrap break-words bg-slate-950/60 border border-slate-700 rounded-lg p-3 max-h-[60vh] overflow-auto">{detailsLog.details}</pre>
+      </div>
+    </div>
+  ) : null;
 
   if (showDevicesPage) {
     return (
@@ -208,27 +268,54 @@ export function AuditLogsView() {
 
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
           <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4 max-h-[75vh] overflow-y-auto space-y-2">
-            {devices.map((d) => (
-              <button key={d.client_ip} onClick={() => setSelectedDeviceIp(d.client_ip)} className={`w-full text-left p-3 rounded-lg border ${selectedDeviceIp === d.client_ip ? "border-cyan-500 bg-cyan-500/10" : "border-slate-700 bg-slate-900/60"}`}>
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-slate-100 font-medium">{d.device_name}</p>
-                  <span className={`text-[11px] px-2 py-0.5 rounded-full border ${d.connected ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-amber-500/15 text-amber-300 border-amber-500/30"}`}>
-                    {d.connected ? "Connected" : "Disconnected"}
-                  </span>
-                </div>
-                <p className="text-xs text-cyan-300 mt-1">{d.client_ip}</p>
-                <p className="text-xs text-slate-400">Last activity: {formatSeconds(d.seconds_since_last_activity)} ago</p>
-              </button>
-            ))}
+            {devices.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-slate-700 bg-slate-900/50 p-5 text-center">
+                <p className="text-slate-200 font-medium">No connected devices</p>
+                <p className="text-slate-400 text-sm mt-1">When a device starts using the proxy, it will appear here.</p>
+              </div>
+            ) : (
+              devices.map((d) => (
+                <button key={d.client_ip} onClick={() => setSelectedDeviceIp(d.client_ip)} className={`w-full text-left p-3 rounded-lg border ${selectedDeviceIp === d.client_ip ? "border-cyan-500 bg-cyan-500/10" : "border-slate-700 bg-slate-900/60"}`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-slate-100 font-medium">{d.device_name}</p>
+                    <div className="flex items-center gap-2 flex-wrap justify-end">
+                      <span className={`text-[11px] px-2 py-0.5 rounded-full border ${d.connected ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-amber-500/15 text-amber-300 border-amber-500/30"}`}>
+                        {d.connected ? "Connected" : "Disconnected"}
+                      </span>
+                      <span className={`text-[11px] px-2 py-0.5 rounded-full border ${d.activity_offline ? "bg-rose-500/15 text-rose-300 border-rose-500/30" : "bg-cyan-500/15 text-cyan-300 border-cyan-500/30"}`}>
+                        {d.activity_offline ? `Offline > ${d.activity_timeout_seconds ?? 60}s` : "Active <= 60s"}
+                      </span>
+                    </div>
+                  </div>
+                  <p className="text-xs text-cyan-300 mt-1">{d.client_ip}</p>
+                  <p className="text-xs text-slate-400">Last activity: {formatSeconds(d.seconds_since_last_activity)} ago</p>
+                </button>
+              ))
+            )}
           </div>
 
           <div className="xl:col-span-2 bg-slate-800/50 border border-slate-700 rounded-xl p-4">
-            {!selectedDevice ? (
+            {devices.length === 0 ? (
+              <div className="h-full min-h-[260px] flex items-center justify-center text-center">
+                <div>
+                  <p className="text-slate-200 font-medium">No device details to display</p>
+                  <p className="text-slate-400 text-sm mt-1">Connect a PC or phone to the proxy and come back here.</p>
+                </div>
+              </div>
+            ) : !selectedDevice ? (
               <p className="text-slate-400">Select a device.</p>
             ) : (
               <>
                 <p className="text-slate-200 font-semibold">{selectedDevice.device_name} ({selectedDevice.client_ip})</p>
-                <p className="text-xs text-slate-400 mb-4">Last seen: {new Date(selectedDevice.last_seen).toLocaleString()}</p>
+                <p className="text-xs text-slate-400 mb-4">Last seen: {formatTimestamp(selectedDevice.last_seen)}</p>
+                <div className="flex items-center gap-2 flex-wrap mb-4">
+                  <span className={`text-[11px] px-2 py-0.5 rounded-full border ${selectedDevice.connected ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-amber-500/15 text-amber-300 border-amber-500/30"}`}>
+                    {selectedDevice.connected ? "Connected" : "Disconnected"}
+                  </span>
+                  <span className={`text-[11px] px-2 py-0.5 rounded-full border ${selectedDevice.activity_offline ? "bg-rose-500/15 text-rose-300 border-rose-500/30" : "bg-cyan-500/15 text-cyan-300 border-cyan-500/30"}`}>
+                    {selectedDevice.activity_offline ? `Offline after ${selectedDevice.activity_timeout_seconds ?? 60}s idle` : "Activity online"}
+                  </span>
+                </div>
                 <div className="overflow-x-auto">
                   <table className="w-full">
                     <thead className="bg-slate-900/50">
@@ -239,19 +326,25 @@ export function AuditLogsView() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-700">
-                      {deviceLogs.map((log) => (
-                        <tr key={log.id}>
-                          <td className="px-4 py-3 text-sm text-slate-300 whitespace-nowrap">{new Date(log.timestamp).toLocaleString()}</td>
-                          <td className="px-4 py-3 text-sm text-slate-200 whitespace-nowrap">{log.action}</td>
-                          <td className="px-4 py-3 text-sm text-slate-300">
-                            <div className="line-clamp-2 break-words">{log.details}</div>
-                            <button onClick={() => setDetailsLog(log)} className="text-cyan-300 hover:text-cyan-200 text-xs inline-flex items-center gap-1 mt-1">
-                              <Eye className="w-3 h-3" />
-                              View full details
-                            </button>
-                          </td>
+                      {deviceLogs.length === 0 ? (
+                        <tr>
+                          <td colSpan={3} className="px-4 py-8 text-center text-slate-400">No logs yet for this device.</td>
                         </tr>
-                      ))}
+                      ) : (
+                        deviceLogs.map((log) => (
+                          <tr key={log.id}>
+                            <td className="px-4 py-3 text-sm text-slate-300 whitespace-nowrap">{formatTimestamp(log.timestamp)}</td>
+                            <td className="px-4 py-3 text-sm text-slate-200 whitespace-nowrap">{log.action}</td>
+                            <td className="px-4 py-3 text-sm text-slate-300">
+                              <div className="line-clamp-2 break-words">{log.details}</div>
+                              <button onClick={() => setDetailsLog(log)} className="text-cyan-300 hover:text-cyan-200 text-xs inline-flex items-center gap-1 mt-1">
+                                <Eye className="w-3 h-3" />
+                                View full details
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      )}
                     </tbody>
                   </table>
                 </div>
@@ -259,6 +352,7 @@ export function AuditLogsView() {
             )}
           </div>
         </div>
+        {detailsModal}
       </div>
     );
   }
@@ -305,16 +399,21 @@ export function AuditLogsView() {
       {gatewayError && <p className="text-amber-300 text-sm">{gatewayError}</p>}
 
       <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4 space-y-4">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-            <input value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="Search action/details" className="w-full pl-10 pr-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white" />
+            <input value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="Search action, details, user, timestamp" className="w-full pl-10 pr-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white" />
           </div>
           <select value={actionFilter} onChange={(e) => setActionFilter(e.target.value)} className="px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white">
             <option value="all">All Actions</option>
             {uniqueActions.map((a) => <option key={a} value={a}>{a}</option>)}
           </select>
-          <button onClick={() => { setSearchTerm(""); setActionFilter("all"); }} className="px-4 py-2 border border-slate-600 rounded-lg text-slate-200 hover:bg-slate-700">Clear</button>
+          <select value={verdictFilter} onChange={(e) => setVerdictFilter(e.target.value as VerdictFilter)} className="px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white">
+            <option value="all">All Verdicts</option>
+            <option value="blocked">Blocked</option>
+            <option value="allowed">Allowed</option>
+          </select>
+          <input type="date" value={dateFilter} onChange={(e) => setDateFilter(e.target.value)} className="px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white" />
         </div>
       </div>
 
@@ -335,40 +434,41 @@ export function AuditLogsView() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-700">
-                {filteredLogs.map((log) => (
-                  <tr key={log.id}>
-                    <td className="px-4 py-3 text-sm text-slate-300 whitespace-nowrap">{new Date(log.timestamp).toLocaleString()}</td>
-                    <td className="px-4 py-3 text-sm text-slate-200 whitespace-nowrap">{log.action}</td>
-                    <td className="px-4 py-3 text-sm text-slate-300">{log.user_name || (log.user_id === null ? "System" : `User #${log.user_id}`)}</td>
-                    <td className="px-4 py-3 text-sm text-slate-300">
-                      <div className="line-clamp-2 break-words">{log.details}</div>
-                      <button onClick={() => setDetailsLog(log)} className="text-cyan-300 hover:text-cyan-200 text-xs inline-flex items-center gap-1 mt-1">
-                        <Eye className="w-3 h-3" />
-                        View full details
-                      </button>
-                    </td>
+                {filteredLogs.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="px-4 py-8 text-center text-slate-400">No audit logs match the current filters.</td>
                   </tr>
-                ))}
+                ) : (
+                  filteredLogs.map((log) => (
+                    <tr key={log.id}>
+                      <td className="px-4 py-3 text-sm text-slate-300 whitespace-nowrap">{formatTimestamp(log.timestamp)}</td>
+                      <td className="px-4 py-3 text-sm text-slate-200 whitespace-nowrap">
+                        <div className="flex items-center gap-2">
+                          <span>{log.action}</span>
+                          {logVerdict(log) !== "other" && (
+                            <span className={`text-[11px] px-2 py-0.5 rounded-full border ${logVerdict(log) === "blocked" ? "bg-rose-500/15 text-rose-300 border-rose-500/30" : "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"}`}>
+                              {logVerdict(log) === "blocked" ? "Blocked" : "Allowed"}
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-sm text-slate-300">{log.user_name || (log.user_id === null ? "System" : `User #${log.user_id}`)}</td>
+                      <td className="px-4 py-3 text-sm text-slate-300">
+                        <div className="line-clamp-2 break-words">{log.details}</div>
+                        <button onClick={() => setDetailsLog(log)} className="text-cyan-300 hover:text-cyan-200 text-xs inline-flex items-center gap-1 mt-1">
+                          <Eye className="w-3 h-3" />
+                          View full details
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
         )}
       </div>
-
-      {detailsLog && (
-        <div className="fixed inset-0 bg-black/60 z-50 p-4 flex items-center justify-center" onClick={() => setDetailsLog(null)}>
-          <div className="max-w-3xl w-full bg-slate-900 border border-slate-700 rounded-xl p-5" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-start justify-between gap-3 mb-3">
-              <div>
-                <h3 className="text-white font-semibold">Log Details</h3>
-                <p className="text-slate-400 text-xs">{detailsLog.action} | {new Date(detailsLog.timestamp).toLocaleString()}</p>
-              </div>
-              <button className="text-slate-400 hover:text-white text-sm" onClick={() => setDetailsLog(null)}>Close</button>
-            </div>
-            <pre className="text-slate-200 text-sm whitespace-pre-wrap break-words bg-slate-950/60 border border-slate-700 rounded-lg p-3 max-h-[60vh] overflow-auto">{detailsLog.details}</pre>
-          </div>
-        </div>
-      )}
+      {detailsModal}
     </div>
   );
 }

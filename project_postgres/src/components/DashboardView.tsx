@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Activity, Shield, AlertTriangle, CheckCircle, X, FileText, Calendar, Gauge } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { useLanguage } from '../contexts/LanguageContext';
 import { apiUrl } from '../config/api';
 
 type DashboardViewProps = {
@@ -57,7 +58,7 @@ const safeParseDetails = (raw?: string): any | null => {
 
 const uniqueStrings = (values: string[]) => [...new Set(values.filter(Boolean))];
 
-const buildDetailSummary = (scan: ScanRow | null): ScanDetailSummary => {
+const buildDetailSummary = (scan: ScanRow | null, translateText: (text: string) => string): ScanDetailSummary => {
   if (!scan) {
     return { highlights: [], notes: [] };
   }
@@ -69,7 +70,7 @@ const buildDetailSummary = (scan: ScanRow | null): ScanDetailSummary => {
         { label: 'Scan type', value: scan.scan_type || 'Unknown' },
         { label: 'Threat score', value: `${scan.threat_score ?? 0}/100` },
       ],
-      notes: ['No structured detail payload available for this scan.'],
+      notes: [translateText('No structured detail payload available for this scan.')],
     };
   }
 
@@ -85,7 +86,7 @@ const buildDetailSummary = (scan: ScanRow | null): ScanDetailSummary => {
     return {
       highlights: [
         { label: 'Threat score', value: `${parsed?.overall_threat_score ?? scan.threat_score ?? 0}/100`, tone: scan.status === 'malicious' ? 'bad' : scan.status === 'suspicious' ? 'warn' : 'good' },
-        { label: 'Threat feed match', value: layer2?.found ? 'Yes' : 'No', tone: layer2?.found ? 'bad' : 'good' },
+        { label: 'Threat feed match', value: layer2?.found ? translateText('Yes') : translateText('No'), tone: layer2?.found ? 'bad' : 'good' },
         { label: 'Reputation score', value: `${reputationScore}/100`, tone: reputationScore < 40 ? 'bad' : reputationScore < 70 ? 'warn' : 'good' },
         { label: 'Content indicators', value: `${indicators.length}`, tone: indicators.length > 0 ? 'warn' : 'good' },
       ],
@@ -106,7 +107,7 @@ const buildDetailSummary = (scan: ScanRow | null): ScanDetailSummary => {
     return {
       highlights: [
         { label: 'Threat score', value: `${parsed?.overall_threat_score ?? scan.threat_score ?? 0}/100`, tone: scan.status === 'malicious' ? 'bad' : scan.status === 'suspicious' ? 'warn' : 'good' },
-        { label: 'Sender', value: String(parsed?.headers?.from || 'Unknown') },
+        { label: 'Sender', value: String(parsed?.headers?.from || translateText('Unknown')) },
         { label: 'URLs extracted', value: `${Number(urls?.count ?? 0)}`, tone: Number(urls?.malicious ?? 0) > 0 ? 'bad' : Number(urls?.suspicious ?? 0) > 0 ? 'warn' : 'good' },
         { label: 'Attachments', value: `${Number(attachments?.count ?? 0)}`, tone: Number(attachments?.malicious ?? 0) > 0 ? 'bad' : Number(attachments?.suspicious ?? 0) > 0 ? 'warn' : 'good' },
         { label: 'Auth failures', value: `${authFailures}`, tone: authFailures > 0 ? 'bad' : 'good' },
@@ -127,10 +128,10 @@ const buildDetailSummary = (scan: ScanRow | null): ScanDetailSummary => {
 
     return {
       highlights: [
-        { label: 'Hash type', value: String(parsed?.hashType ?? 'Unknown') },
+        { label: 'Hash type', value: String(parsed?.hashType ?? translateText('Unknown')) },
         { label: 'Detections', value: `${detections}/${engines || '?'}`, tone: detections > 0 ? 'bad' : 'good' },
-        { label: 'Database match', value: parsed?.found ? 'Yes' : 'No', tone: parsed?.found ? 'warn' : 'good' },
-        { label: 'Malware family', value: family, tone: family !== 'None' ? 'bad' : 'good' },
+        { label: 'Database match', value: parsed?.found ? translateText('Yes') : translateText('No'), tone: parsed?.found ? 'warn' : 'good' },
+        { label: 'Malware family', value: family === 'None' ? translateText('None') : family, tone: family !== 'None' ? 'bad' : 'good' },
       ],
       notes: uniqueStrings([
         parsed?.firstSeen ? `First seen: ${new Date(parsed.firstSeen).toLocaleString()}` : '',
@@ -155,7 +156,7 @@ const buildDetailSummary = (scan: ScanRow | null): ScanDetailSummary => {
 
   return {
     highlights: [
-      { label: 'File category', value: String(layer1?.riskCategory ?? 'Unknown') },
+      { label: 'File category', value: String(layer1?.riskCategory ?? translateText('Unknown')) },
       { label: 'File size', value: formatBytes(Number(layer1?.fileSize)) },
       { label: 'Entropy', value: Number.isFinite(Number(layer1?.entropy)) ? Number(layer1?.entropy).toFixed(2) : 'N/A', tone: Number(layer1?.entropy) >= 7.2 ? 'warn' : 'neutral' },
       { label: 'Detections', value: `${Number(layer2?.detections ?? 0)}/${Number(layer2?.engines ?? 0) || '?'}`, tone: Number(layer2?.detections ?? 0) > 0 ? 'bad' : 'good' },
@@ -177,28 +178,29 @@ const toneClass = (tone: HighlightTone = 'neutral'): string => {
   return 'text-slate-200 border-slate-700 bg-slate-800/60';
 };
 
-const normalizeScanType = (scanType: string | undefined): { label: string; accentClass: string } => {
+const normalizeScanType = (scanType: string | undefined, translateText: (text: string) => string): { label: string; accentClass: string } => {
   const raw = (scanType || '').toLowerCase();
   if (raw.includes('url')) {
-    return { label: 'URL Scanning', accentClass: 'text-violet-300' };
+    return { label: translateText('URL Scanning'), accentClass: 'text-violet-300' };
   }
   if (raw.includes('email')) {
-    return { label: 'Email Scanning', accentClass: 'text-fuchsia-300' };
+    return { label: translateText('Email Scanning'), accentClass: 'text-fuchsia-300' };
   }
   if (raw.includes('file')) {
-    return { label: 'File Scanning', accentClass: 'text-cyan-300' };
+    return { label: translateText('File Scanning'), accentClass: 'text-cyan-300' };
   }
   if (raw.includes('hash')) {
-    return { label: 'Hash Checking', accentClass: 'text-amber-300' };
+    return { label: translateText('Hash Checking'), accentClass: 'text-amber-300' };
   }
   if (raw.includes('gateway')) {
-    return { label: 'Gateway Monitoring', accentClass: 'text-emerald-300' };
+    return { label: translateText('Gateway Monitoring'), accentClass: 'text-emerald-300' };
   }
-  return { label: 'Security Scan', accentClass: 'text-slate-200' };
+  return { label: translateText('Security Scan'), accentClass: 'text-slate-200' };
 };
 
 export function DashboardView({ isActive = true }: DashboardViewProps) {
   const { token } = useAuth();
+  const { translateText } = useLanguage();
   const [scans, setScans] = useState<ScanRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -330,7 +332,7 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [selectedScanId, closeScanReport]);
 
-  const selectedSummary = useMemo(() => buildDetailSummary(selectedScan), [selectedScan]);
+  const selectedSummary = useMemo(() => buildDetailSummary(selectedScan, translateText), [selectedScan, translateText]);
 
   return (
     <div className="flex-1 bg-slate-900 global-scroll">
@@ -349,15 +351,15 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
       <div className="p-8">
         <div className="flex items-start justify-between mb-8 gap-4">
           <div>
-            <h2 className="text-3xl font-bold text-white mb-2">Dashboard</h2>
-            <p className="text-slate-400">Overview of your security scans</p>
+            <h2 className="text-3xl font-bold text-white mb-2">{translateText('Dashboard')}</h2>
+            <p className="text-slate-400">{translateText('Overview of your security scans')}</p>
           </div>
           <div className="text-right">
             <p className="text-xs text-slate-500 mt-2">
-              Auto-refresh every 10s
+              {translateText('Auto-refresh every 10s')}
             </p>
             <p className="text-xs text-slate-500 mt-1">
-              Last update: {lastUpdated || 'Waiting...'}
+              {translateText('Last update:')} {lastUpdated || translateText('Waiting...')}
             </p>
           </div>
         </div>
@@ -366,7 +368,7 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
           <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-6">
             <div className="flex items-center justify-between mb-2">
-              <h3 className="text-slate-400 text-sm font-medium">Total Scans</h3>
+              <h3 className="text-slate-400 text-sm font-medium">{translateText('Total Scans')}</h3>
               <Activity className="w-5 h-5 text-cyan-400" />
             </div>
             <p className="text-3xl font-bold text-white">{stats.total}</p>
@@ -374,7 +376,7 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
 
           <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-6">
             <div className="flex items-center justify-between mb-2">
-              <h3 className="text-green-400 text-sm font-medium">Clean</h3>
+              <h3 className="text-green-400 text-sm font-medium">{translateText('Clean')}</h3>
               <CheckCircle className="w-5 h-5 text-green-400" />
             </div>
             <p className="text-3xl font-bold text-green-400">{stats.clean}</p>
@@ -382,7 +384,7 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
 
           <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-6">
             <div className="flex items-center justify-between mb-2">
-              <h3 className="text-red-400 text-sm font-medium">Malicious</h3>
+              <h3 className="text-red-400 text-sm font-medium">{translateText('Malicious')}</h3>
               <Shield className="w-5 h-5 text-red-400" />
             </div>
             <p className="text-3xl font-bold text-red-400">{stats.malicious}</p>
@@ -390,7 +392,7 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
 
           <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-6">
             <div className="flex items-center justify-between mb-2">
-              <h3 className="text-yellow-400 text-sm font-medium">Suspicious</h3>
+              <h3 className="text-yellow-400 text-sm font-medium">{translateText('Suspicious')}</h3>
               <AlertTriangle className="w-5 h-5 text-yellow-400" />
             </div>
             <p className="text-3xl font-bold text-yellow-400">{stats.suspicious}</p>
@@ -399,12 +401,12 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
 
         {/* Recent Scans */}
         <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-6">
-          <h3 className="text-xl font-bold text-white mb-4">Recent Scans</h3>
+          <h3 className="text-xl font-bold text-white mb-4">{translateText('Recent Scans')}</h3>
 
           {loading && (
             <div className="text-center py-8">
               <div className="w-12 h-12 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-              <p className="text-slate-400">Loading scans...</p>
+              <p className="text-slate-400">{translateText('Loading scans...')}</p>
             </div>
           )}
 
@@ -415,13 +417,13 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
           )}
 
           {!loading && !error && scans.length === 0 && (
-            <p className="text-slate-400 text-center py-8">No scans yet</p>
+            <p className="text-slate-400 text-center py-8">{translateText('No scans yet')}</p>
           )}
 
           {!loading && !error && scans.length > 0 && (
             <ul className="space-y-3">
               {scans.slice(0, 10).map((scan) => {
-                const scanType = normalizeScanType(scan.scan_type);
+                const scanType = normalizeScanType(scan.scan_type, translateText);
                 return (
                   <li
                     key={scan.id}
@@ -441,8 +443,8 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
                           <p className={`font-bold text-lg leading-tight ${scanType.accentClass}`}>
                             {scanType.label}
                           </p>
-                          <p className="text-slate-400 text-sm truncate" title={scan.target || 'N/A'}>
-                            {scan.target || 'N/A'}
+                          <p className="text-slate-400 text-sm truncate" title={scan.target || translateText('N/A')}>
+                            {scan.target || translateText('N/A')}
                           </p>
                         </div>
                       </div>
@@ -452,9 +454,9 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
                           scan.status === 'malicious' ? 'bg-red-500/10 text-red-400 border border-red-500/30' :
                           'bg-yellow-500/10 text-yellow-400 border border-yellow-500/30'
                         }`}>
-                          {scan.status || 'Unknown'}
+                          {scan.status ? translateText(scan.status.charAt(0).toUpperCase() + scan.status.slice(1)) : translateText('Unknown')}
                         </span>
-                        <span className="text-slate-500 text-sm">Open report</span>
+                        <span className="text-slate-500 text-sm">{translateText('Open report')}</span>
                       </div>
                     </button>
                   </li>
@@ -476,8 +478,8 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
           >
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700">
               <div>
-                <h3 className="text-xl font-bold text-white">Scan Report</h3>
-                <p className="text-slate-400 text-sm">Detailed report for scan #{selectedScanId}</p>
+                <h3 className="text-xl font-bold text-white">{translateText('Scan Report')}</h3>
+                <p className="text-slate-400 text-sm">{translateText('Detailed report for scan')} #{selectedScanId}</p>
               </div>
               <button
                 onClick={closeScanReport}
@@ -491,7 +493,7 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
               {detailLoading && (
                 <div className="text-center py-10">
                   <div className="w-10 h-10 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-                  <p className="text-slate-400">Loading full scan report...</p>
+                  <p className="text-slate-400">{translateText('Loading full scan report...')}</p>
                 </div>
               )}
 
@@ -504,40 +506,40 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
                   )}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                     <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-4">
-                      <p className="text-slate-400 text-xs mb-1 flex items-center gap-1"><FileText className="w-3 h-3" />Target</p>
-                      <p className="text-white font-medium break-all">{selectedScan.target || 'N/A'}</p>
+                      <p className="text-slate-400 text-xs mb-1 flex items-center gap-1"><FileText className="w-3 h-3" />{translateText('Target')}</p>
+                      <p className="text-white font-medium break-all">{selectedScan.target || translateText('N/A')}</p>
                     </div>
                     <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-4">
-                      <p className="text-slate-400 text-xs mb-1 flex items-center gap-1"><Activity className="w-3 h-3" />Type</p>
-                      <p className="text-white font-medium">{normalizeScanType(selectedScan.scan_type).label}</p>
+                      <p className="text-slate-400 text-xs mb-1 flex items-center gap-1"><Activity className="w-3 h-3" />{translateText('Type')}</p>
+                      <p className="text-white font-medium">{normalizeScanType(selectedScan.scan_type, translateText).label}</p>
                     </div>
                     <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-4">
-                      <p className="text-slate-400 text-xs mb-1 flex items-center gap-1"><Calendar className="w-3 h-3" />Created</p>
+                      <p className="text-slate-400 text-xs mb-1 flex items-center gap-1"><Calendar className="w-3 h-3" />{translateText('Created')}</p>
                       <p className="text-white font-medium">
-                        {selectedScan.created_at ? new Date(selectedScan.created_at).toLocaleString() : 'Unknown'}
+                        {selectedScan.created_at ? new Date(selectedScan.created_at).toLocaleString() : translateText('Unknown')}
                       </p>
                     </div>
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-4">
-                      <p className="text-slate-400 text-xs mb-2">Verdict</p>
+                      <p className="text-slate-400 text-xs mb-2">{translateText('Verdict')}</p>
                       <span className={`inline-flex px-3 py-1 rounded-full text-sm font-medium ${
                         selectedScan.status === 'clean' ? 'bg-green-500/10 text-green-400 border border-green-500/30' :
                         selectedScan.status === 'malicious' ? 'bg-red-500/10 text-red-400 border border-red-500/30' :
                         'bg-yellow-500/10 text-yellow-400 border border-yellow-500/30'
                       }`}>
-                        {selectedScan.status}
+                        {translateText(selectedScan.status.charAt(0).toUpperCase() + selectedScan.status.slice(1))}
                       </span>
                     </div>
                     <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-4">
-                      <p className="text-slate-400 text-xs mb-2 flex items-center gap-1"><Gauge className="w-3 h-3" />Threat score</p>
+                      <p className="text-slate-400 text-xs mb-2 flex items-center gap-1"><Gauge className="w-3 h-3" />{translateText('Threat score')}</p>
                       <p className="text-white text-xl font-semibold">{selectedScan.threat_score ?? 0}/100</p>
                     </div>
                   </div>
 
                   <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-4">
-                    <p className="text-slate-300 font-medium mb-3">Analysis Summary</p>
+                    <p className="text-slate-300 font-medium mb-3">{translateText('Analysis Summary')}</p>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       {selectedSummary.highlights.map((item, index) => (
                         <div key={`${item.label}-${index}`} className={`rounded-lg border px-3 py-2 ${toneClass(item.tone)}`}>
@@ -549,7 +551,7 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
                   </div>
 
                   <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-4">
-                    <p className="text-slate-300 font-medium mb-2">Key Findings</p>
+                    <p className="text-slate-300 font-medium mb-2">{translateText('Key Findings')}</p>
                     {selectedSummary.notes.length > 0 ? (
                       <ul className="space-y-2">
                         {selectedSummary.notes.map((note, index) => (
@@ -559,7 +561,7 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
                         ))}
                       </ul>
                     ) : (
-                      <p className="text-slate-400 text-sm">No important warnings found in this report.</p>
+                      <p className="text-slate-400 text-sm">{translateText('No important warnings found in this report.')}</p>
                     )}
                   </div>
                 </div>
@@ -567,7 +569,7 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
 
               {!detailLoading && !selectedScan && (
                 <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
-                  <p className="text-red-300 text-sm">Unable to load scan report data.</p>
+                  <p className="text-red-300 text-sm">{translateText('Unable to load scan report data.')}</p>
                 </div>
               )}
             </div>

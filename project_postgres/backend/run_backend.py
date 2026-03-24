@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
 
 
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -13,6 +14,7 @@ DB_DIR = BACKEND_DIR / "db"
 VENV_DIR = BACKEND_DIR / ".venv"
 REQUIREMENTS_FILE = BACKEND_DIR / "requirements.txt"
 STAMP_FILE = VENV_DIR / ".requirements.sha256"
+ENV_FILE = BACKEND_DIR / ".env"
 
 
 def _venv_python() -> Path:
@@ -126,6 +128,7 @@ def main() -> int:
     if not DB_DIR.exists():
         raise FileNotFoundError(f"Missing backend db directory: {DB_DIR}")
 
+    load_dotenv(ENV_FILE)
     python_exe = ensure_venv()
     ensure_dependencies(python_exe)
 
@@ -133,11 +136,17 @@ def main() -> int:
         print("[setup] Completed.")
         return 0
 
+    proxy_autostart = os.environ.get("SECA_PROXY_AUTOSTART", "false").strip().lower() in {"1", "true", "yes", "on"}
+    reload_enabled = not args.no_reload
+    if proxy_autostart and reload_enabled:
+        reload_enabled = False
+        print("[run] Proxy autostart detected; disabling Uvicorn --reload for stable gateway state on Windows.")
+
     cmd = build_uvicorn_command(
         python_exe=python_exe,
         host=args.host,
         port=args.port,
-        reload_enabled=not args.no_reload,
+        reload_enabled=reload_enabled,
     )
     print(f"[run] Starting backend from: {DB_DIR}")
     print(f"[run] Using interpreter: {python_exe}")

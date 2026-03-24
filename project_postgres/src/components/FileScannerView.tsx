@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+﻿import { useState, useRef, useEffect } from 'react';
 import {
   Upload, AlertCircle, CheckCircle, AlertTriangle, Loader2,
   FileText, Fingerprint, Shield, Code, Play, Monitor,
@@ -6,9 +6,10 @@ import {
   Sparkles, BarChart3, TrendingUp,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { useLanguage } from '../contexts/LanguageContext';
 import { apiUrl } from '../config/api';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 type RiskCategory = 'executable' | 'script' | 'document' | 'media' | 'archive' | 'unknown';
 type Status = 'clean' | 'malicious' | 'suspicious';
@@ -65,7 +66,7 @@ const pickRandom = (items: string[]): string => {
   return items[Math.floor(Math.random() * items.length)];
 };
 
-// ─── Static analysis helpers ──────────────────────────────────────────────────
+// â”€â”€â”€ Static analysis helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const toHex = (bytes: Uint8Array) => Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
 
@@ -248,17 +249,18 @@ const buildLayers = async (file: File): Promise<ScanResult['details']['layers']>
   };
 };
 
-// ─── Component ────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function FileScannerView() {
   const { user, token, signOut } = useAuth();
+  const { translateText } = useLanguage();
   const [scanning, setScanning]         = useState(false);
   const [result, setResult]             = useState<ScanResult | null>(null);
   const [fileName, setFileName]         = useState('');
   const [error, setError]               = useState<string | null>(null);
   const [currentLayer, setCurrentLayer] = useState(0);
 
-  // Sandbox state machine: idle → uploading → running → done | error
+  // Sandbox state machine: idle â†’ uploading â†’ running â†’ done | error
   const [dynState, setDynState]           = useState<'idle'|'uploading'|'running'|'done'|'error'>('idle');
   const [dynStep, setDynStep]             = useState('');
   const [dynProgress, setDynProgress]     = useState(0);
@@ -437,7 +439,7 @@ export function FileScannerView() {
 
   const toggleExpand = (k: string) => setExpanded(p => ({ ...p, [k]: !p[k] }));
 
-  // ── Static scan ─────────────────────────────────────────────────────────────
+  // â”€â”€ Static scan â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !user || !token) return;
@@ -506,13 +508,13 @@ export function FileScannerView() {
     }
   };
 
-  // ── Dynamic sandbox scan — REAL POLLING, no fake steps ───────────────────────
+  // â”€â”€ Dynamic sandbox scan â€” REAL POLLING, no fake steps â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const handleDynamicScan = async () => {
     if (!token) return;
     if (dynState === 'running' || dynState === 'uploading') return;
     const fileInput = document.getElementById('file-upload') as HTMLInputElement;
     const file = fileInput?.files?.[0];
-    if (!file) { setDynError('Original file not found — please re-upload the file.'); setDynState('error'); return; }
+    if (!file) { setDynError('Original file not found â€” please re-upload the file.'); setDynState('error'); return; }
 
     // Reset state
     setDynState('uploading');
@@ -525,7 +527,7 @@ export function FileScannerView() {
     clearPoll();
 
     try {
-      // Step 1: POST file → server launches sandbox in background, returns job_id immediately
+      // Step 1: POST file â†’ server launches sandbox in background, returns job_id immediately
       const fd = new FormData();
       fd.append('file', file);
       const startRes = await fetch(apiUrl('/analyze/dynamic'), {
@@ -551,7 +553,7 @@ export function FileScannerView() {
       setDynStep('Sandbox launched. Waiting for results...');
       setDynProgress(5);
 
-      // Step 2: Poll every 2s — backend updates step/progress in REAL TIME
+      // Step 2: Poll every 2s â€” backend updates step/progress in REAL TIME
       startPolling(job_id, token);
 
     } catch (err) {
@@ -580,7 +582,7 @@ export function FileScannerView() {
     setDynResult(null); setDynError(null); setDynJobId(null); setDynCancelling(false);
   };
 
-  // ── UI helpers ────────────────────────────────────────────────────────────────
+  // â”€â”€ UI helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const statusColor = (s?: string) => {
     const st = s ?? result?.status;
     return st === 'clean' ? 'text-green-400 bg-green-500/10 border-green-500/30'
@@ -641,7 +643,7 @@ export function FileScannerView() {
 
   const layerNames = ['File Info', 'Hash Analysis', 'Threat Detection', 'Code Analysis'];
 
-  // ─── Render ──────────────────────────────────────────────────────────────────
+  // â”€â”€â”€ Render â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   return (
     <div className="flex-1 bg-slate-900 flex flex-col h-full overflow-hidden">
       <style>{`
@@ -653,8 +655,8 @@ export function FileScannerView() {
       `}</style>
 
       <div className="p-8 pb-4 flex-shrink-0">
-        <h2 className="text-3xl font-bold text-white mb-1">File Scanner</h2>
-        <p className="text-slate-400 text-sm">4-layer static analysis + Windows Sandbox dynamic execution</p>
+        <h2 className="text-3xl font-bold text-white mb-1">{translateText('File Scanner')}</h2>
+        <p className="text-slate-400 text-sm">{translateText('4-layer static analysis + Windows Sandbox dynamic execution')}</p>
       </div>
 
       <div className="flex-1 overflow-y-auto min-h-0 px-8 pb-10 file-scroll">
@@ -664,37 +666,37 @@ export function FileScannerView() {
             <div className="lg:col-span-2 bg-slate-800/50 border border-slate-700 rounded-xl p-4">
               <div className="flex items-center gap-2 mb-3 text-cyan-300">
                 <Shield className="w-4 h-4" />
-                <p className="text-sm font-semibold">File Analysis Layers</p>
+                <p className="text-sm font-semibold">{translateText('File Analysis Layers')}</p>
               </div>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
                 <div className="bg-slate-900/50 border border-slate-700 rounded-lg p-3">
-                  <p className="text-slate-400">Layer 1</p>
-                  <p className="text-white font-semibold">File Info</p>
-                  <p className="text-slate-500 text-xs mt-1">Metadata, type, entropy</p>
+                  <p className="text-slate-400">{translateText('Layer 1')}</p>
+                  <p className="text-white font-semibold">{translateText('File Info')}</p>
+                  <p className="text-slate-500 text-xs mt-1">{translateText('Metadata, type, entropy')}</p>
                 </div>
                 <div className="bg-slate-900/50 border border-slate-700 rounded-lg p-3">
-                  <p className="text-slate-400">Layer 2</p>
-                  <p className="text-white font-semibold">Hash Analysis</p>
-                  <p className="text-slate-500 text-xs mt-1">MD5, SHA1, SHA256 checks</p>
+                  <p className="text-slate-400">{translateText('Layer 2')}</p>
+                  <p className="text-white font-semibold">{translateText('Hash Analysis')}</p>
+                  <p className="text-slate-500 text-xs mt-1">{translateText('MD5, SHA1, SHA256 checks')}</p>
                 </div>
                 <div className="bg-slate-900/50 border border-slate-700 rounded-lg p-3">
-                  <p className="text-slate-400">Layer 3</p>
-                  <p className="text-white font-semibold">Threat Detection</p>
-                  <p className="text-slate-500 text-xs mt-1">Heuristics and signatures</p>
+                  <p className="text-slate-400">{translateText('Layer 3')}</p>
+                  <p className="text-white font-semibold">{translateText('Threat Detection')}</p>
+                  <p className="text-slate-500 text-xs mt-1">{translateText('Heuristics and signatures')}</p>
                 </div>
                 <div className="bg-slate-900/50 border border-slate-700 rounded-lg p-3">
-                  <p className="text-slate-400">Layer 4</p>
-                  <p className="text-white font-semibold">Code Signals</p>
-                  <p className="text-slate-500 text-xs mt-1">Strings, imports, anomalies</p>
+                  <p className="text-slate-400">{translateText('Layer 4')}</p>
+                  <p className="text-white font-semibold">{translateText('Code Signals')}</p>
+                  <p className="text-slate-500 text-xs mt-1">{translateText('Strings, imports, anomalies')}</p>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3 mt-3 text-sm">
                 <div className="bg-slate-900/50 border border-slate-700 rounded-lg p-3">
-                  <p className="text-slate-400">Platform Scans</p>
+                  <p className="text-slate-400">{translateText('Platform Scans')}</p>
                   <p className="text-white font-bold text-lg">{feedStats ? feedStats.scan_totals.total.toLocaleString() : '...'}</p>
                 </div>
                 <div className="bg-slate-900/50 border border-slate-700 rounded-lg p-3">
-                  <p className="text-slate-400">Malicious Verdicts</p>
+                  <p className="text-slate-400">{translateText('Malicious Verdicts')}</p>
                   <p className="text-red-400 font-bold text-lg">{feedStats ? feedStats.scan_totals.malicious.toLocaleString() : '...'}</p>
                 </div>
               </div>
@@ -702,9 +704,9 @@ export function FileScannerView() {
             <div className="bg-gradient-to-br from-cyan-500/10 to-blue-500/10 border border-cyan-500/30 rounded-xl p-4">
               <div className="flex items-center gap-2 mb-2 text-cyan-300">
                 <Sparkles className="w-4 h-4" />
-                <p className="text-sm font-semibold">Did You Know?</p>
+                <p className="text-sm font-semibold">{translateText('Did You Know?')}</p>
               </div>
-              <p className="text-slate-200 text-sm leading-relaxed">{hookFact}</p>
+              <p className="text-slate-200 text-sm leading-relaxed">{translateText(hookFact)}</p>
             </div>
           </div>
 
@@ -713,8 +715,8 @@ export function FileScannerView() {
             <input type="file" onChange={handleFileUpload} className="hidden" id="file-upload" disabled={scanning} />
             <label htmlFor="file-upload" className="cursor-pointer block">
               <Upload className="w-14 h-14 text-slate-400 mx-auto mb-4" />
-              <h3 className="text-xl font-semibold text-white mb-2">{fileName || 'Drop your file here or click to browse'}</h3>
-              <p className="text-slate-500 text-sm">All file types supported • Max 100 MB</p>
+              <h3 className="text-xl font-semibold text-white mb-2">{fileName || translateText('Drop your file here or click to browse')}</h3>
+              <p className="text-slate-500 text-sm">{translateText('All file types supported • Max 100 MB')}</p>
             </label>
           </div>
 
@@ -726,27 +728,27 @@ export function FileScannerView() {
               <div className="grid grid-cols-4 gap-3 mb-6">
                 {layerNames.map((name, i) => (
                   <div key={i} className={`rounded-lg p-3 border text-center text-xs font-medium transition ${currentLayer > i ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300' : currentLayer === i+1 ? 'bg-cyan-500/10 border-cyan-500 text-white animate-pulse' : 'bg-slate-900/50 border-slate-600 text-slate-500'}`}>
-                    {currentLayer > i ? '✓ ' : ''}{name}
+                    {currentLayer > i ? '✓ ' : ''}{translateText(name)}
                   </div>
                 ))}
               </div>
               <div className="flex items-center justify-center gap-3 text-slate-300">
                 <Loader2 className="w-5 h-5 animate-spin text-cyan-400" />
-                <span>Running Layer {currentLayer}: {layerNames[currentLayer-1]}...</span>
+                <span>{translateText('Running Layer')} {currentLayer}: {translateText(layerNames[currentLayer-1])}...</span>
               </div>
             </div>
           )}
 
-          {/* ══ Static results ══ */}
+          {/* â•â• Static results â•â• */}
           {result && !scanning && (<>
 
             {/* Verdict */}
             <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-8 text-center">
               <div className="flex justify-center mb-4"><StatusIcon size={64} /></div>
-              <h3 className="text-2xl font-bold text-white mb-2">Static Scan Complete</h3>
-              <span className={`inline-block px-4 py-2 rounded-full text-sm font-semibold border ${statusColor()}`}>{result.status.toUpperCase()}</span>
+              <h3 className="text-2xl font-bold text-white mb-2">{translateText('Static Scan Complete')}</h3>
+              <span className={`inline-block px-4 py-2 rounded-full text-sm font-semibold border ${statusColor()}`}>{translateText(result.status.charAt(0).toUpperCase() + result.status.slice(1))}</span>
               <div className="mt-4">
-                <p className="text-slate-400 text-sm mb-2">Overall Threat Score</p>
+                <p className="text-slate-400 text-sm mb-2">{translateText('Overall Threat Score')}</p>
                 <div className="flex items-center justify-center gap-3">
                   <div className="flex-1 max-w-xs bg-slate-900/50 rounded-full h-3">
                     <div className={`h-full rounded-full transition-all ${result.threatScore>=60?'bg-red-500':result.threatScore>=25?'bg-yellow-500':'bg-green-500'}`} style={{width:`${result.threatScore}%`}} />
@@ -760,12 +762,12 @@ export function FileScannerView() {
               <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-6">
                 <div className="flex items-center gap-2 mb-4">
                   <BarChart3 className="w-4 h-4 text-cyan-400" />
-                  <h4 className="text-white font-semibold">Static Score Breakdown</h4>
+                  <h4 className="text-white font-semibold">{translateText('Static Score Breakdown')}</h4>
                 </div>
                 <div className="space-y-3">
                   {staticBreakdown?.map((item) => (
                     <div key={item.label} className="flex items-center justify-between rounded-lg bg-slate-900/50 border border-slate-700 p-3">
-                      <p className="text-slate-200 text-sm">{item.label}</p>
+                      <p className="text-slate-200 text-sm">{translateText(item.label)}</p>
                       <p className="text-cyan-300 font-semibold">+{item.score}</p>
                     </div>
                   ))}
@@ -774,16 +776,16 @@ export function FileScannerView() {
               <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-6">
                 <div className="flex items-center gap-2 mb-4">
                   <TrendingUp className="w-4 h-4 text-cyan-400" />
-                  <h4 className="text-white font-semibold">Static Comparison</h4>
+                  <h4 className="text-white font-semibold">{translateText('Static Comparison')}</h4>
                 </div>
                 {previousStaticResult ? (
                   <div className="space-y-3">
                     <div className="rounded-lg bg-slate-900/50 border border-slate-700 p-3">
-                      <p className="text-slate-400 text-sm">Previous score</p>
+                      <p className="text-slate-400 text-sm">{translateText('Previous score')}</p>
                       <p className="text-white font-semibold">{previousStaticResult.threatScore}/100</p>
                     </div>
                     <div className="rounded-lg bg-slate-900/50 border border-slate-700 p-3">
-                      <p className="text-slate-400 text-sm">Delta</p>
+                      <p className="text-slate-400 text-sm">{translateText('Delta')}</p>
                       <p className={`font-semibold ${
                         (staticDelta ?? 0) > 0 ? 'text-red-400' : (staticDelta ?? 0) < 0 ? 'text-green-400' : 'text-slate-300'
                       }`}>
@@ -793,7 +795,7 @@ export function FileScannerView() {
                   </div>
                 ) : (
                   <div className="rounded-lg bg-slate-900/50 border border-slate-700 p-3">
-                    <p className="text-slate-400 text-sm">Run another static scan to unlock trend comparison.</p>
+                    <p className="text-slate-400 text-sm">{translateText('Run another static scan to unlock trend comparison.')}</p>
                   </div>
                 )}
               </div>
@@ -803,14 +805,14 @@ export function FileScannerView() {
             <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-6">
               <div className="flex items-center gap-3 mb-4">
                 <div className="w-10 h-10 bg-cyan-500/10 border border-cyan-500/30 rounded-lg flex items-center justify-center text-cyan-400"><FileText className="w-5 h-5" /></div>
-                <div><h4 className="text-white font-semibold">Layer 1: File Information</h4><p className="text-slate-400 text-sm">Metadata, type classification and entropy</p></div>
+                <div><h4 className="text-white font-semibold">{translateText('Layer 1')}: {translateText('File Information')}</h4><p className="text-slate-400 text-sm">{translateText('Metadata, type classification and entropy')}</p></div>
               </div>
               <div className="grid grid-cols-2 gap-4 text-sm">
-                <div className="col-span-2"><p className="text-slate-500">File Name</p><p className="text-white font-medium break-all">{result.details.layers.layer1_info.fileName}</p></div>
-                <div><p className="text-slate-500">Size</p><p className="text-white font-medium">{(result.details.layers.layer1_info.fileSize/1024).toFixed(2)} KB</p></div>
-                <div><p className="text-slate-500">Extension</p><p className="text-white font-medium">{result.details.layers.layer1_info.extension}</p></div>
-                <div><p className="text-slate-500">Risk Category</p><span className={`inline-block mt-1 px-2 py-0.5 rounded border text-xs font-medium ${catColor(result.details.layers.layer1_info.riskCategory)}`}>{result.details.layers.layer1_info.riskCategory.toUpperCase()}</span></div>
-                <div><p className="text-slate-500">Entropy</p><p className={`font-medium ${result.details.layers.layer1_info.entropy>7?'text-red-400':result.details.layers.layer1_info.entropy>6?'text-yellow-400':'text-green-400'}`}>{result.details.layers.layer1_info.entropy.toFixed(2)} / 8.0{result.details.layers.layer1_info.entropy>7&&' High - may be packed/encrypted'}</p></div>
+                <div className="col-span-2"><p className="text-slate-500">{translateText('File Name')}</p><p className="text-white font-medium break-all">{result.details.layers.layer1_info.fileName}</p></div>
+                <div><p className="text-slate-500">{translateText('Size')}</p><p className="text-white font-medium">{(result.details.layers.layer1_info.fileSize/1024).toFixed(2)} KB</p></div>
+                <div><p className="text-slate-500">{translateText('Extension')}</p><p className="text-white font-medium">{result.details.layers.layer1_info.extension}</p></div>
+                <div><p className="text-slate-500">{translateText('Risk Category')}</p><span className={`inline-block mt-1 px-2 py-0.5 rounded border text-xs font-medium ${catColor(result.details.layers.layer1_info.riskCategory)}`}>{translateText(result.details.layers.layer1_info.riskCategory)}</span></div>
+                <div><p className="text-slate-500">{translateText('Entropy')}</p><p className={`font-medium ${result.details.layers.layer1_info.entropy>7?'text-red-400':result.details.layers.layer1_info.entropy>6?'text-yellow-400':'text-green-400'}`}>{result.details.layers.layer1_info.entropy.toFixed(2)} / 8.0{result.details.layers.layer1_info.entropy>7 && ` ${translateText('High - may be packed/encrypted')}`}</p></div>
               </div>
             </div>
 
@@ -818,15 +820,15 @@ export function FileScannerView() {
             <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-6">
               <div className="flex items-center gap-3 mb-4">
                 <div className="w-10 h-10 bg-cyan-500/10 border border-cyan-500/30 rounded-lg flex items-center justify-center text-cyan-400"><Fingerprint className="w-5 h-5" /></div>
-                <div><h4 className="text-white font-semibold">Layer 2: Hash Analysis</h4><p className="text-slate-400 text-sm">Cryptographic hashes and known-bad database lookup</p></div>
+                <div><h4 className="text-white font-semibold">{translateText('Layer 2')}: {translateText('Hash Analysis')}</h4><p className="text-slate-400 text-sm">{translateText('Cryptographic hashes and known-bad database lookup')}</p></div>
               </div>
               <div className="space-y-3">
                 <div className="bg-slate-900/50 rounded-lg p-3 text-sm font-mono space-y-1">
                   {(['md5','sha1','sha256'] as const).map(h => (<div key={h}><span className="text-slate-500 uppercase">{h}: </span><span className="text-white break-all">{result.details.layers.layer2_hashes[h]}</span></div>))}
                 </div>
                 <div className={`rounded-lg p-3 border ${result.details.layers.layer2_hashes.databaseMatch?'bg-red-500/10 border-red-500/30':'bg-green-500/10 border-green-500/30'}`}>
-                  <p className="font-medium mb-1">{result.details.layers.layer2_hashes.databaseMatch?'Hash found in malware database':'Not found in malware database'}</p>
-                  {result.details.layers.layer2_hashes.databaseMatch && <div className="text-sm text-red-300 space-y-1"><p>Detections: {result.details.layers.layer2_hashes.detections} / {result.details.layers.layer2_hashes.engines} engines</p><p>Malware Family: {result.details.layers.layer2_hashes.malwareFamily}</p></div>}
+                  <p className="font-medium mb-1">{translateText(result.details.layers.layer2_hashes.databaseMatch ? 'Hash found in malware database' : 'Not found in malware database')}</p>
+                  {result.details.layers.layer2_hashes.databaseMatch && <div className="text-sm text-red-300 space-y-1"><p>{translateText('Detections')}: {result.details.layers.layer2_hashes.detections} / {result.details.layers.layer2_hashes.engines} engines</p><p>{translateText('Malware Family:')} {result.details.layers.layer2_hashes.malwareFamily}</p></div>}
                 </div>
               </div>
             </div>
@@ -835,17 +837,17 @@ export function FileScannerView() {
             <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-6">
               <div className="flex items-center gap-3 mb-4">
                 <div className="w-10 h-10 bg-cyan-500/10 border border-cyan-500/30 rounded-lg flex items-center justify-center text-cyan-400"><Shield className="w-5 h-5" /></div>
-                <div><h4 className="text-white font-semibold">Layer 3: Threat Detection</h4><p className="text-slate-400 text-sm">Signature and heuristic threat identification</p></div>
+                <div><h4 className="text-white font-semibold">{translateText('Layer 3')}: {translateText('Threat Detection')}</h4><p className="text-slate-400 text-sm">{translateText('Signature and heuristic threat identification')}</p></div>
               </div>
               {result.details.layers.layer3_threats.threats.length > 0 ? (
                 <div className="space-y-2">
                   {result.details.layers.layer3_threats.threats.map((t,i) => (<div key={i} className={`rounded-lg p-3 border ${sevColor(t.severity)}`}><div className="flex items-center justify-between"><span className="font-medium">{t.name}</span><span className="text-xs uppercase opacity-70">{t.severity}</span></div>{t.description&&<p className="text-sm mt-1 opacity-80">{t.description}</p>}</div>))}
-                  <p className="text-right text-sm text-slate-400">Score contribution: +{result.details.layers.layer3_threats.totalScore}</p>
+                  <p className="text-right text-sm text-slate-400">{translateText('Score contribution')}: +{result.details.layers.layer3_threats.totalScore}</p>
                 </div>
               ) : (
                 <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-4">
-                  <p className="text-green-400">✓ No threats detected</p>
-                  {!['executable','script','archive'].includes(result.details.layers.layer1_info.riskCategory)&&<p className="text-green-600 text-sm mt-1">Threat detection N/A for {result.details.layers.layer1_info.riskCategory} files</p>}
+                  <p className="text-green-400">✓ {translateText('No threats detected')}</p>
+                  {!['executable','script','archive'].includes(result.details.layers.layer1_info.riskCategory)&&<p className="text-green-600 text-sm mt-1">{translateText('Threat detection N/A for')} {translateText(result.details.layers.layer1_info.riskCategory)} {translateText('files')}</p>}
                 </div>
               )}
             </div>
@@ -854,19 +856,19 @@ export function FileScannerView() {
             <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-6">
               <div className="flex items-center gap-3 mb-4">
                 <div className="w-10 h-10 bg-cyan-500/10 border border-cyan-500/30 rounded-lg flex items-center justify-center text-cyan-400"><Code className="w-5 h-5" /></div>
-                <div><h4 className="text-white font-semibold">Layer 4: Code Analysis</h4><p className="text-slate-400 text-sm">Suspicious patterns, packer detection and imports</p></div>
+                <div><h4 className="text-white font-semibold">{translateText('Layer 4')}: {translateText('Code Analysis')}</h4><p className="text-slate-400 text-sm">{translateText('Suspicious patterns, packer detection and imports')}</p></div>
               </div>
               <div className="space-y-3">
-                {result.details.layers.layer4_code.suspiciousStrings.length > 0 && <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3"><p className="text-yellow-400 font-medium text-sm mb-2">Suspicious Strings</p><ul className="space-y-1">{result.details.layers.layer4_code.suspiciousStrings.map((s,i)=><li key={i} className="text-white text-sm font-mono">• {s}</li>)}</ul></div>}
-                {result.details.layers.layer4_code.packerDetected && <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3"><p className="text-yellow-400 text-sm">Packer: <span className="font-mono font-bold">{result.details.layers.layer4_code.packerDetected}</span></p></div>}
-                {result.details.layers.layer4_code.obfuscated && <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3"><p className="text-yellow-400 text-sm">Code appears obfuscated</p></div>}
-                {result.details.layers.layer4_code.imports.length > 0 && <div className="bg-slate-900/50 border border-slate-600 rounded-lg p-3"><p className="text-slate-300 font-medium text-sm mb-2">Imported DLLs</p><div className="flex flex-wrap gap-2">{result.details.layers.layer4_code.imports.map((imp,i)=><span key={i} className={`px-2 py-1 rounded text-xs font-mono border ${['wininet.dll','urlmon.dll','wsock32.dll'].includes(imp)?'bg-yellow-500/10 border-yellow-500/30 text-yellow-300':'bg-slate-800 border-slate-600 text-slate-300'}`}>{imp}</span>)}</div></div>}
-                {result.details.layers.layer4_code.anomalies.length > 0 && <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3"><p className="text-yellow-400 font-medium text-sm mb-2">Structural Anomalies</p><ul className="space-y-1">{result.details.layers.layer4_code.anomalies.map((a,i)=><li key={i} className="text-white text-sm">• {a}</li>)}</ul></div>}
-                {!result.details.layers.layer4_code.suspiciousStrings.length&&!result.details.layers.layer4_code.packerDetected&&!result.details.layers.layer4_code.obfuscated&&!result.details.layers.layer4_code.anomalies.length&&<div className="bg-green-500/10 border border-green-500/30 rounded-lg p-4"><p className="text-green-400">✓ No suspicious code patterns</p>{!['executable','script'].includes(result.details.layers.layer1_info.riskCategory)&&<p className="text-green-600 text-sm mt-1">Code analysis N/A for {result.details.layers.layer1_info.riskCategory} files</p>}</div>}
+                {result.details.layers.layer4_code.suspiciousStrings.length > 0 && <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3"><p className="text-yellow-400 font-medium text-sm mb-2">{translateText('Suspicious Strings')}</p><ul className="space-y-1">{result.details.layers.layer4_code.suspiciousStrings.map((s,i)=><li key={i} className="text-white text-sm font-mono">â€¢ {s}</li>)}</ul></div>}
+                {result.details.layers.layer4_code.packerDetected && <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3"><p className="text-yellow-400 text-sm">{translateText('Packer')}: <span className="font-mono font-bold">{result.details.layers.layer4_code.packerDetected}</span></p></div>}
+                {result.details.layers.layer4_code.obfuscated && <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3"><p className="text-yellow-400 text-sm">{translateText('Code appears obfuscated')}</p></div>}
+                {result.details.layers.layer4_code.imports.length > 0 && <div className="bg-slate-900/50 border border-slate-600 rounded-lg p-3"><p className="text-slate-300 font-medium text-sm mb-2">{translateText('Imported DLLs')}</p><div className="flex flex-wrap gap-2">{result.details.layers.layer4_code.imports.map((imp,i)=><span key={i} className={`px-2 py-1 rounded text-xs font-mono border ${['wininet.dll','urlmon.dll','wsock32.dll'].includes(imp)?'bg-yellow-500/10 border-yellow-500/30 text-yellow-300':'bg-slate-800 border-slate-600 text-slate-300'}`}>{imp}</span>)}</div></div>}
+                {result.details.layers.layer4_code.anomalies.length > 0 && <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3"><p className="text-yellow-400 font-medium text-sm mb-2">{translateText('Structural Anomalies')}</p><ul className="space-y-1">{result.details.layers.layer4_code.anomalies.map((a,i)=><li key={i} className="text-white text-sm">â€¢ {a}</li>)}</ul></div>}
+                {!result.details.layers.layer4_code.suspiciousStrings.length&&!result.details.layers.layer4_code.packerDetected&&!result.details.layers.layer4_code.obfuscated&&!result.details.layers.layer4_code.anomalies.length&&<div className="bg-green-500/10 border border-green-500/30 rounded-lg p-4"><p className="text-green-400">✓ {translateText('No suspicious code patterns')}</p>{!['executable','script'].includes(result.details.layers.layer1_info.riskCategory)&&<p className="text-green-600 text-sm mt-1">{translateText('Code analysis N/A for')} {translateText(result.details.layers.layer1_info.riskCategory)} {translateText('files')}</p>}</div>}
               </div>
             </div>
 
-            {/* ══ DYNAMIC SANDBOX ══════════════════════════════════════════════ */}
+            {/* â•â• DYNAMIC SANDBOX â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */}
 
             {/* CTA */}
             {dynState === 'idle' && (
@@ -876,27 +878,27 @@ export function FileScannerView() {
                     <Monitor className="w-6 h-6 text-purple-400" />
                   </div>
                   <div className="flex-1">
-                    <h4 className="text-white font-bold text-lg mb-1">Dynamic Sandbox Analysis</h4>
+                    <h4 className="text-white font-bold text-lg mb-1">{translateText('Dynamic Sandbox Analysis')}</h4>
                     <p className="text-slate-400 text-sm mb-1">
-                      Opens the file inside a real <strong className="text-slate-300">Windows Sandbox VM</strong> and monitors every action — processes, network connections, file writes, registry changes.
+                      Opens the file inside a real <strong className="text-slate-300">Windows Sandbox VM</strong> and monitors every action â€” processes, network connections, file writes, registry changes.
                     </p>
                     <p className="text-slate-500 text-xs mb-3">Takes 60-120 seconds. Progress updates are live from the backend.</p>
                     <div className="flex flex-wrap gap-4 text-xs text-slate-400 mb-4">
-                      <span className="flex items-center gap-1"><Monitor className="w-3 h-3"/>Process monitoring</span>
-                      <span className="flex items-center gap-1"><Globe className="w-3 h-3"/>Network traffic</span>
-                      <span className="flex items-center gap-1"><FolderOpen className="w-3 h-3"/>File system</span>
-                      <span className="flex items-center gap-1"><Settings className="w-3 h-3"/>Registry</span>
+                      <span className="flex items-center gap-1"><Monitor className="w-3 h-3"/>{translateText('Process monitoring')}</span>
+                      <span className="flex items-center gap-1"><Globe className="w-3 h-3"/>{translateText('Network traffic')}</span>
+                      <span className="flex items-center gap-1"><FolderOpen className="w-3 h-3"/>{translateText('File system')}</span>
+                      <span className="flex items-center gap-1"><Settings className="w-3 h-3"/>{translateText('Registry')}</span>
                     </div>
                     {result.status === 'malicious' && <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-2 mb-3 text-red-400 text-xs">File flagged malicious. Sandbox is isolated from host.</div>}
                     <button onClick={handleDynamicScan} className="flex items-center gap-2 px-5 py-2.5 bg-purple-600 hover:bg-purple-700 text-white font-semibold rounded-lg transition">
-                      <Play className="w-4 h-4"/> Run Dynamic Sandbox Analysis
+                      <Play className="w-4 h-4"/> {translateText('Run Dynamic Sandbox Analysis')}
                     </button>
                   </div>
                 </div>
               </div>
             )}
 
-            {/* Live progress — real data from backend */}
+            {/* Live progress â€” real data from backend */}
             {(dynState === 'uploading' || dynState === 'running') && (
               <div className="bg-slate-800/50 border border-purple-500/30 rounded-xl p-8">
                 <div className="flex items-center justify-between mb-5">
@@ -904,7 +906,7 @@ export function FileScannerView() {
                     <Monitor className="w-8 h-8 text-purple-400 animate-pulse" />
                     <div>
                       <h4 className="text-white font-bold">{dynState === 'uploading' ? 'Uploading file...' : 'Windows Sandbox Running'}</h4>
-                      <p className="text-slate-500 text-xs">Live progress from backend — no fake animations</p>
+                      <p className="text-slate-500 text-xs">Live progress from backend â€” no fake animations</p>
                     </div>
                   </div>
                   <button
@@ -961,7 +963,7 @@ export function FileScannerView() {
                       <div className="bg-slate-900/50 rounded-lg p-3 text-xs text-slate-400 space-y-1 mb-3">
                         <p className="text-white font-medium">How to enable Windows Sandbox:</p>
                         <p>1. Open "Turn Windows features on or off"</p>
-                        <p>2. Enable "Windows Sandbox" ✓</p>
+                        <p>2. Enable "Windows Sandbox" âœ“</p>
                         <p>3. Restart your PC</p>
                         <p className="text-yellow-400 mt-1">Requires Windows 10/11 Pro or Enterprise</p>
                       </div>
@@ -980,7 +982,7 @@ export function FileScannerView() {
                 <div className="bg-slate-800/50 border border-purple-500/30 rounded-xl p-6 text-center">
                   <div className="flex justify-center mb-3"><StatusIcon s={dynResult.verdict} size={64} /></div>
                   <h4 className="text-white font-bold text-xl mb-2">Dynamic Analysis Complete</h4>
-                  <span className={`inline-block px-4 py-2 rounded-full text-sm font-semibold border ${statusColor(dynResult.verdict)}`}>{dynResult.verdict.toUpperCase()}</span>
+                  <span className={`inline-block px-4 py-2 rounded-full text-sm font-semibold border ${statusColor(dynResult.verdict)}`}>{translateText(dynResult.verdict.charAt(0).toUpperCase() + dynResult.verdict.slice(1))}</span>
                   <p className="text-slate-400 text-sm mt-2">Execution: {dynResult.duration}s &bull; Dynamic threat score: {dynResult.threatScore}/100</p>
                   {previousDynamicResult && (
                     <p className={`text-sm mt-1 ${
@@ -997,7 +999,7 @@ export function FileScannerView() {
                 {/* Collapsible sections */}
                 {([
                   { key: 'processes', label: 'Process Activity',   Icon: Monitor,    items: dynResult.processes,
-                    empty: '✓ No new processes spawned',
+                    empty: 'âœ“ No new processes spawned',
                     render: (p: DynamicProcess) => (
                       <div className={`rounded-lg p-3 border text-sm ${p.suspicious?'bg-red-500/10 border-red-500/30':'bg-slate-900/50 border-slate-600'}`}>
                         <div className="flex items-center gap-2 mb-1">
@@ -1010,28 +1012,28 @@ export function FileScannerView() {
                       </div>
                     )},
                   { key: 'network', label: 'Network Connections',  Icon: Globe,      items: dynResult.network,
-                    empty: '✓ No external network connections',
+                    empty: 'âœ“ No external network connections',
                     render: (n: DynamicNetwork) => (
                       <div className={`rounded-lg p-3 border text-sm ${n.suspicious?'bg-red-500/10 border-red-500/30':'bg-slate-900/50 border-slate-600'}`}>
                         <div className="flex items-center justify-between">
-                          <span className="font-mono text-white">{n.protocol} → {n.destination}:{n.port}</span>
-                          {n.suspicious&&<span className="text-xs text-red-400 font-medium">⚠ EXTERNAL</span>}
+                          <span className="font-mono text-white">{n.protocol} â†’ {n.destination}:{n.port}</span>
+                          {n.suspicious&&<span className="text-xs text-red-400 font-medium">âš  EXTERNAL</span>}
                         </div>
                       </div>
                     )},
                   { key: 'files', label: 'File System Changes',    Icon: FolderOpen, items: dynResult.files,
-                    empty: '✓ No significant file system changes',
+                    empty: 'âœ“ No significant file system changes',
                     render: (f: DynamicFile) => (
                       <div className={`rounded-lg p-3 border text-sm ${f.suspicious?'bg-yellow-500/10 border-yellow-500/30':'bg-slate-900/50 border-slate-600'}`}>
                         <div className="flex items-center gap-2 mb-1">
                           <span className={`text-xs px-1.5 py-0.5 rounded font-semibold ${f.action==='created'?'bg-blue-500/20 text-blue-300':f.action==='modified'?'bg-yellow-500/20 text-yellow-300':'bg-red-500/20 text-red-300'}`}>{f.action.toUpperCase()}</span>
-                          {f.suspicious&&<span className="text-xs text-yellow-400">⚠ Sensitive location</span>}
+                          {f.suspicious&&<span className="text-xs text-yellow-400">âš  Sensitive location</span>}
                         </div>
                         <p className="font-mono text-white text-xs break-all">{f.path}</p>
                       </div>
                     )},
                   { key: 'registry', label: 'Registry Changes',    Icon: Settings,   items: dynResult.registry,
-                    empty: '✓ No registry modifications',
+                    empty: 'âœ“ No registry modifications',
                     render: (r: DynamicRegistry) => (
                       <div className={`rounded-lg p-3 border text-sm ${r.suspicious?'bg-red-500/10 border-red-500/30':'bg-slate-900/50 border-slate-600'}`}>
                         <div className="flex items-center gap-2 mb-1">
@@ -1077,3 +1079,4 @@ export function FileScannerView() {
     </div>
   );
 }
+

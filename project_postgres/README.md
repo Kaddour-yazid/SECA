@@ -13,6 +13,7 @@ For full project documentation, setup instructions, and backend details, see the
 npm install
 npm run dev
 npm run build
+npm run desktop:start
 ```
 
 Optional frontend API override (`project_postgres/.env`):
@@ -31,3 +32,25 @@ cd backend
 Default dev URL:
 
 - `http://127.0.0.1:5173`
+
+## Desktop App
+
+This project can also run as a Windows desktop app with Electron while keeping the existing PostgreSQL backend configuration.
+
+Desktop launch:
+
+```powershell
+npm run desktop:start
+```
+
+Portable Windows build:
+
+```powershell
+npm run desktop:pack
+```
+
+Notes:
+
+- The desktop app starts the backend on `127.0.0.1:8000` if it is not already running.
+- It reuses the backend folder and `.env` configuration shipped with the build.
+- Your PostgreSQL configuration remains unchanged.

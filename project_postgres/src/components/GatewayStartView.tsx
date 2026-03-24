@@ -13,6 +13,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { useLanguage } from '../contexts/LanguageContext';
 import { apiUrl } from '../config/api';
 
 type EmployeeUsage = {
@@ -125,6 +126,7 @@ const ringStyle = (color: string, percent: number) => ({
 
 export function GatewayStartView() {
   const { token } = useAuth();
+  const { translateText } = useLanguage();
   const [activePanel, setActivePanel] = useState<'overview' | 'employees' | 'policies'>('overview');
   const [scanRows, setScanRows] = useState<ScanRow[]>([]);
 
@@ -251,39 +253,39 @@ export function GatewayStartView() {
       <div className="p-8 space-y-6">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h2 className="text-3xl font-bold text-white mb-2">Monitoring</h2>
-            <p className="text-slate-400">Design preview for employee web-usage gateway monitoring and policy control.</p>
+            <h2 className="text-3xl font-bold text-white mb-2">{translateText('Monitoring')}</h2>
+            <p className="text-slate-400">{translateText('Design preview for employee web-usage gateway monitoring and policy control.')}</p>
           </div>
           <div className="px-3 py-2 rounded-lg border border-cyan-500/30 bg-cyan-500/10 text-cyan-300 text-sm">
-            UI Mock + Real Scan Flavor
+            {translateText('UI Mock + Real Scan Flavor')}
           </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4">
             <div className="flex items-center justify-between mb-2">
-              <p className="text-slate-400 text-sm">Active Gateways</p>
+              <p className="text-slate-400 text-sm">{translateText('Active Gateways')}</p>
               <Network className="w-5 h-5 text-cyan-400" />
             </div>
             <p className="text-3xl font-bold text-white">{stats.onlineGateways}/{mockDevices.length}</p>
           </div>
           <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4">
             <div className="flex items-center justify-between mb-2">
-              <p className="text-slate-400 text-sm">Tracked Searches</p>
+              <p className="text-slate-400 text-sm">{translateText('Tracked Searches')}</p>
               <BarChart3 className="w-5 h-5 text-cyan-400" />
             </div>
             <p className="text-3xl font-bold text-white">{stats.totalQueries}</p>
           </div>
           <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4">
             <div className="flex items-center justify-between mb-2">
-              <p className="text-slate-400 text-sm">Policy Hits</p>
+              <p className="text-slate-400 text-sm">{translateText('Policy Hits')}</p>
               <Shield className="w-5 h-5 text-cyan-400" />
             </div>
             <p className="text-3xl font-bold text-white">{stats.policyHits}</p>
           </div>
           <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4">
             <div className="flex items-center justify-between mb-2">
-              <p className="text-slate-400 text-sm">High-Risk Users</p>
+              <p className="text-slate-400 text-sm">{translateText('High-Risk Users')}</p>
               <AlertTriangle className="w-5 h-5 text-red-400" />
             </div>
             <p className="text-3xl font-bold text-red-400">{stats.highRiskUsers}</p>
@@ -292,9 +294,9 @@ export function GatewayStartView() {
 
         <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-2 flex gap-2">
           {[
-            { id: 'overview', label: 'Overview', icon: Activity },
-            { id: 'employees', label: 'Employees', icon: Users },
-            { id: 'policies', label: 'Policies', icon: Briefcase },
+            { id: 'overview', label: translateText('Overview'), icon: Activity },
+            { id: 'employees', label: translateText('Employees'), icon: Users },
+            { id: 'policies', label: translateText('Policies'), icon: Briefcase },
           ].map((tab) => {
             const Icon = tab.icon;
             const active = activePanel === tab.id;
@@ -318,17 +320,17 @@ export function GatewayStartView() {
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
           <div className="xl:col-span-2 bg-slate-800/50 border border-slate-700 rounded-xl p-6">
             <h3 className="text-xl font-bold text-white mb-4">
-              {activePanel === 'overview' && 'Employee Search Distribution'}
-              {activePanel === 'employees' && 'Employee Behavior Breakdown'}
-              {activePanel === 'policies' && 'Policy Builder Preview'}
+              {activePanel === 'overview' && translateText('Employee Search Distribution')}
+              {activePanel === 'employees' && translateText('Employee Behavior Breakdown')}
+              {activePanel === 'policies' && translateText('Policy Builder Preview')}
             </h3>
 
             {(activePanel === 'overview' || activePanel === 'employees') && (
               <>
                 <div className="bg-slate-900/50 border border-slate-700 rounded-lg p-4 mb-4">
                   <div className="flex items-center justify-between mb-3">
-                    <p className="text-slate-200 text-sm font-semibold">Top websites from URL scan data</p>
-                    <span className="text-xs text-slate-400">{topSites.reduce((sum, site) => sum + site.hits, 0)} tracked hits</span>
+                    <p className="text-slate-200 text-sm font-semibold">{translateText('Top websites from URL scan data')}</p>
+                    <span className="text-xs text-slate-400">{topSites.reduce((sum, site) => sum + site.hits, 0)} {translateText('tracked hits')}</span>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     {topSites.map((site) => (
@@ -343,7 +345,7 @@ export function GatewayStartView() {
                         <div className="w-full h-2 rounded-full bg-slate-900 border border-slate-700 overflow-hidden">
                           <div className="h-full rounded-full" style={{ width: `${site.percent}%`, backgroundColor: site.color }} />
                         </div>
-                        <p className="text-slate-400 text-xs mt-2">{site.hits} scans</p>
+                        <p className="text-slate-400 text-xs mt-2">{site.hits} {translateText('scans')}</p>
                       </div>
                     ))}
                   </div>
@@ -355,13 +357,13 @@ export function GatewayStartView() {
                       <div className="flex items-start justify-between mb-4">
                         <div>
                           <p className="text-white font-semibold text-lg">{employee.name}</p>
-                          <p className="text-slate-400 text-sm">{employee.team} - {employee.totalSearches} searches</p>
+                          <p className="text-slate-400 text-sm">{employee.team} - {employee.totalSearches} {translateText('searches')}</p>
                         </div>
                         <div className="text-right">
                           <span className={`px-2 py-1 text-xs rounded-full border ${riskBadge(employee.risk)}`}>
-                            {employee.risk.toUpperCase()} RISK
+                            {translateText(employee.risk.toUpperCase())} {translateText('RISK')}
                           </span>
-                          <p className="text-slate-400 text-xs mt-2">Non-work trend: {nonWorkPercent}%</p>
+                          <p className="text-slate-400 text-xs mt-2">{translateText('Non-work trend:')} {nonWorkPercent}%</p>
                         </div>
                       </div>
 
@@ -390,7 +392,7 @@ export function GatewayStartView() {
                   <div key={policy.category} className="bg-slate-900/50 border border-slate-700 rounded-lg p-4 flex items-center justify-between">
                     <div>
                       <p className="text-white font-medium">{policy.category}</p>
-                      <p className="text-slate-400 text-sm">Mode: {policy.mode} - {policy.matches} matches this week</p>
+                      <p className="text-slate-400 text-sm">{translateText('Mode')}: {translateText(policy.mode)} - {policy.matches} {translateText('matches this week')}</p>
                     </div>
                     <div className={`px-3 py-1 rounded-full text-xs border ${
                       policy.mode === 'Blocked'
@@ -399,7 +401,7 @@ export function GatewayStartView() {
                         ? 'text-yellow-400 bg-yellow-500/10 border-yellow-500/30'
                         : 'text-green-400 bg-green-500/10 border-green-500/30'
                     }`}>
-                      {policy.active ? 'ACTIVE' : 'DISABLED'}
+                      {policy.active ? translateText('ACTIVE') : translateText('DISABLED')}
                     </div>
                   </div>
                 ))}
@@ -412,16 +414,16 @@ export function GatewayStartView() {
               <div className="flex items-center justify-between mb-4">
                 <h4 className="text-white font-semibold flex items-center gap-2 text-lg">
                   <Wifi className="w-5 h-5 text-cyan-300" />
-                  Gateway Device Status
+                  {translateText('Gateway Device Status')}
                 </h4>
-                <span className="text-cyan-200 text-xs border border-cyan-400/30 bg-cyan-500/10 px-3 py-1 rounded-full">Real-time</span>
+                <span className="text-cyan-200 text-xs border border-cyan-400/30 bg-cyan-500/10 px-3 py-1 rounded-full">{translateText('Real-time')}</span>
               </div>
 
               <div className="grid grid-cols-[1fr_auto] gap-4 items-end mb-5">
                 <div>
-                  <p className="text-slate-300 text-sm mb-1">Gateway Health Index</p>
+                  <p className="text-slate-300 text-sm mb-1">{translateText('Gateway Health Index')}</p>
                   <p className="text-7xl font-black tracking-tight text-white leading-none">{onlinePercent}%</p>
-                  <p className="text-slate-300 text-base mt-2">{stats.onlineGateways} of {mockDevices.length} endpoints operational</p>
+                  <p className="text-slate-300 text-base mt-2">{stats.onlineGateways} / {mockDevices.length} {translateText('endpoints operational')}</p>
                 </div>
                 <div className="w-20 h-20 rounded-2xl bg-cyan-500/15 border border-cyan-400/30 flex items-center justify-center">
                   <Network className="w-10 h-10 text-cyan-300" />
@@ -430,15 +432,15 @@ export function GatewayStartView() {
 
               <div className="grid grid-cols-3 gap-2 mb-5">
                 <div className="gateway-mini-stat bg-slate-900/70 border border-slate-700 rounded-lg p-3 text-center">
-                  <p className="text-xs text-slate-400">Online</p>
+                  <p className="text-xs text-slate-400">{translateText('Online')}</p>
                   <p className="text-2xl font-extrabold text-green-400">{mockDevices.filter((d) => d.state === 'online').length}</p>
                 </div>
                 <div className="gateway-mini-stat bg-slate-900/70 border border-slate-700 rounded-lg p-3 text-center">
-                  <p className="text-xs text-slate-400">Warning</p>
+                  <p className="text-xs text-slate-400">{translateText('Warning')}</p>
                   <p className="text-2xl font-extrabold text-yellow-400">{mockDevices.filter((d) => d.state === 'warning').length}</p>
                 </div>
                 <div className="gateway-mini-stat bg-slate-900/70 border border-slate-700 rounded-lg p-3 text-center">
-                  <p className="text-xs text-slate-400">Offline</p>
+                  <p className="text-xs text-slate-400">{translateText('Offline')}</p>
                   <p className="text-2xl font-extrabold text-red-400">{mockDevices.filter((d) => d.state === 'offline').length}</p>
                 </div>
               </div>
@@ -450,7 +452,7 @@ export function GatewayStartView() {
                       <p className="text-slate-100 font-semibold text-sm">{device.hostname}</p>
                       {deviceIcon(device.state)}
                     </div>
-                    <p className="text-slate-400 text-xs mt-1">{device.ip} - last sync {device.lastSync}</p>
+                    <p className="text-slate-400 text-xs mt-1">{device.ip} - {translateText('last sync')} {device.lastSync}</p>
                   </div>
                 ))}
               </div>
@@ -460,9 +462,9 @@ export function GatewayStartView() {
               <div className="flex items-center justify-between mb-4">
                 <h4 className="text-white font-semibold flex items-center gap-2 text-lg">
                   <Activity className="w-5 h-5 text-cyan-300" />
-                  Live Traffic Snapshot
+                  {translateText('Live Traffic Snapshot')}
                 </h4>
-                <span className="text-slate-400 text-xs">{liveTraffic.length} recent events</span>
+                <span className="text-slate-400 text-xs">{liveTraffic.length} {translateText('recent events')}</span>
               </div>
 
               <div className="space-y-3">
@@ -480,7 +482,7 @@ export function GatewayStartView() {
                           ? 'text-yellow-400 bg-yellow-500/10 border-yellow-500/30'
                           : 'text-green-400 bg-green-500/10 border-green-500/30'
                       }`}>
-                        {event.mode}
+                        {translateText(event.mode)}
                       </span>
                     </div>
 

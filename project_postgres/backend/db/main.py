@@ -20,6 +20,7 @@ import hashlib
 import math
 import re
 import os
+import socket
 import shutil
 import subprocess
 import time
@@ -71,6 +72,8 @@ gateway_device_online_state: Dict[str, bool] = {}
 gateway_audit_queue: deque[Tuple[str, str]] = deque()
 gateway_audit_queue_lock = threading.Lock()
 gateway_started_at = datetime.utcnow()
+proxy_client_writers: set = set()
+proxy_client_writers_lock = threading.Lock()
 GATEWAY_INGEST_TOKEN = os.environ.get("SECA_GATEWAY_INGEST_TOKEN", "").strip()
 DEFAULT_PROXY_BLOCK_RULES = [
     ("*.youtube.com", "Starter default rule"),
@@ -116,19 +119,62 @@ def _read_float_env(name: str, default: float, minimum: Optional[float] = None, 
     return parsed
 
 
-SECA_PROXY_AUTOSTART = os.environ.get("SECA_PROXY_AUTOSTART", "false").strip().lower() in {"1", "true", "yes", "on"}
+def _read_bool_env(name: str, default: bool) -> bool:
+    raw_value = os.environ.get(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+SECA_PROXY_AUTOSTART = _read_bool_env("SECA_PROXY_AUTOSTART", False)
 SECA_PROXY_LISTEN_HOST = os.environ.get("SECA_PROXY_LISTEN_HOST", "127.0.0.1").strip() or "127.0.0.1"
 SECA_PROXY_LISTEN_PORT = _read_int_env("SECA_PROXY_LISTEN_PORT", 3128, minimum=1, maximum=65535)
 SECA_PROXY_BLOCKLIST_REFRESH_SECONDS = _read_int_env("SECA_PROXY_BLOCKLIST_REFRESH_SECONDS", 10, minimum=2)
 SECA_PROXY_ACTIVE_WINDOW_SECONDS = _read_int_env("SECA_PROXY_ACTIVE_WINDOW_SECONDS", 60, minimum=5)
 SECA_PROXY_TUNNEL_CHUNK_BYTES = _read_int_env("SECA_PROXY_TUNNEL_CHUNK_BYTES", 262144, minimum=16384, maximum=1048576)
 SECA_PROXY_ACTIVITY_TOUCH_SECONDS = _read_float_env("SECA_PROXY_ACTIVITY_TOUCH_SECONDS", 1.0, minimum=0.2, maximum=10.0)
+SECA_PROXY_STATIC_SCAN_DELAY_MS = _read_int_env("SECA_PROXY_STATIC_SCAN_DELAY_MS", 400, minimum=0, maximum=10000)
+SECA_PROXY_STATIC_AUDIT_SYNC = _read_bool_env("SECA_PROXY_STATIC_AUDIT_SYNC", True)
+SECA_PROXY_TLS_INTERCEPT = _read_bool_env("SECA_PROXY_TLS_INTERCEPT", False)
+SECA_PROXY_TLS_CA_CERT_PATH = os.environ.get("SECA_PROXY_TLS_CA_CERT_PATH", "").strip()
+SECA_PROXY_TLS_CA_KEY_PATH = os.environ.get("SECA_PROXY_TLS_CA_KEY_PATH", "").strip()
 SECA_GATEWAY_AUDIT_ASYNC = os.environ.get("SECA_GATEWAY_AUDIT_ASYNC", "true").strip().lower() in {"1", "true", "yes", "on"}
 SECA_GATEWAY_AUDIT_FLUSH_SECONDS = _read_float_env("SECA_GATEWAY_AUDIT_FLUSH_SECONDS", 0.5, minimum=0.1, maximum=5.0)
 SECA_GATEWAY_AUDIT_BATCH_SIZE = _read_int_env("SECA_GATEWAY_AUDIT_BATCH_SIZE", 200, minimum=20, maximum=2000)
 proxy_server = None
 proxy_blocklist_cache: List[str] = []
 proxy_blocklist_last_fetch = 0.0
+
+PROXY_BLOCKLIST_SHORTCUTS = {
+    "yt": "youtube",
+    "youtube": "youtube",
+    "fb": "facebook",
+    "facebook": "facebook",
+    "ig": "instagram",
+    "insta": "instagram",
+    "instagram": "instagram",
+    "wa": "whatsapp",
+    "whatsapp": "whatsapp",
+    "tw": "twitter",
+    "twitter": "twitter",
+    "x": "twitter",
+}
+
+PROXY_SERVICE_BLOCK_BUNDLES = {
+    "youtube": ["*youtube*", "*ytimg*", "*googlevideo*", "*youtu.be*", "*yt3*"],
+    "facebook": ["*facebook*", "*fbcdn*", "*fbsbx*", "*messenger*"],
+    "instagram": ["*instagram*", "*cdninstagram*"],
+    "twitter": ["*twitter*", "*twimg*", "*x.com*"],
+    "whatsapp": ["*whatsapp*", "*whatsapp.net*", "*wa.me*"],
+}
+
+PROXY_SERVICE_DOMAIN_HINTS = {
+    "youtube": ("youtube", "youtu.be", "ytimg", "googlevideo", "yt3"),
+    "facebook": ("facebook", "fbcdn", "fbsbx", "messenger"),
+    "instagram": ("instagram", "cdninstagram"),
+    "twitter": ("twitter", "twimg", "x.com"),
+    "whatsapp": ("whatsapp", "whatsapp.net", "wa.me"),
+}
 
 
 class GatewayBlockRuleCreate(BaseModel):
@@ -156,6 +202,134 @@ def _effective_blocklist(db: Session) -> List[str]:
         .all()
     )
     return [r.pattern for r in rows]
+
+
+def _normalize_proxy_block_pattern(raw_pattern: str) -> str:
+    value = (raw_pattern or "").strip().lower()
+    if not value:
+        raise HTTPException(status_code=400, detail="Pattern is required")
+
+    if value.startswith("http://") or value.startswith("https://"):
+        try:
+            value = urlsplit(value).hostname or ""
+        except Exception:
+            raise HTTPException(status_code=400, detail="Pattern is invalid")
+
+    value = value.split("/")[0].strip().strip(".")
+    if value.startswith("www."):
+        value = value[4:]
+    if not value:
+        raise HTTPException(status_code=400, detail="Pattern is required")
+
+    service_key = _proxy_service_key_from_value(value)
+    if service_key:
+        return f"*{service_key}*"
+
+    if "*" in value:
+        return value
+
+    if "." in value:
+        return f"*.{value}"
+
+    shortcut = PROXY_BLOCKLIST_SHORTCUTS.get(value, value)
+    return f"*{shortcut}*"
+
+
+def _invalidate_proxy_blocklist_cache() -> None:
+    global proxy_blocklist_cache, proxy_blocklist_last_fetch
+    proxy_blocklist_cache = []
+    proxy_blocklist_last_fetch = 0.0
+
+
+def _register_proxy_client_writer(writer: asyncio.StreamWriter) -> None:
+    with proxy_client_writers_lock:
+        proxy_client_writers.add(writer)
+
+
+def _unregister_proxy_client_writer(writer: asyncio.StreamWriter) -> None:
+    with proxy_client_writers_lock:
+        proxy_client_writers.discard(writer)
+
+
+async def _reset_active_proxy_connections() -> None:
+    with proxy_client_writers_lock:
+        writers = list(proxy_client_writers)
+
+    if not writers:
+        return
+
+    for writer in writers:
+        try:
+            writer.close()
+        except Exception:
+            pass
+
+    await asyncio.gather(
+        *(writer.wait_closed() for writer in writers),
+        return_exceptions=True,
+    )
+
+
+def _proxy_service_key_from_value(value: str) -> Optional[str]:
+    candidate = str(value or "").lower().strip().strip(".")
+    if not candidate:
+        return None
+
+    shortcut = PROXY_BLOCKLIST_SHORTCUTS.get(candidate)
+    if shortcut:
+        return shortcut
+
+    trimmed = candidate.lstrip("*.").replace("*", "").strip().strip(".")
+    if not trimmed:
+        return None
+
+    for service_key, hints in PROXY_SERVICE_DOMAIN_HINTS.items():
+        if trimmed == service_key:
+            return service_key
+        for hint in hints:
+            normalized_hint = hint.lower().strip().strip(".")
+            if (
+                trimmed == normalized_hint
+                or trimmed.endswith(f".{normalized_hint}")
+                or normalized_hint in trimmed
+            ):
+                return service_key
+    return None
+
+
+def _proxy_pattern_variants(pattern: str) -> List[str]:
+    candidate = str(pattern or "").lower().strip().strip(".")
+    if not candidate:
+        return []
+
+    variants: List[str] = [candidate]
+    trimmed = candidate.lstrip("*.").strip()
+    if trimmed and trimmed != candidate:
+        variants.append(trimmed)
+
+    bundle_key = trimmed.replace("*", "").strip().strip(".")
+    if bundle_key and "." not in bundle_key:
+        variants.extend(PROXY_SERVICE_BLOCK_BUNDLES.get(bundle_key, []))
+
+    deduped: List[str] = []
+    seen = set()
+    for item in variants:
+        normalized = str(item).lower().strip().strip(".")
+        if not normalized or normalized in seen:
+            continue
+        deduped.append(normalized)
+        seen.add(normalized)
+    return deduped
+
+
+def _proxy_rule_identity(pattern: str) -> str:
+    normalized = str(pattern or "").lower().strip().strip(".")
+    if not normalized:
+        return ""
+    service_key = _proxy_service_key_from_value(normalized)
+    if service_key:
+        return f"service:{service_key}"
+    return normalized
 
 
 def _gateway_protocol(method: str, target: Optional[str], port: int) -> str:
@@ -210,14 +384,13 @@ def _mark_proxy_client_connected(client_ip: str) -> None:
 def _mark_proxy_client_disconnected(client_ip: str) -> None:
     now_dt = datetime.utcnow()
     now = now_dt.isoformat()
-    now_ts = now_dt.timestamp()
     with gateway_state_lock:
         current = gateway_active_connections.get(client_ip, 0)
         if current <= 1:
             gateway_active_connections.pop(client_ip, None)
+            gateway_device_online_state[client_ip] = False
         else:
             gateway_active_connections[client_ip] = current - 1
-        gateway_client_last_activity[client_ip] = now_ts
         device = gateway_devices.get(client_ip)
         if device:
             device["last_seen"] = now
@@ -235,12 +408,19 @@ def _mark_proxy_client_activity(client_ip: str, update_last_seen: bool = False) 
 
 
 def _is_client_online_locked(client_ip: str, now_ts: Optional[float] = None) -> bool:
+    del now_ts
+    # Presence is based on currently open proxy sockets. This keeps AFK
+    # clients online while they stay connected, and marks them offline
+    # as soon as the last proxy connection closes.
+    return gateway_active_connections.get(client_ip, 0) > 0
+
+
+def _is_client_activity_online_locked(client_ip: str, now_ts: Optional[float] = None) -> bool:
     if now_ts is None:
         now_ts = time.time()
     last_activity = gateway_client_last_activity.get(client_ip, 0.0)
     if last_activity <= 0:
         return False
-    # Consider client online only if it had recent proxy traffic.
     return (now_ts - last_activity) <= SECA_PROXY_ACTIVE_WINDOW_SECONDS
 
 
@@ -257,7 +437,7 @@ def _gateway_presence_action(online: bool) -> str:
 def _gateway_presence_details(client_ip: str, device_name: str, online: bool) -> str:
     if online:
         return f"{device_name} ({client_ip}) started using enterprise proxy."
-    return f"{device_name} ({client_ip}) stopped sending proxy traffic (possible disconnect/bypass)."
+    return f"{device_name} ({client_ip}) disconnected from enterprise proxy."
 
 
 def _record_gateway_presence_sync(client_ip: str, device_name: str, online: bool, db: Optional[Session] = None) -> None:
@@ -349,6 +529,13 @@ def _gateway_event_for_history(event: Dict[str, Any]) -> Dict[str, Any]:
         "port": port,
         "target": target,
         "blocked": bool(event.get("blocked", False)),
+        "scan_url": event.get("scan_url"),
+        "static_status": event.get("static_status"),
+        "static_threat_score": event.get("static_threat_score"),
+        "static_match_type": event.get("static_match_type"),
+        "static_source": event.get("static_source"),
+        "static_signals": list(event.get("static_signals") or []),
+        "block_reason": event.get("block_reason"),
         "device": event.get("device") or "PC-CLIENT",
         "audit": event.get("audit") or "realtime",
         "company_mode": bool(event.get("company_mode", True)),
@@ -374,6 +561,20 @@ def _gateway_audit_details(event: Dict[str, Any]) -> str:
     parts = [f"{status} {protocol} {method} {host}:{port}", f"client={client_ip}", f"device={device_name}"]
     if target:
         parts.append(f"target={target}")
+    if event.get("scan_url"):
+        parts.append(f"scan_url={event.get('scan_url')}")
+    if event.get("static_status"):
+        score = event.get("static_threat_score")
+        parts.append(f"url_static={event.get('static_status')} score={score}")
+    if event.get("static_match_type") and event.get("static_match_type") != "none":
+        parts.append(f"match={event.get('static_match_type')}")
+    if event.get("static_source"):
+        parts.append(f"source={event.get('static_source')}")
+    signals = list(event.get("static_signals") or [])
+    if signals:
+        parts.append(f"signals={'; '.join(signals[:4])}")
+    if event.get("block_reason"):
+        parts.append(f"block_reason={event.get('block_reason')}")
     return " | ".join(parts)
 
 
@@ -450,6 +651,11 @@ def _record_gateway_event_sync(event: Dict[str, Any], db: Optional[Session] = No
     return normalized
 
 
+def _record_gateway_event_with_sync_audit(event: Dict[str, Any]) -> Dict[str, Any]:
+    with Session(engine) as db:
+        return _record_gateway_event_sync(event, db=db)
+
+
 def _load_proxy_blocklist_sync() -> List[str]:
     with Session(engine) as db:
         return _effective_blocklist(db)
@@ -474,10 +680,163 @@ async def _proxy_is_blocked(host: str) -> bool:
         return False
     patterns = await _proxy_get_blocklist()
     for pat in patterns:
-        p = str(pat).lower().strip().strip(".")
-        if fnmatch.fnmatch(host, p) or fnmatch.fnmatch(host, p.lstrip("*.")):
-            return True
+        for variant in _proxy_pattern_variants(pat):
+            if fnmatch.fnmatch(host, variant) or fnmatch.fnmatch(host, variant.lstrip("*.")):
+                return True
+            legacy = variant.lstrip("*.").replace("*", "").strip()
+            if legacy and "." not in legacy and legacy in host:
+                return True
     return False
+
+
+def _proxy_matching_block_rule_from_patterns(host: str, patterns: List[str]) -> Optional[str]:
+    normalized_host = (host or "").lower().strip().strip(".")
+    if not normalized_host:
+        return None
+    for pattern in patterns:
+        for variant in _proxy_pattern_variants(pattern):
+            if fnmatch.fnmatch(normalized_host, variant) or fnmatch.fnmatch(normalized_host, variant.lstrip("*.")):
+                return pattern
+            legacy = variant.lstrip("*.").replace("*", "").strip()
+            if legacy and "." not in legacy and legacy in normalized_host:
+                return pattern
+    return None
+
+
+async def _proxy_matching_block_rule(host: str) -> Optional[str]:
+    normalized_host = (host or "").lower().strip().strip(".")
+    if not normalized_host:
+        return None
+    patterns = await _proxy_get_blocklist()
+    return _proxy_matching_block_rule_from_patterns(normalized_host, patterns)
+
+
+def _proxy_tls_intercept_ready() -> bool:
+    if not SECA_PROXY_TLS_INTERCEPT:
+        return False
+    if not SECA_PROXY_TLS_CA_CERT_PATH or not SECA_PROXY_TLS_CA_KEY_PATH:
+        return False
+    return os.path.exists(SECA_PROXY_TLS_CA_CERT_PATH) and os.path.exists(SECA_PROXY_TLS_CA_KEY_PATH)
+
+
+def _build_proxy_scan_url(method: str, host: str, port: int, target: Optional[str]) -> str:
+    method_u = (method or "").upper()
+    normalized_host = (host or "").strip().strip("[]")
+    if not normalized_host:
+        return ""
+
+    if method_u == "CONNECT":
+        scheme = "https"
+        path = "/"
+        include_port = port not in {0, 443}
+    else:
+        scheme = "http"
+        path = target or "/"
+        parsed = None
+        if path.lower().startswith(("http://", "https://")):
+            try:
+                parsed = urlsplit(path)
+            except ValueError:
+                parsed = None
+        if parsed and parsed.hostname:
+            scheme = parsed.scheme.lower() or "http"
+            normalized_host = parsed.hostname
+            port = parsed.port or (443 if scheme == "https" else 80)
+            path = parsed.path or "/"
+            if parsed.query:
+                path = f"{path}?{parsed.query}"
+        elif not path.startswith("/"):
+            path = f"/{path}"
+        include_port = port not in {0, 80} if scheme == "http" else port not in {0, 443}
+
+    host_part = f"{normalized_host}:{port}" if include_port else normalized_host
+    return f"{scheme}://{host_part}{path}"
+
+
+def _summarize_proxy_static_signals(static_eval: Dict[str, Any]) -> List[str]:
+    details = static_eval.get("details", {})
+    layers = details.get("layers", {})
+    layer1 = layers.get("layer1_format", {}) or {}
+    layer2 = layers.get("layer2_phishtank", {}) or {}
+    layer3 = layers.get("layer3_reputation", {}) or {}
+    layer4 = layers.get("layer4_content", {}) or {}
+
+    signals: List[str] = []
+    signals.extend(list(layer1.get("issues") or [])[:2])
+    if layer2.get("found"):
+        message = str(layer2.get("message") or "").strip()
+        if message:
+            signals.append(message)
+    signals.extend(list(layer3.get("issues") or [])[:2])
+    signals.extend(list(layer4.get("indicators") or [])[:2])
+
+    deduped: List[str] = []
+    seen = set()
+    for signal in signals:
+        normalized = str(signal).strip()
+        if not normalized or normalized in seen:
+            continue
+        deduped.append(normalized)
+        seen.add(normalized)
+    return deduped[:6]
+
+
+def _proxy_static_scan_event_sync(
+    *,
+    client_ip: str,
+    method: str,
+    host: str,
+    port: int,
+    target: Optional[str],
+    scan_url: str,
+    block_rule: Optional[str],
+) -> Dict[str, Any]:
+    static_status = "clean"
+    static_threat_score = 0
+    static_match_type = "none"
+    static_source: Optional[str] = None
+    static_signals: List[str] = []
+    block_reason = "policy_rule" if block_rule else None
+
+    if scan_url:
+        try:
+            with Session(engine) as db:
+                static_eval = _evaluate_url_static(scan_url, db)
+            static_status = str(static_eval.get("status") or "clean")
+            static_threat_score = int(static_eval.get("threat_score") or 0)
+            layer2 = (((static_eval.get("details") or {}).get("layers") or {}).get("layer2_phishtank") or {})
+            static_match_type = str(layer2.get("match_type") or "none")
+            static_source = layer2.get("source") or layer2.get("phish_id")
+            static_signals = _summarize_proxy_static_signals(static_eval)
+            if static_status == "malicious":
+                block_reason = "static_malicious" if not block_rule else f"policy_rule+static_malicious"
+        except Exception as exc:
+            logger.warning("Proxy URL static scan failed for %s: %s", scan_url, exc)
+            static_status = "error"
+            static_signals = [f"Static scan error: {str(exc)[:140]}"]
+            if not block_reason:
+                block_reason = None
+
+    blocked = bool(block_rule) or static_status == "malicious"
+    if block_rule and static_status != "malicious":
+        static_signals = [f"Matched proxy rule {block_rule}", *static_signals][:6]
+
+    return {
+        "type": "proxy",
+        "client_ip": client_ip,
+        "method": method,
+        "host": host,
+        "port": port,
+        "target": target,
+        "blocked": blocked,
+        "scan_url": scan_url,
+        "static_status": static_status,
+        "static_threat_score": static_threat_score,
+        "static_match_type": static_match_type,
+        "static_source": static_source,
+        "static_signals": static_signals,
+        "block_reason": block_reason,
+    }
 
 
 async def _proxy_tunnel(c_reader, c_writer, u_reader, u_writer, client_ip: str):
@@ -515,6 +874,7 @@ async def _proxy_tunnel(c_reader, c_writer, u_reader, u_writer, client_ip: str):
 async def _proxy_handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     peer = writer.get_extra_info("peername")
     client_ip = peer[0] if peer else "unknown"
+    _register_proxy_client_writer(writer)
     _mark_proxy_client_connected(client_ip)
 
     try:
@@ -554,15 +914,25 @@ async def _proxy_handle_client(reader: asyncio.StreamReader, writer: asyncio.Str
                     port = 443
             host = host.strip().strip("[]")
 
-            blocked = await _proxy_is_blocked(host)
-            asyncio.create_task(asyncio.to_thread(_record_gateway_event_sync, {
-                "type": "proxy",
-                "client_ip": client_ip,
-                "method": "CONNECT",
-                "host": host,
-                "port": port,
-                "blocked": blocked,
-            }))
+            block_rule = await _proxy_matching_block_rule(host)
+            scan_url = _build_proxy_scan_url("CONNECT", host, port, None)
+            gateway_event = await asyncio.to_thread(
+                _proxy_static_scan_event_sync,
+                client_ip=client_ip,
+                method="CONNECT",
+                host=host,
+                port=port,
+                target=connect_target,
+                scan_url=scan_url,
+                block_rule=block_rule,
+            )
+            if SECA_PROXY_STATIC_SCAN_DELAY_MS > 0:
+                await asyncio.sleep(SECA_PROXY_STATIC_SCAN_DELAY_MS / 1000.0)
+            blocked = bool(gateway_event.get("blocked"))
+            if SECA_PROXY_STATIC_AUDIT_SYNC:
+                await asyncio.to_thread(_record_gateway_event_with_sync_audit, gateway_event)
+            else:
+                asyncio.create_task(asyncio.to_thread(_record_gateway_event_sync, gateway_event))
 
             if blocked:
                 writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
@@ -647,16 +1017,25 @@ async def _proxy_handle_client(reader: asyncio.StreamReader, writer: asyncio.Str
             await writer.drain()
             return
 
-        blocked = await _proxy_is_blocked(upstream_host)
-        asyncio.create_task(asyncio.to_thread(_record_gateway_event_sync, {
-            "type": "proxy",
-            "client_ip": client_ip,
-            "method": method_u,
-            "host": upstream_host,
-            "port": upstream_port,
-            "target": target,
-            "blocked": blocked,
-        }))
+        block_rule = await _proxy_matching_block_rule(upstream_host)
+        scan_url = _build_proxy_scan_url(method_u, upstream_host, upstream_port, target_s or upstream_target)
+        gateway_event = await asyncio.to_thread(
+            _proxy_static_scan_event_sync,
+            client_ip=client_ip,
+            method=method_u,
+            host=upstream_host,
+            port=upstream_port,
+            target=target,
+            scan_url=scan_url,
+            block_rule=block_rule,
+        )
+        if SECA_PROXY_STATIC_SCAN_DELAY_MS > 0:
+            await asyncio.sleep(SECA_PROXY_STATIC_SCAN_DELAY_MS / 1000.0)
+        blocked = bool(gateway_event.get("blocked"))
+        if SECA_PROXY_STATIC_AUDIT_SYNC:
+            await asyncio.to_thread(_record_gateway_event_with_sync_audit, gateway_event)
+        else:
+            asyncio.create_task(asyncio.to_thread(_record_gateway_event_sync, gateway_event))
 
         if blocked:
             body = b"Blocked by SECA gateway proxy\r\n"
@@ -687,6 +1066,7 @@ async def _proxy_handle_client(reader: asyncio.StreamReader, writer: asyncio.Str
         await u_writer.drain()
         await _proxy_tunnel(reader, writer, u_reader, u_writer, client_ip)
     finally:
+        _unregister_proxy_client_writer(writer)
         _mark_proxy_client_disconnected(client_ip)
         try:
             writer.close()
@@ -698,7 +1078,10 @@ async def _proxy_handle_client(reader: asyncio.StreamReader, writer: asyncio.Str
 async def start_embedded_proxy() -> None:
     global proxy_server
     if proxy_server is not None:
-        return
+        existing_sockets = proxy_server.sockets or []
+        if existing_sockets:
+            return
+        proxy_server = None
     try:
         proxy_server = await asyncio.start_server(
             _proxy_handle_client,
@@ -718,8 +1101,11 @@ async def start_embedded_proxy() -> None:
         proxy_server = None
         return
 
-    async with proxy_server:
-        await proxy_server.serve_forever()
+    try:
+        async with proxy_server:
+            await proxy_server.serve_forever()
+    finally:
+        proxy_server = None
 
 
 def seed_default_proxy_rules() -> None:
@@ -735,9 +1121,34 @@ def seed_default_proxy_rules() -> None:
         logger.warning("Failed to seed default proxy block rules: %s", exc)
 
 
+def disable_legacy_default_proxy_rules() -> None:
+    try:
+        with Session(engine) as db:
+            rows = (
+                db.query(ProxyBlockRule)
+                .filter(ProxyBlockRule.note == "Starter default rule", ProxyBlockRule.enabled.is_(True))
+                .all()
+            )
+            if not rows:
+                return
+            for row in rows:
+                row.enabled = False
+            db.commit()
+    except Exception as exc:
+        logger.warning("Failed to disable legacy default proxy block rules: %s", exc)
+
+
 @app.on_event("startup")
 async def on_startup():
     seed_default_proxy_rules()
+    disable_legacy_default_proxy_rules()
+    if SECA_PROXY_TLS_INTERCEPT and not _proxy_tls_intercept_ready():
+        logger.warning(
+            "SECA_PROXY_TLS_INTERCEPT is enabled but CA files are missing or unreadable. "
+            "HTTPS inspection remains domain-only until the interception pipeline is completed."
+        )
+    elif SECA_PROXY_TLS_INTERCEPT:
+        logger.info("TLS interception readiness assets detected. CONNECT flow is still domain-only until MITM path is completed.")
     app.state.proxy_presence_task = asyncio.create_task(monitor_gateway_presence())
     app.state.proxy_audit_flush_task = asyncio.create_task(flush_gateway_audit_loop())
     if SECA_PROXY_AUTOSTART:
@@ -2529,7 +2940,11 @@ async def gateway_api_devices(current_user: User = Depends(require_admin)):
         for ip in all_ips:
             device = dict(gateway_devices.get(ip, {"client_ip": ip, "device_name": _get_or_create_device_alias(ip)}))
             connected = _is_client_online_locked(ip, now_ts)
+            activity_online = _is_client_activity_online_locked(ip, now_ts)
             device["connected"] = connected
+            device["activity_online"] = activity_online
+            device["activity_offline"] = not activity_online
+            device["activity_timeout_seconds"] = SECA_PROXY_ACTIVE_WINDOW_SECONDS
             device["active_connections"] = gateway_active_connections.get(ip, 0)
             last_activity = gateway_client_last_activity.get(ip, 0.0)
             device["seconds_since_last_activity"] = int(max(0.0, now_ts - last_activity)) if last_activity > 0 else None
@@ -2567,11 +2982,18 @@ async def gateway_api_device_logs(
     } for l in logs]
 
 
-@app.get("/gateway/proxy/health")
-async def gateway_proxy_health(current_user: User = Depends(require_admin)):
-    del current_user
+def _gateway_proxy_health_payload() -> Dict[str, Any]:
     sockets = proxy_server.sockets if proxy_server else None
     running = bool(sockets)
+    if not running:
+        probe_host = SECA_PROXY_LISTEN_HOST
+        if probe_host in {"0.0.0.0", "::", ""}:
+            probe_host = "127.0.0.1"
+        try:
+            with socket.create_connection((probe_host, SECA_PROXY_LISTEN_PORT), timeout=0.25):
+                running = True
+        except OSError:
+            running = False
     with gateway_state_lock:
         connected_devices = len(_connected_client_ips_locked())
         total_events = len(gateway_history)
@@ -2580,11 +3002,68 @@ async def gateway_proxy_health(current_user: User = Depends(require_admin)):
         "autostart": SECA_PROXY_AUTOSTART,
         "listen_host": SECA_PROXY_LISTEN_HOST,
         "listen_port": SECA_PROXY_LISTEN_PORT,
+        "static_scan_delay_ms": SECA_PROXY_STATIC_SCAN_DELAY_MS,
+        "static_audit_sync": SECA_PROXY_STATIC_AUDIT_SYNC,
+        "tls_intercept_enabled": SECA_PROXY_TLS_INTERCEPT,
+        "tls_intercept_ready": _proxy_tls_intercept_ready(),
         "connected_devices": connected_devices,
         "total_events": total_events,
         "started_at": gateway_started_at.isoformat(),
         "uptime_seconds": int((datetime.utcnow() - gateway_started_at).total_seconds()),
     }
+
+
+@app.post("/gateway/proxy/start")
+async def gateway_proxy_start(current_user: User = Depends(require_admin)):
+    del current_user
+
+    task = getattr(app.state, "proxy_task", None)
+    if task is None or task.done():
+        app.state.proxy_task = asyncio.create_task(start_embedded_proxy())
+
+    # Give asyncio a brief moment to bind and expose sockets.
+    await asyncio.sleep(0.2)
+
+    health = _gateway_proxy_health_payload()
+    if not health["running"]:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Proxy failed to start on {SECA_PROXY_LISTEN_HOST}:{SECA_PROXY_LISTEN_PORT}. "
+                "Check whether the port is already in use."
+            ),
+        )
+    return health
+
+
+@app.post("/gateway/proxy/stop")
+async def gateway_proxy_stop(current_user: User = Depends(require_admin)):
+    global proxy_server
+    del current_user
+
+    task = getattr(app.state, "proxy_task", None)
+    if proxy_server is not None:
+        proxy_server.close()
+        await proxy_server.wait_closed()
+        proxy_server = None
+
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning("Proxy task ended with error during stop: %s", exc)
+
+    app.state.proxy_task = None
+    return _gateway_proxy_health_payload()
+
+
+@app.get("/gateway/proxy/health")
+async def gateway_proxy_health(current_user: User = Depends(require_admin)):
+    del current_user
+    return _gateway_proxy_health_payload()
 
 
 @app.get("/gateway/stream")
@@ -2635,18 +3114,63 @@ async def gateway_blocklist_create(
         current_user: User = Depends(require_admin),
         db: Session = Depends(get_db)
 ):
-    pattern = payload.pattern.strip().lower().strip(".")
-    if not pattern:
-        raise HTTPException(status_code=400, detail="Pattern is required")
+    pattern = _normalize_proxy_block_pattern(payload.pattern)
+    pattern_identity = _proxy_rule_identity(pattern)
 
     existing = db.query(ProxyBlockRule).filter(ProxyBlockRule.pattern == pattern).first()
     if existing:
-        raise HTTPException(status_code=400, detail="Pattern already exists")
+        existing.enabled = payload.enabled
+        existing.note = (payload.note or "").strip() or existing.note
+        db.commit()
+        db.refresh(existing)
+        _invalidate_proxy_blocklist_cache()
+        await _reset_active_proxy_connections()
+        create_audit_log(db, current_user.id, "Gateway Blocklist Re-enable", f"Updated existing rule {existing.pattern} (id={existing.id})")
+        return {
+            "id": existing.id,
+            "pattern": existing.pattern,
+            "enabled": existing.enabled,
+            "note": existing.note,
+            "created_at": existing.created_at.isoformat() if existing.created_at else None,
+            "updated_at": existing.updated_at.isoformat() if existing.updated_at else None,
+        }
+
+    semantic_existing = next(
+        (
+            row for row in db.query(ProxyBlockRule).order_by(ProxyBlockRule.id.asc()).all()
+            if _proxy_rule_identity(row.pattern) == pattern_identity
+        ),
+        None,
+    )
+    if semantic_existing:
+        semantic_existing.pattern = pattern
+        semantic_existing.enabled = payload.enabled
+        semantic_existing.note = (payload.note or "").strip() or semantic_existing.note
+        db.commit()
+        db.refresh(semantic_existing)
+        _invalidate_proxy_blocklist_cache()
+        await _reset_active_proxy_connections()
+        create_audit_log(
+            db,
+            current_user.id,
+            "Gateway Blocklist Canonicalize",
+            f"Updated rule family {pattern} (id={semantic_existing.id})",
+        )
+        return {
+            "id": semantic_existing.id,
+            "pattern": semantic_existing.pattern,
+            "enabled": semantic_existing.enabled,
+            "note": semantic_existing.note,
+            "created_at": semantic_existing.created_at.isoformat() if semantic_existing.created_at else None,
+            "updated_at": semantic_existing.updated_at.isoformat() if semantic_existing.updated_at else None,
+        }
 
     row = ProxyBlockRule(pattern=pattern, note=(payload.note or "").strip() or None, enabled=payload.enabled)
     db.add(row)
     db.commit()
     db.refresh(row)
+    _invalidate_proxy_blocklist_cache()
+    await _reset_active_proxy_connections()
 
     create_audit_log(db, current_user.id, "Gateway Blocklist Add", f"Added rule {pattern}")
     return {
@@ -2671,11 +3195,16 @@ async def gateway_blocklist_update(
         raise HTTPException(status_code=404, detail="Rule not found")
 
     if payload.pattern is not None:
-        pattern = payload.pattern.strip().lower().strip(".")
-        if not pattern:
-            raise HTTPException(status_code=400, detail="Pattern cannot be empty")
-        dupe = db.query(ProxyBlockRule).filter(ProxyBlockRule.pattern == pattern, ProxyBlockRule.id != rule_id).first()
-        if dupe:
+        pattern = _normalize_proxy_block_pattern(payload.pattern)
+        pattern_identity = _proxy_rule_identity(pattern)
+        semantic_dupe = next(
+            (
+                other for other in db.query(ProxyBlockRule).filter(ProxyBlockRule.id != rule_id).order_by(ProxyBlockRule.id.asc()).all()
+                if _proxy_rule_identity(other.pattern) == pattern_identity
+            ),
+            None,
+        )
+        if semantic_dupe:
             raise HTTPException(status_code=400, detail="Pattern already exists")
         row.pattern = pattern
 
@@ -2687,6 +3216,8 @@ async def gateway_blocklist_update(
 
     db.commit()
     db.refresh(row)
+    _invalidate_proxy_blocklist_cache()
+    await _reset_active_proxy_connections()
     create_audit_log(db, current_user.id, "Gateway Blocklist Update", f"Updated rule {row.pattern} (id={row.id})")
 
     return {
@@ -2712,6 +3243,8 @@ async def gateway_blocklist_delete(
     pattern = row.pattern
     db.delete(row)
     db.commit()
+    _invalidate_proxy_blocklist_cache()
+    await _reset_active_proxy_connections()
     create_audit_log(db, current_user.id, "Gateway Blocklist Delete", f"Deleted rule {pattern} (id={rule_id})")
     return {"ok": True}
 

@@ -12,6 +12,54 @@ type BlockRule = {
   updated_at?: string | null;
 };
 
+const DOMAIN_SHORTCUTS: Record<string, string> = {
+  yt: 'youtube',
+  youtube: 'youtube',
+  fb: 'facebook',
+  facebook: 'facebook',
+  ig: 'instagram',
+  insta: 'instagram',
+  instagram: 'instagram',
+  wa: 'whatsapp',
+  whatsapp: 'whatsapp',
+  tw: 'twitter',
+  twitter: 'twitter',
+  x: 'twitter',
+};
+
+const SERVICE_DOMAIN_HINTS: Record<string, string[]> = {
+  youtube: ['youtube', 'youtu.be', 'ytimg', 'googlevideo', 'yt3'],
+  facebook: ['facebook', 'fbcdn', 'fbsbx', 'messenger'],
+  instagram: ['instagram', 'cdninstagram'],
+  twitter: ['twitter', 'twimg', 'x.com'],
+  whatsapp: ['whatsapp', 'whatsapp.net', 'wa.me'],
+};
+
+function resolveServiceBundle(value: string): string | null {
+  const normalized = value.trim().toLowerCase().replace(/^\.+|\.+$/g, '');
+  if (!normalized) {
+    return null;
+  }
+
+  if (DOMAIN_SHORTCUTS[normalized]) {
+    return DOMAIN_SHORTCUTS[normalized];
+  }
+
+  const trimmed = normalized.replace(/^\*\./, '').replace(/\*/g, '');
+  for (const [service, hints] of Object.entries(SERVICE_DOMAIN_HINTS)) {
+    if (trimmed === service) {
+      return service;
+    }
+    if (
+      hints.some((hint) => trimmed === hint || trimmed.endsWith(`.${hint}`) || trimmed.includes(hint))
+    ) {
+      return service;
+    }
+  }
+
+  return null;
+}
+
 function normalizePattern(input: string): string | null {
   let value = input.trim().toLowerCase();
   if (!value) {
@@ -31,10 +79,20 @@ function normalizePattern(input: string): string | null {
     return null;
   }
 
+  const serviceBundle = resolveServiceBundle(value);
+  if (serviceBundle) {
+    return `*${serviceBundle}*`;
+  }
+
   if (value.includes('*')) {
     return value;
   }
-  return `*.${value}`;
+  if (value.includes('.')) {
+    return `*.${value}`;
+  }
+
+  const shortcut = DOMAIN_SHORTCUTS[value] || value;
+  return `*${shortcut}*`;
 }
 
 export function AccessControlView() {

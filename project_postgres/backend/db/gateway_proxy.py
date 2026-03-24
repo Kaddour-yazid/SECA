@@ -18,6 +18,37 @@ BLOCKLIST_REFRESH_SECONDS = int(os.environ.get("SECA_PROXY_BLOCKLIST_REFRESH_SEC
 _BLOCKLIST_CACHE = []
 _BLOCKLIST_LAST_FETCH = 0.0
 
+PROXY_BLOCKLIST_SHORTCUTS = {
+    "yt": "youtube",
+    "youtube": "youtube",
+    "fb": "facebook",
+    "facebook": "facebook",
+    "ig": "instagram",
+    "insta": "instagram",
+    "instagram": "instagram",
+    "wa": "whatsapp",
+    "whatsapp": "whatsapp",
+    "tw": "twitter",
+    "twitter": "twitter",
+    "x": "twitter",
+}
+
+PROXY_SERVICE_BLOCK_BUNDLES = {
+    "youtube": ["*youtube*", "*ytimg*", "*googlevideo*", "*youtu.be*", "*yt3*"],
+    "facebook": ["*facebook*", "*fbcdn*", "*fbsbx*", "*messenger*"],
+    "instagram": ["*instagram*", "*cdninstagram*"],
+    "twitter": ["*twitter*", "*twimg*", "*x.com*"],
+    "whatsapp": ["*whatsapp*", "*whatsapp.net*", "*wa.me*"],
+}
+
+PROXY_SERVICE_DOMAIN_HINTS = {
+    "youtube": ("youtube", "youtu.be", "ytimg", "googlevideo", "yt3"),
+    "facebook": ("facebook", "fbcdn", "fbsbx", "messenger"),
+    "instagram": ("instagram", "cdninstagram"),
+    "twitter": ("twitter", "twimg", "x.com"),
+    "whatsapp": ("whatsapp", "whatsapp.net", "wa.me"),
+}
+
 
 def _headers() -> dict:
     headers = {"Content-Type": "application/json"}
@@ -58,15 +89,70 @@ async def get_blocklist_patterns() -> list[str]:
     return _BLOCKLIST_CACHE
 
 
+def _proxy_service_key_from_value(value: str) -> str | None:
+    candidate = str(value or "").lower().strip().strip(".")
+    if not candidate:
+        return None
+
+    shortcut = PROXY_BLOCKLIST_SHORTCUTS.get(candidate)
+    if shortcut:
+        return shortcut
+
+    trimmed = candidate.lstrip("*.").replace("*", "").strip().strip(".")
+    if not trimmed:
+        return None
+
+    for service_key, hints in PROXY_SERVICE_DOMAIN_HINTS.items():
+        if trimmed == service_key:
+            return service_key
+        for hint in hints:
+            normalized_hint = hint.lower().strip().strip(".")
+            if (
+                trimmed == normalized_hint
+                or trimmed.endswith(f".{normalized_hint}")
+                or normalized_hint in trimmed
+            ):
+                return service_key
+    return None
+
+
+def _pattern_variants(pattern: str) -> list[str]:
+    candidate = str(pattern or "").lower().strip().strip(".")
+    if not candidate:
+        return []
+
+    variants: list[str] = [candidate]
+    trimmed = candidate.lstrip("*.").strip()
+    if trimmed and trimmed != candidate:
+        variants.append(trimmed)
+
+    service_key = _proxy_service_key_from_value(candidate)
+    if service_key:
+        variants.extend(PROXY_SERVICE_BLOCK_BUNDLES.get(service_key, []))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in variants:
+        normalized = str(item).lower().strip().strip(".")
+        if not normalized or normalized in seen:
+            continue
+        deduped.append(normalized)
+        seen.add(normalized)
+    return deduped
+
+
 async def is_blocked(host: str) -> bool:
     host = (host or "").lower().strip().strip(".")
     if not host:
         return False
     patterns = await get_blocklist_patterns()
     for pat in patterns:
-        p = pat.lower().strip().strip(".")
-        if fnmatch.fnmatch(host, p) or fnmatch.fnmatch(host, p.lstrip("*.")):
-            return True
+        for variant in _pattern_variants(pat):
+            if fnmatch.fnmatch(host, variant) or fnmatch.fnmatch(host, variant.lstrip("*.")):
+                return True
+            legacy = variant.lstrip("*.").replace("*", "").strip()
+            if legacy and "." not in legacy and legacy in host:
+                return True
     return False
 
 
