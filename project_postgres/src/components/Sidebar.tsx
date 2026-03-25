@@ -1,5 +1,5 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'react';
-import { Shield, FileText, Globe, Hash, LayoutDashboard, User, Network, ShieldBan, ScrollText } from 'lucide-react';
+import { Shield, FileText, Globe, Hash, LayoutDashboard, User, Network, Settings, ShieldBan, ScrollText } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useTheme } from '../contexts/ThemeContext';
@@ -60,8 +60,8 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
     ? 'pointer-events-none absolute left-4 right-4 rounded-lg bg-gradient-to-r from-sky-300 to-cyan-300 shadow-[0_6px_20px_rgba(56,189,248,0.25)] transition-all duration-300 ease-out'
     : 'pointer-events-none absolute left-4 right-4 rounded-lg bg-cyan-500 shadow-lg transition-all duration-300 ease-out';
   const settingsButtonClass = isLight
-    ? 'inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[#d9e6f2] bg-white text-slate-700 hover:border-sky-300 hover:text-sky-700 transition'
-    : 'inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-700 bg-slate-900/70 text-slate-200 hover:border-cyan-500/40 hover:text-cyan-200 transition';
+    ? 'inline-flex h-10 min-w-[56px] px-4 items-center justify-center rounded-xl border border-[#d9e6f2] bg-white text-slate-700 hover:border-sky-300 hover:text-sky-700 transition'
+    : 'inline-flex h-10 min-w-[56px] px-4 items-center justify-center rounded-xl border border-slate-700 bg-slate-900/70 text-slate-200 hover:border-cyan-500/40 hover:text-cyan-200 transition';
 
   const updateActiveIndicator = useCallback(() => {
     const navEl = navRef.current;
@@ -103,27 +103,13 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
     <div className={sidebarShellClass}>
       {/* Logo */}
       <div className={`p-6 ${logoBorderClass}`}>
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-gradient-to-br from-cyan-500 to-blue-600 rounded-lg flex items-center justify-center">
-              <Shield className="w-6 h-6 text-white" />
-            </div>
-            <div>
-              <h1 className={titleClass}>SECA</h1>
-              <p className={subtitleClass}>{translateText('Security Analyzer')}</p>
-            </div>
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 bg-gradient-to-br from-cyan-500 to-blue-600 rounded-lg flex items-center justify-center">
+            <Shield className="w-6 h-6 text-white" />
           </div>
-
-          <div className="relative" data-no-i18n="true">
-            <button
-              type="button"
-              onClick={() => onViewChange('settings')}
-              className={`${settingsButtonClass} ${activeView === 'settings' ? (isLight ? 'border-sky-400 text-sky-700' : 'border-cyan-400 text-cyan-200') : ''}`}
-              aria-label={translateText('Parameters')}
-              title={translateText('Parameters')}
-            >
-              <Globe className="h-5 w-5" />
-            </button>
+          <div>
+            <h1 className={titleClass}>SECA</h1>
+            <p className={subtitleClass}>{translateText('Security Analyzer')}</p>
           </div>
         </div>
       </div>
@@ -181,6 +167,20 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
           );
         })}
       </nav>
+
+      <div className="p-4 pt-2">
+        <div className="relative" data-no-i18n="true">
+          <button
+            type="button"
+            onClick={() => onViewChange('settings')}
+            className={`${settingsButtonClass} ${activeView === 'settings' ? (isLight ? 'border-sky-400 text-sky-700' : 'border-cyan-400 text-cyan-200') : ''}`}
+            aria-label={translateText('Parameters')}
+            title={translateText('Parameters')}
+          >
+            <Settings className="h-5 w-5" />
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

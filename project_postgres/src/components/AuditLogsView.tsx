@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Download, Eye, Filter, Laptop, Search, Server, ShieldAlert } from "lucide-react";
+import { Activity, ArrowLeft, Calendar, Download, Eye, Filter, Laptop, Search, Server, Shield, ShieldAlert, User, X } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { apiUrl } from "../config/api";
 
@@ -45,6 +45,11 @@ type ProxyStats = {
 };
 
 type VerdictFilter = "all" | "blocked" | "allowed";
+type ParsedDetailField = {
+  key: string;
+  label: string;
+  value: string;
+};
 
 function tsvCell(value: unknown): string {
   const normalized = String(value ?? "")
@@ -118,6 +123,197 @@ function logVerdict(log: AuditLog): VerdictFilter | "other" {
   if (action.includes("block") || details.includes("blocked")) return "blocked";
   if (action.includes("allow") || details.includes("allowed")) return "allowed";
   return "other";
+}
+
+const DETAIL_KEY_LABELS: Record<string, string> = {
+  client: "Client",
+  client_ip: "Client IP",
+  device: "Device",
+  device_name: "Device",
+  target: "Target",
+  scan_url: "Scan URL",
+  url: "URL",
+  score: "Score",
+  threat_score: "Threat Score",
+  source: "Source",
+  match: "Match",
+  matches: "Matches",
+  method: "Method",
+  host: "Host",
+  domain: "Domain",
+  action: "Action",
+  port: "Port",
+  verdict: "Verdict",
+  rule: "Rule",
+};
+
+const DETAIL_PRIORITY = [
+  "target",
+  "scan_url",
+  "url",
+  "device",
+  "device_name",
+  "client",
+  "client_ip",
+  "domain",
+  "host",
+  "score",
+  "threat_score",
+  "source",
+  "rule",
+  "matches",
+  "match",
+];
+
+function humanizeDetailKey(key: string): string {
+  const normalized = key.trim().toLowerCase();
+  if (DETAIL_KEY_LABELS[normalized]) return DETAIL_KEY_LABELS[normalized];
+  return key
+    .trim()
+    .replace(/[_.-]+/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function toDisplayValue(value: unknown): string {
+  if (value === null || value === undefined) return "-";
+  if (Array.isArray(value)) {
+    return value.map((item) => toDisplayValue(item)).join(", ");
+  }
+  if (typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([k, v]) => `${humanizeDetailKey(k)}: ${toDisplayValue(v)}`)
+      .join(" | ");
+  }
+  return String(value);
+}
+
+function sortDetailFields(fields: ParsedDetailField[]): ParsedDetailField[] {
+  return [...fields].sort((a, b) => {
+    const ai = DETAIL_PRIORITY.indexOf(a.key.toLowerCase());
+    const bi = DETAIL_PRIORITY.indexOf(b.key.toLowerCase());
+    if (ai === -1 && bi === -1) return a.label.localeCompare(b.label);
+    if (ai === -1) return 1;
+    if (bi === -1) return -1;
+    return ai - bi;
+  });
+}
+
+function parseAuditDetails(raw: string): { fields: ParsedDetailField[]; notes: string[] } {
+  const trimmed = (raw || "").trim();
+  if (!trimmed) return { fields: [], notes: [] };
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const fields = Object.entries(parsed).map(([key, value]) => ({
+        key,
+        label: humanizeDetailKey(key),
+        value: toDisplayValue(value),
+      }));
+      return { fields: sortDetailFields(fields), notes: [] };
+    }
+  } catch {
+    // Fallback to tokenized parsing below.
+  }
+
+  const tokens = trimmed
+    .split(/\||\n/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+
+  const fields: ParsedDetailField[] = [];
+  const notes: string[] = [];
+
+  for (const token of tokens) {
+    const keyMatches = [...token.matchAll(/(?:^|\s)([a-zA-Z0-9_.-]{1,40})\s*[:=]\s*/g)];
+    if (keyMatches.length > 0) {
+      for (let index = 0; index < keyMatches.length; index += 1) {
+        const current = keyMatches[index];
+        const next = keyMatches[index + 1];
+        const matchStart = (current.index ?? 0) + current[0].length - current[1].length - 1;
+        const separatorOffset = token.slice(matchStart).search(/[:=]/);
+        const valueStart = matchStart + separatorOffset + 1;
+        const valueEnd = next?.index ?? token.length;
+        const value = token.slice(valueStart, valueEnd).trim();
+        if (!value) continue;
+        fields.push({
+          key: current[1],
+          label: humanizeDetailKey(current[1]),
+          value,
+        });
+      }
+    } else {
+      notes.push(token);
+    }
+  }
+
+  return { fields: sortDetailFields(fields), notes };
+}
+
+function previewDetailItems(details: string): string[] {
+  const parsed = parseAuditDetails(details);
+  const scanUrlField = parsed.fields.find((field) => field.key.toLowerCase() === "scan_url");
+  const targetField = parsed.fields.find((field) => field.key.toLowerCase() === "target");
+  const urlField = parsed.fields.find((field) => ["url", "host", "domain"].includes(field.key.toLowerCase()));
+  const scoreField = parsed.fields.find((field) => ["score", "threat_score"].includes(field.key.toLowerCase()));
+  const statusField = parsed.fields.find((field) => field.key.toLowerCase() === "url_static");
+
+  const chosen = [scanUrlField, targetField, urlField, scoreField, statusField].filter(
+    (field): field is ParsedDetailField => Boolean(field)
+  );
+
+  const fieldPreview = (chosen.length > 0 ? chosen : parsed.fields.slice(0, 2))
+    .slice(0, 2)
+    .map((field) => `${field.label}: ${field.value}`);
+  if (fieldPreview.length > 0) return fieldPreview;
+  return parsed.notes.slice(0, 1);
+}
+
+function previewPrimaryDetail(details: string): string {
+  const parsed = parseAuditDetails(details);
+  const targetField = parsed.fields.find((field) => field.key.toLowerCase() === "target");
+  const scanUrlField = parsed.fields.find((field) => field.key.toLowerCase() === "scan_url");
+  const urlField = parsed.fields.find((field) => ["url", "host", "domain"].includes(field.key.toLowerCase()));
+
+  const primaryUrl =
+    scanUrlField?.value ||
+    (targetField?.value
+      ? /:\d+$/.test(targetField.value) || details.toUpperCase().includes("CONNECT")
+        ? `CONNECT ${targetField.value}`
+        : targetField.value
+      : "") ||
+    urlField?.value ||
+    "";
+
+  if (primaryUrl) return primaryUrl;
+
+  return previewDetailItems(details).join(" | ") || details;
+}
+
+function verdictBadge(verdict: VerdictFilter | "other") {
+  if (verdict === "blocked") return "bg-rose-500/15 text-rose-300 border-rose-500/30";
+  if (verdict === "allowed") return "bg-emerald-500/15 text-emerald-300 border-emerald-500/30";
+  return "bg-slate-500/10 text-slate-300 border-slate-600";
+}
+
+function displayUser(log: AuditLog): string {
+  return log.user_name || log.user_email || (log.user_id === null ? "System" : `User #${log.user_id}`);
+}
+
+function fieldToneClass(field: ParsedDetailField): string {
+  const key = field.key.toLowerCase();
+  const value = field.value.toLowerCase();
+  if (key.includes("score") || /^\d+\/100$/.test(field.value.trim())) {
+    const score = Number.parseInt(field.value, 10);
+    if (Number.isFinite(score)) {
+      if (score >= 70) return "border-rose-500/30 bg-rose-500/10";
+      if (score >= 40) return "border-amber-500/30 bg-amber-500/10";
+      return "border-emerald-500/30 bg-emerald-500/10";
+    }
+  }
+  if (value.includes("blocked") || value.includes("malicious")) return "border-rose-500/30 bg-rose-500/10";
+  if (value.includes("allowed") || value.includes("clean")) return "border-emerald-500/30 bg-emerald-500/10";
+  return "border-slate-700 bg-slate-800/60";
 }
 
 export function AuditLogsView() {
@@ -231,17 +427,101 @@ export function AuditLogsView() {
 
   const uniqueActions = useMemo(() => Array.from(new Set(logs.map((l) => l.action))), [logs]);
   const selectedDevice = useMemo(() => devices.find((d) => d.client_ip === selectedDeviceIp) || null, [devices, selectedDeviceIp]);
+  const parsedDetails = useMemo(() => (detailsLog ? parseAuditDetails(detailsLog.details) : { fields: [], notes: [] }), [detailsLog]);
+  const scoreField = useMemo(
+    () =>
+      parsedDetails.fields.find((field) => {
+        const key = field.key.toLowerCase();
+        return key === "score" || key === "threat_score";
+      }) || null,
+    [parsedDetails.fields]
+  );
+  const detailSummaryFields = parsedDetails.fields.filter((field) => field !== scoreField).slice(0, 4);
+  const detailExtraFields = parsedDetails.fields.filter((field) => field !== scoreField).slice(4);
+  const detailPreviewRows = (details: string) => previewPrimaryDetail(details);
   const detailsModal = detailsLog ? (
-    <div className="fixed inset-0 bg-black/60 z-50 p-4 flex items-center justify-center" onClick={() => setDetailsLog(null)}>
-      <div className="max-w-3xl w-full bg-slate-900 border border-slate-700 rounded-xl p-5" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-start justify-between gap-3 mb-3">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/65 backdrop-blur-sm" onClick={() => setDetailsLog(null)}>
+      <div className="w-full max-w-5xl max-h-[90vh] overflow-hidden bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3 px-6 py-4 border-b border-slate-700">
           <div>
-            <h3 className="text-white font-semibold">Log Details</h3>
-            <p className="text-slate-400 text-xs">{detailsLog.action} | {formatTimestamp(detailsLog.timestamp)}</p>
+            <h3 className="text-xl font-bold text-white">Log Report</h3>
+            <p className="text-slate-400 text-sm">Detailed event view for audit entry #{detailsLog.id}</p>
           </div>
-          <button className="text-slate-400 hover:text-white text-sm" onClick={() => setDetailsLog(null)}>Close</button>
+          <button
+            className="w-9 h-9 rounded-lg border border-slate-600 text-slate-300 hover:text-white hover:border-slate-400 flex items-center justify-center transition"
+            onClick={() => setDetailsLog(null)}
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
-        <pre className="text-slate-200 text-sm whitespace-pre-wrap break-words bg-slate-950/60 border border-slate-700 rounded-lg p-3 max-h-[60vh] overflow-auto">{detailsLog.details}</pre>
+
+        <div className="p-6 overflow-y-auto max-h-[75vh] space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
+            <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-4">
+              <p className="text-slate-400 text-xs mb-1 flex items-center gap-1"><Activity className="w-3 h-3" />Action</p>
+              <p className="text-white font-medium break-words">{detailsLog.action}</p>
+            </div>
+            <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-4">
+              <p className="text-slate-400 text-xs mb-1 flex items-center gap-1"><User className="w-3 h-3" />User</p>
+              <p className="text-white font-medium break-words">{displayUser(detailsLog)}</p>
+            </div>
+            <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-4">
+              <p className="text-slate-400 text-xs mb-1 flex items-center gap-1"><Calendar className="w-3 h-3" />Timestamp</p>
+              <p className="text-white font-medium">{formatTimestamp(detailsLog.timestamp)}</p>
+            </div>
+            <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-4">
+              <p className="text-slate-400 text-xs mb-2 flex items-center gap-1"><Shield className="w-3 h-3" />Verdict</p>
+              <span className={`inline-flex px-3 py-1 rounded-full text-sm font-medium border ${verdictBadge(logVerdict(detailsLog))}`}>
+                {logVerdict(detailsLog) === "blocked" ? "Blocked" : logVerdict(detailsLog) === "allowed" ? "Allowed" : "Informational"}
+              </span>
+            </div>
+            <div className={`rounded-lg border p-4 ${scoreField ? fieldToneClass(scoreField) : "bg-slate-800/60 border-slate-700"}`}>
+              <p className="text-slate-400 text-xs mb-2">Score</p>
+              <p className="text-2xl font-bold text-white">{scoreField?.value || "--"}</p>
+            </div>
+          </div>
+
+          {detailSummaryFields.length > 0 && (
+            <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-4">
+              <p className="text-slate-300 font-medium mb-3">Event Summary</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {detailSummaryFields.map((field) => (
+                  <div key={`${field.key}-${field.value}`} className={`rounded-lg border px-3 py-3 ${fieldToneClass(field)}`}>
+                    <p className="text-xs text-slate-400 mb-1">{field.label}</p>
+                    <p className="text-sm font-semibold text-white break-words">{field.value}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {detailExtraFields.length > 0 && (
+            <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-4">
+              <p className="text-slate-300 font-medium mb-3">Detailed Fields</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {detailExtraFields.map((field) => (
+                  <div key={`${field.key}-${field.value}`} className="rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-3">
+                    <p className="text-xs text-slate-400 mb-1">{field.label}</p>
+                    <p className="text-sm text-slate-100 break-words">{field.value}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-4">
+            <p className="text-slate-300 font-medium mb-2">Key Findings</p>
+            {parsedDetails.notes.length > 0 ? (
+              <ul className="space-y-2">
+                {parsedDetails.notes.map((note, index) => (
+                  <li key={`${note}-${index}`} className="text-sm text-slate-300">- {note}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-slate-400 text-sm">Structured fields were extracted from this event. No extra notes were found.</p>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   ) : null;
@@ -316,6 +596,20 @@ export function AuditLogsView() {
                     {selectedDevice.activity_offline ? `Offline after ${selectedDevice.activity_timeout_seconds ?? 60}s idle` : "Activity online"}
                   </span>
                 </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-5">
+                  <div className="bg-slate-900/50 border border-slate-700 rounded-lg p-3">
+                    <p className="text-xs text-slate-400 mb-1">Total Requests</p>
+                    <p className="text-lg font-semibold text-white">{selectedDevice.total_requests}</p>
+                  </div>
+                  <div className="bg-slate-900/50 border border-slate-700 rounded-lg p-3">
+                    <p className="text-xs text-slate-400 mb-1">Allowed</p>
+                    <p className="text-lg font-semibold text-emerald-300">{selectedDevice.allowed_requests}</p>
+                  </div>
+                  <div className="bg-slate-900/50 border border-slate-700 rounded-lg p-3">
+                    <p className="text-xs text-slate-400 mb-1">Blocked</p>
+                    <p className="text-lg font-semibold text-rose-300">{selectedDevice.blocked_requests}</p>
+                  </div>
+                </div>
                 <div className="overflow-x-auto">
                   <table className="w-full">
                     <thead className="bg-slate-900/50">
@@ -336,8 +630,10 @@ export function AuditLogsView() {
                             <td className="px-4 py-3 text-sm text-slate-300 whitespace-nowrap">{formatTimestamp(log.timestamp)}</td>
                             <td className="px-4 py-3 text-sm text-slate-200 whitespace-nowrap">{log.action}</td>
                             <td className="px-4 py-3 text-sm text-slate-300">
-                              <div className="line-clamp-2 break-words">{log.details}</div>
-                              <button onClick={() => setDetailsLog(log)} className="text-cyan-300 hover:text-cyan-200 text-xs inline-flex items-center gap-1 mt-1">
+                              <div className="rounded-md border border-slate-700 bg-slate-900/50 px-2.5 py-1.5 text-xs text-slate-300 line-clamp-1 break-all">
+                                {detailPreviewRows(log.details)}
+                              </div>
+                              <button onClick={() => setDetailsLog(log)} className="text-cyan-300 hover:text-cyan-200 text-xs inline-flex items-center gap-1 mt-1.5">
                                 <Eye className="w-3 h-3" />
                                 View full details
                               </button>
@@ -454,8 +750,10 @@ export function AuditLogsView() {
                       </td>
                       <td className="px-4 py-3 text-sm text-slate-300">{log.user_name || (log.user_id === null ? "System" : `User #${log.user_id}`)}</td>
                       <td className="px-4 py-3 text-sm text-slate-300">
-                        <div className="line-clamp-2 break-words">{log.details}</div>
-                        <button onClick={() => setDetailsLog(log)} className="text-cyan-300 hover:text-cyan-200 text-xs inline-flex items-center gap-1 mt-1">
+                        <div className="rounded-md border border-slate-700 bg-slate-900/50 px-2.5 py-1.5 text-xs text-slate-300 line-clamp-1 break-all">
+                          {detailPreviewRows(log.details)}
+                        </div>
+                        <button onClick={() => setDetailsLog(log)} className="text-cyan-300 hover:text-cyan-200 text-xs inline-flex items-center gap-1 mt-1.5">
                           <Eye className="w-3 h-3" />
                           View full details
                         </button>

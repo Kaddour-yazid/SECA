@@ -95,6 +95,37 @@ python run_backend.py --setup-only
 python run_backend.py --no-reload
 ```
 
+## Website suggestion search with Meilisearch
+
+SECA can use Meilisearch for much faster website suggestions in Access Control.
+
+Add these variables to `.env`:
+
+```env
+SECA_SUGGEST_ENGINE=meili
+SECA_MEILI_URL=http://127.0.0.1:7700
+SECA_MEILI_MASTER_KEY=seca-dev-master-key
+SECA_MEILI_INDEX=website_suggestions
+SECA_MEILI_TIMEOUT_SECONDS=1.0
+SECA_MEILI_AUTOSEED=true
+```
+
+Included files:
+
+- `run_meilisearch.ps1`: starts a local Meilisearch instance if `backend/tools/meilisearch.exe` exists
+- `seed_meilisearch.py`: pushes `db/website_suggestions.json` into the configured Meilisearch index
+
+Typical local flow:
+
+```powershell
+cd project_postgres/backend
+.\run_meilisearch.ps1
+python seed_meilisearch.py
+python run_backend.py
+```
+
+If Meilisearch is not available, the backend falls back to the built-in hybrid suggestion logic.
+
 ## 3) Ensure database exists
 
 Example in `psql`:

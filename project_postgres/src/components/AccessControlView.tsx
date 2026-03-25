@@ -12,6 +12,29 @@ type BlockRule = {
   updated_at?: string | null;
 };
 
+type SuggestionItem = {
+  id: string;
+  label: string;
+  pattern: string;
+  description: string;
+  source?: string;
+};
+
+const QUICK_SUGGESTIONS: SuggestionItem[] = [
+  { id: 'quick-youtube', label: 'YouTube', pattern: 'youtube.com', description: 'Fast local suggestion.', source: 'featured' },
+  { id: 'quick-youtube-api', label: 'YouTube API / DNS', pattern: 'youtubei.googleapis.com', description: 'Fast local suggestion.', source: 'featured' },
+  { id: 'quick-facebook', label: 'Facebook', pattern: 'facebook.com', description: 'Fast local suggestion.', source: 'featured' },
+  { id: 'quick-instagram', label: 'Instagram', pattern: 'instagram.com', description: 'Fast local suggestion.', source: 'featured' },
+  { id: 'quick-discord', label: 'Discord', pattern: 'discord.com', description: 'Fast local suggestion.', source: 'featured' },
+  { id: 'quick-openai', label: 'OpenAI', pattern: 'openai.com', description: 'Fast local suggestion.', source: 'featured' },
+  { id: 'quick-chatgpt', label: 'ChatGPT', pattern: 'chatgpt.com', description: 'Fast local suggestion.', source: 'featured' },
+  { id: 'quick-github', label: 'GitHub', pattern: 'github.com', description: 'Fast local suggestion.', source: 'featured' },
+  { id: 'quick-linkedin', label: 'LinkedIn', pattern: 'linkedin.com', description: 'Fast local suggestion.', source: 'featured' },
+  { id: 'quick-whatsapp', label: 'WhatsApp', pattern: 'web.whatsapp.com', description: 'Fast local suggestion.', source: 'featured' },
+];
+
+const SUGGESTION_CACHE = new Map<string, SuggestionItem[]>();
+
 const DOMAIN_SHORTCUTS: Record<string, string> = {
   yt: 'youtube',
   youtube: 'youtube',
@@ -95,10 +118,34 @@ function normalizePattern(input: string): string | null {
   return `*${shortcut}*`;
 }
 
+function quickSuggestions(query: string): SuggestionItem[] {
+  const q = query.trim().toLowerCase();
+  if (q.length < 2) return [];
+  return QUICK_SUGGESTIONS.filter((item) =>
+    item.label.toLowerCase().includes(q) || item.pattern.toLowerCase().includes(q)
+  ).slice(0, 5);
+}
+
+function mergeSuggestions(primary: SuggestionItem[], secondary: SuggestionItem[]): SuggestionItem[] {
+  const merged: SuggestionItem[] = [];
+  const seen = new Set<string>();
+
+  for (const item of [...primary, ...secondary]) {
+    const key = (normalizePattern(item.pattern) || item.pattern).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(item);
+  }
+
+  return merged.slice(0, 8);
+}
+
 export function AccessControlView() {
   const { token } = useAuth();
   const [rules, setRules] = useState<BlockRule[]>([]);
   const [newDomain, setNewDomain] = useState('');
+  const [suggestions, setSuggestions] = useState<SuggestionItem[]>([]);
+  const [suggesting, setSuggesting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -107,6 +154,14 @@ export function AccessControlView() {
     () => [...rules].sort((a, b) => a.pattern.localeCompare(b.pattern)),
     [rules]
   );
+
+  const suggestionMatches = useMemo(() => {
+    const existingPatterns = new Set(rules.map((rule) => rule.pattern.toLowerCase()));
+    return suggestions.filter((item) => {
+      const normalizedPattern = normalizePattern(item.pattern)?.toLowerCase();
+      return !(normalizedPattern && existingPatterns.has(normalizedPattern));
+    });
+  }, [rules, suggestions]);
 
   const fetchRules = async (showLoader = true) => {
     if (!token) {
@@ -140,6 +195,62 @@ export function AccessControlView() {
     fetchRules(true);
   }, [token]);
 
+  useEffect(() => {
+    if (!token) {
+      setSuggestions([]);
+      return;
+    }
+
+    const query = newDomain.trim();
+    if (query.length < 2) {
+      setSuggestions([]);
+      return;
+    }
+
+    const instant = quickSuggestions(query);
+    setSuggestions(instant);
+
+    const cached = SUGGESTION_CACHE.get(query.toLowerCase());
+    if (cached) {
+      setSuggestions(mergeSuggestions(instant, cached));
+      setSuggesting(false);
+      return;
+    }
+
+    let cancelled = false;
+    const timeoutId = window.setTimeout(async () => {
+      try {
+        setSuggesting(true);
+        const res = await fetch(apiUrl(`/gateway/blocklist/suggest?q=${encodeURIComponent(query)}`), {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
+        if (!res.ok) {
+          throw new Error('Failed to load suggestions');
+        }
+        const data = (await res.json()) as SuggestionItem[];
+        if (!cancelled) {
+          SUGGESTION_CACHE.set(query.toLowerCase(), data);
+          setSuggestions(mergeSuggestions(instant, data));
+        }
+      } catch {
+        if (!cancelled) {
+          setSuggestions(instant);
+        }
+      } finally {
+        if (!cancelled) {
+          setSuggesting(false);
+        }
+      }
+    }, 120);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [newDomain, token]);
+
   const addRule = async () => {
     if (!token) {
       return;
@@ -169,6 +280,7 @@ export function AccessControlView() {
         throw new Error(detail.detail || 'Failed to add block rule');
       }
       setNewDomain('');
+      setSuggestions([]);
       await fetchRules(false);
       setError(null);
     } catch (err) {
@@ -248,9 +360,48 @@ export function AccessControlView() {
                 type="text"
                 value={newDomain}
                 onChange={(e) => setNewDomain(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void addRule();
+                  }
+                }}
                 placeholder="example.com or https://example.com/page"
                 className="w-full pl-10 pr-4 py-2 bg-slate-900/70 border border-slate-600 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500"
               />
+              {(suggestionMatches.length > 0 || suggesting) && (
+                <div className="absolute z-20 left-0 right-0 mt-2 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-slate-700 text-[11px] uppercase tracking-wide text-slate-400 flex items-center justify-between gap-2">
+                    <span>Suggested websites</span>
+                    {suggesting && <span className="text-[10px] text-cyan-300 normal-case">Updating live...</span>}
+                  </div>
+                  {suggestionMatches.length > 0 ? (
+                    <div className="divide-y divide-slate-800">
+                      {suggestionMatches.map((item) => (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => setNewDomain(item.pattern)}
+                          className="w-full text-left px-3 py-3 hover:bg-slate-800/80 transition"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-medium text-slate-100">{item.label}</p>
+                              <p className="text-xs text-cyan-300 mt-0.5">{item.pattern}</p>
+                            </div>
+                            <span className="text-[11px] px-2 py-0.5 rounded-full border border-slate-600 text-slate-300">
+                              {item.source === 'featured' ? 'Popular' : 'Live'}
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-400 mt-1">{item.description}</p>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    !suggesting && <div className="px-3 py-3 text-sm text-slate-400">No suggestions found yet.</div>
+                  )}
+                </div>
+              )}
             </div>
             <button
               onClick={addRule}
@@ -263,6 +414,9 @@ export function AccessControlView() {
           </div>
           <p className="text-xs text-slate-500 mt-2">
             Input is normalized to wildcard format (example: <code>*.domain.com</code>).
+          </p>
+          <p className="text-xs text-slate-500 mt-1">
+            Start typing a famous website like <code>you</code>, <code>discord</code>, or <code>openai</code> to get live suggestions.
           </p>
         </div>
 

@@ -26,7 +26,8 @@ import subprocess
 import time
 import logging
 import threading
-from urllib.parse import urlparse, urlsplit
+import urllib.request
+from urllib.parse import quote, urlparse, urlsplit
 from datetime import datetime, timedelta
 from html import unescape
 import unicodedata
@@ -141,9 +142,17 @@ SECA_PROXY_TLS_CA_KEY_PATH = os.environ.get("SECA_PROXY_TLS_CA_KEY_PATH", "").st
 SECA_GATEWAY_AUDIT_ASYNC = os.environ.get("SECA_GATEWAY_AUDIT_ASYNC", "true").strip().lower() in {"1", "true", "yes", "on"}
 SECA_GATEWAY_AUDIT_FLUSH_SECONDS = _read_float_env("SECA_GATEWAY_AUDIT_FLUSH_SECONDS", 0.5, minimum=0.1, maximum=5.0)
 SECA_GATEWAY_AUDIT_BATCH_SIZE = _read_int_env("SECA_GATEWAY_AUDIT_BATCH_SIZE", 200, minimum=20, maximum=2000)
+SECA_SUGGEST_ENGINE = os.environ.get("SECA_SUGGEST_ENGINE", "hybrid").strip().lower() or "hybrid"
+SECA_MEILI_URL = os.environ.get("SECA_MEILI_URL", "http://127.0.0.1:7700").strip().rstrip("/")
+SECA_MEILI_MASTER_KEY = os.environ.get("SECA_MEILI_MASTER_KEY", "").strip()
+SECA_MEILI_INDEX = os.environ.get("SECA_MEILI_INDEX", "website_suggestions").strip() or "website_suggestions"
+SECA_MEILI_TIMEOUT_SECONDS = _read_float_env("SECA_MEILI_TIMEOUT_SECONDS", 1.0, minimum=0.2, maximum=5.0)
+SECA_MEILI_AUTOSEED = _read_bool_env("SECA_MEILI_AUTOSEED", True)
 proxy_server = None
 proxy_blocklist_cache: List[str] = []
 proxy_blocklist_last_fetch = 0.0
+proxy_blocklist_suggestion_cache: Dict[str, Tuple[float, List[Dict[str, str]]]] = {}
+proxy_meili_seed_attempted = False
 
 PROXY_BLOCKLIST_SHORTCUTS = {
     "yt": "youtube",
@@ -175,6 +184,174 @@ PROXY_SERVICE_DOMAIN_HINTS = {
     "twitter": ("twitter", "twimg", "x.com"),
     "whatsapp": ("whatsapp", "whatsapp.net", "wa.me"),
 }
+
+PROXY_WEBSITE_SUGGESTIONS = [
+    {
+        "id": "youtube-main",
+        "label": "YouTube main domain",
+        "pattern": "youtube.com",
+        "description": "Blocks the main YouTube website.",
+        "aliases": ("youtube", "you", "yt", "video"),
+    },
+    {
+        "id": "youtube-dns",
+        "label": "YouTube API / DNS",
+        "pattern": "youtubei.googleapis.com",
+        "description": "Useful for mobile app traffic and API calls.",
+        "aliases": ("youtube", "you", "yt", "dns", "api", "googleapis"),
+    },
+    {
+        "id": "youtube-media",
+        "label": "YouTube media CDN",
+        "pattern": "googlevideo.com",
+        "description": "Used for YouTube video delivery.",
+        "aliases": ("youtube", "yt", "cdn", "media", "googlevideo"),
+    },
+    {
+        "id": "youtube-assets",
+        "label": "YouTube static assets",
+        "pattern": "ytimg.com",
+        "description": "Used for thumbnails and static resources.",
+        "aliases": ("youtube", "yt", "assets", "thumb", "ytimg"),
+    },
+    {
+        "id": "facebook-main",
+        "label": "Facebook main domain",
+        "pattern": "facebook.com",
+        "description": "Blocks the main Facebook website.",
+        "aliases": ("facebook", "face", "fb", "meta"),
+    },
+    {
+        "id": "facebook-cdn",
+        "label": "Facebook CDN",
+        "pattern": "fbcdn.net",
+        "description": "Useful for Facebook app assets and media.",
+        "aliases": ("facebook", "fb", "cdn", "fbcdn"),
+    },
+    {
+        "id": "messenger-main",
+        "label": "Messenger",
+        "pattern": "messenger.com",
+        "description": "Blocks the Messenger web service.",
+        "aliases": ("facebook", "fb", "messenger", "meta"),
+    },
+    {
+        "id": "instagram-main",
+        "label": "Instagram",
+        "pattern": "instagram.com",
+        "description": "Blocks the Instagram website.",
+        "aliases": ("instagram", "insta", "ig", "meta"),
+    },
+    {
+        "id": "instagram-cdn",
+        "label": "Instagram CDN",
+        "pattern": "cdninstagram.com",
+        "description": "Useful for Instagram media delivery.",
+        "aliases": ("instagram", "insta", "ig", "cdn"),
+    },
+    {
+        "id": "whatsapp-main",
+        "label": "WhatsApp Web",
+        "pattern": "web.whatsapp.com",
+        "description": "Blocks WhatsApp Web access.",
+        "aliases": ("whatsapp", "wa", "chat"),
+    },
+    {
+        "id": "whatsapp-network",
+        "label": "WhatsApp network",
+        "pattern": "whatsapp.net",
+        "description": "Useful for broader WhatsApp app traffic.",
+        "aliases": ("whatsapp", "wa", "network"),
+    },
+    {
+        "id": "discord-main",
+        "label": "Discord",
+        "pattern": "discord.com",
+        "description": "Blocks the main Discord website.",
+        "aliases": ("discord", "disc", "chat"),
+    },
+    {
+        "id": "discord-invite",
+        "label": "Discord invite links",
+        "pattern": "discord.gg",
+        "description": "Useful for invitation and shared links.",
+        "aliases": ("discord", "disc", "invite", "gg"),
+    },
+    {
+        "id": "openai-main",
+        "label": "OpenAI",
+        "pattern": "openai.com",
+        "description": "Blocks the OpenAI website.",
+        "aliases": ("openai", "ai", "gpt"),
+    },
+    {
+        "id": "chatgpt-main",
+        "label": "ChatGPT",
+        "pattern": "chatgpt.com",
+        "description": "Blocks the ChatGPT app website.",
+        "aliases": ("chatgpt", "gpt", "openai", "chat"),
+    },
+    {
+        "id": "github-main",
+        "label": "GitHub",
+        "pattern": "github.com",
+        "description": "Blocks the GitHub website.",
+        "aliases": ("github", "git", "code"),
+    },
+    {
+        "id": "linkedin-main",
+        "label": "LinkedIn",
+        "pattern": "linkedin.com",
+        "description": "Blocks the LinkedIn website.",
+        "aliases": ("linkedin", "link", "jobs"),
+    },
+    {
+        "id": "reddit-main",
+        "label": "Reddit",
+        "pattern": "reddit.com",
+        "description": "Blocks the Reddit website.",
+        "aliases": ("reddit", "forum", "social"),
+    },
+    {
+        "id": "spotify-main",
+        "label": "Spotify",
+        "pattern": "spotify.com",
+        "description": "Blocks the Spotify website.",
+        "aliases": ("spotify", "music", "audio"),
+    },
+    {
+        "id": "tiktok-main",
+        "label": "TikTok",
+        "pattern": "tiktok.com",
+        "description": "Blocks the TikTok website.",
+        "aliases": ("tiktok", "tik", "tt"),
+    },
+    {
+        "id": "telegram-main",
+        "label": "Telegram",
+        "pattern": "telegram.org",
+        "description": "Blocks the Telegram website.",
+        "aliases": ("telegram", "tele", "chat"),
+    },
+    {
+        "id": "x-main",
+        "label": "X / Twitter",
+        "pattern": "x.com",
+        "description": "Blocks the X main domain.",
+        "aliases": ("x", "twitter", "tw"),
+    },
+    {
+        "id": "twitter-cdn",
+        "label": "Twitter media CDN",
+        "pattern": "twimg.com",
+        "description": "Useful for media and static assets.",
+        "aliases": ("twitter", "tw", "x", "cdn"),
+    },
+]
+
+PROXY_SUGGESTION_STOPWORDS = {"download", "login", "support", "web", "api", "key", "platform", "official", "site"}
+PROXY_SUGGESTION_CACHE_SECONDS = 300.0
+WEBSITE_SUGGESTIONS_FILE = os.path.join(os.path.dirname(__file__), "website_suggestions.json")
 
 
 class GatewayBlockRuleCreate(BaseModel):
@@ -239,6 +416,287 @@ def _invalidate_proxy_blocklist_cache() -> None:
     global proxy_blocklist_cache, proxy_blocklist_last_fetch
     proxy_blocklist_cache = []
     proxy_blocklist_last_fetch = 0.0
+
+
+def _blocklist_suggestion_score(entry: Dict[str, Any], query: str) -> int:
+    q = (query or "").strip().lower()
+    if not q:
+        return 0
+    label = str(entry.get("label") or "").lower()
+    pattern = str(entry.get("pattern") or "").lower()
+    aliases = [str(alias).lower() for alias in entry.get("aliases") or ()]
+    score = 0
+    if pattern.startswith(q):
+        score += 120
+    if any(alias.startswith(q) for alias in aliases):
+        score += 100
+    if q in label:
+        score += 80
+    if q in pattern:
+        score += 60
+    if any(q in alias for alias in aliases):
+        score += 50
+    return score
+
+
+def _catalog_blocklist_suggestions(query: str) -> List[Dict[str, Any]]:
+    scored = []
+    for entry in PROXY_WEBSITE_SUGGESTIONS:
+        score = _blocklist_suggestion_score(entry, query)
+        if score > 0:
+            scored.append((score, entry))
+    scored.sort(key=lambda item: (-item[0], str(item[1].get("label") or "")))
+    return [item[1] for item in scored]
+
+
+def _guess_domain_from_phrase(phrase: str) -> Optional[str]:
+    normalized = unicodedata.normalize("NFKD", phrase or "").encode("ascii", "ignore").decode("ascii").lower()
+    normalized = re.sub(r"[^a-z0-9.\s-]", " ", normalized)
+    tokens = [token for token in re.split(r"[\s/]+", normalized) if token and token not in PROXY_SUGGESTION_STOPWORDS]
+    if not tokens:
+        return None
+
+    dotted = next((token for token in tokens if "." in token and len(token) >= 4), None)
+    if dotted:
+        return dotted.strip(".")
+
+    compact = "".join(tokens[:2]).strip(".")
+    if compact in {"chatgpt", "openai", "youtube", "discord", "facebook", "instagram", "linkedin", "spotify", "reddit", "tiktok", "telegram", "github"}:
+        return f"{compact}.com" if compact not in {"telegram"} else "telegram.org"
+
+    first = tokens[0].strip(".")
+    if len(first) < 3:
+        return None
+    return f"{first}.com"
+
+
+def _fetch_live_blocklist_suggestions(query: str) -> List[str]:
+    if len((query or "").strip()) < 2:
+        return []
+    url = f"https://duckduckgo.com/ac/?q={quote(query.strip())}&type=list"
+    req = urllib.request.Request(url, headers={"User-Agent": "SECA/1.0"})
+    with urllib.request.urlopen(req, timeout=1.5) as response:
+        payload = json.loads(response.read().decode("utf-8", "ignore"))
+    if isinstance(payload, list) and len(payload) >= 2 and isinstance(payload[1], list):
+        return [str(item).strip() for item in payload[1] if str(item).strip()]
+    return []
+
+
+def _meili_enabled() -> bool:
+    return SECA_SUGGEST_ENGINE in {"meili", "meilisearch", "hybrid"} and bool(SECA_MEILI_URL)
+
+
+def _meili_headers() -> Dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if SECA_MEILI_MASTER_KEY:
+        headers["Authorization"] = f"Bearer {SECA_MEILI_MASTER_KEY}"
+    return headers
+
+
+def _meili_request(method: str, path: str, payload: Optional[Dict[str, Any] | List[Dict[str, Any]]] = None) -> Any:
+    if not _meili_enabled():
+        raise RuntimeError("Meilisearch is not enabled")
+    body = None
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        f"{SECA_MEILI_URL}{path}",
+        data=body,
+        method=method.upper(),
+        headers=_meili_headers(),
+    )
+    with urllib.request.urlopen(request, timeout=SECA_MEILI_TIMEOUT_SECONDS) as response:
+        raw = response.read().decode("utf-8", "ignore").strip()
+    return json.loads(raw) if raw else None
+
+
+def _load_seed_website_suggestions() -> List[Dict[str, Any]]:
+    documents: List[Dict[str, Any]] = []
+    if os.path.exists(WEBSITE_SUGGESTIONS_FILE):
+        try:
+            with open(WEBSITE_SUGGESTIONS_FILE, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if isinstance(payload, list):
+                documents.extend([item for item in payload if isinstance(item, dict)])
+        except Exception as exc:
+            logger.warning("Failed to load website suggestions file %s: %s", WEBSITE_SUGGESTIONS_FILE, exc)
+
+    if not documents:
+        for entry in PROXY_WEBSITE_SUGGESTIONS:
+            documents.append({
+                "id": str(entry.get("id") or entry.get("pattern")),
+                "label": str(entry.get("label") or entry.get("pattern")),
+                "pattern": str(entry.get("pattern") or ""),
+                "description": str(entry.get("description") or "Popular service suggestion."),
+                "aliases": list(entry.get("aliases") or ()),
+                "category": "featured",
+                "popularity": 100,
+            })
+
+    seen_ids: set[str] = set()
+    normalized_docs: List[Dict[str, Any]] = []
+    for index, doc in enumerate(documents):
+        pattern = str(doc.get("pattern") or "").strip()
+        label = str(doc.get("label") or pattern).strip()
+        if not pattern or not label:
+            continue
+        doc_id = str(doc.get("id") or f"seed-{index}")
+        if doc_id in seen_ids:
+            continue
+        seen_ids.add(doc_id)
+        aliases = [str(alias).strip() for alias in doc.get("aliases") or [] if str(alias).strip()]
+        normalized_docs.append({
+            "id": doc_id,
+            "label": label,
+            "pattern": pattern,
+            "description": str(doc.get("description") or "Website suggestion."),
+            "aliases": aliases,
+            "category": str(doc.get("category") or "general"),
+            "popularity": int(doc.get("popularity") or 50),
+        })
+    return normalized_docs
+
+
+def _ensure_meili_index() -> None:
+    try:
+        _meili_request("GET", f"/indexes/{SECA_MEILI_INDEX}")
+    except Exception:
+        _meili_request("POST", "/indexes", {"uid": SECA_MEILI_INDEX, "primaryKey": "id"})
+    settings = {
+        "searchableAttributes": ["label", "pattern", "aliases", "description", "category"],
+        "filterableAttributes": ["category"],
+        "sortableAttributes": ["popularity"],
+        "rankingRules": [
+            "words",
+            "typo",
+            "proximity",
+            "attribute",
+            "sort",
+            "exactness",
+        ],
+    }
+    _meili_request("PATCH", f"/indexes/{SECA_MEILI_INDEX}/settings", settings)
+
+
+def _seed_meili_index() -> Dict[str, Any]:
+    documents = _load_seed_website_suggestions()
+    _ensure_meili_index()
+    result = _meili_request("POST", f"/indexes/{SECA_MEILI_INDEX}/documents", documents)
+    return {
+        "documents": len(documents),
+        "task": result or {},
+    }
+
+
+def _meili_blocklist_suggestions(query: str, limit: int = 8) -> List[Dict[str, str]]:
+    search_payload = {
+        "q": query,
+        "limit": limit,
+        "sort": ["popularity:desc"],
+        "attributesToRetrieve": ["id", "label", "pattern", "description", "category"],
+    }
+    response = _meili_request("POST", f"/indexes/{SECA_MEILI_INDEX}/search", search_payload) or {}
+    hits = response.get("hits") or []
+    return [
+        {
+            "id": str(hit.get("id") or hit.get("pattern") or f"meili-{index}"),
+            "label": str(hit.get("label") or hit.get("pattern") or "Website"),
+            "pattern": str(hit.get("pattern") or ""),
+            "description": str(hit.get("description") or "Meilisearch suggestion."),
+            "source": "meili",
+        }
+        for index, hit in enumerate(hits)
+        if str(hit.get("pattern") or "").strip()
+    ]
+
+
+def _build_proxy_blocklist_suggestions(query: str) -> List[Dict[str, str]]:
+    global proxy_meili_seed_attempted
+    q = (query or "").strip().lower()
+    if len(q) < 2:
+        return []
+
+    cached = proxy_blocklist_suggestion_cache.get(q)
+    now = time.monotonic()
+    if cached and now - cached[0] < PROXY_SUGGESTION_CACHE_SECONDS:
+        return cached[1]
+
+    suggestions: List[Dict[str, str]] = []
+    seen_patterns: set[str] = set()
+
+    if _meili_enabled():
+        try:
+            if SECA_MEILI_AUTOSEED and not proxy_meili_seed_attempted:
+                _seed_meili_index()
+                proxy_meili_seed_attempted = True
+            else:
+                _ensure_meili_index()
+            meili_hits = _meili_blocklist_suggestions(q, limit=8)
+            for item in meili_hits:
+                normalized = _normalize_proxy_block_pattern(item["pattern"])
+                if normalized in seen_patterns:
+                    continue
+                seen_patterns.add(normalized)
+                suggestions.append(item)
+        except Exception as exc:
+            logger.warning("Meilisearch suggestions failed for %s: %s", q, exc)
+
+    for entry in _catalog_blocklist_suggestions(q):
+        pattern = str(entry.get("pattern") or "").strip()
+        normalized = _normalize_proxy_block_pattern(pattern)
+        if normalized in seen_patterns:
+            continue
+        seen_patterns.add(normalized)
+        suggestions.append({
+            "id": str(entry.get("id") or normalized),
+            "label": str(entry.get("label") or pattern),
+            "pattern": pattern,
+            "description": str(entry.get("description") or "Popular service suggestion."),
+            "source": "featured",
+        })
+
+    try:
+        live_terms = _fetch_live_blocklist_suggestions(q)
+    except Exception as exc:
+        logger.warning("Blocklist live suggestions failed for %s: %s", q, exc)
+        live_terms = []
+
+    for index, term in enumerate(live_terms):
+        matched_catalog = _catalog_blocklist_suggestions(term)
+        if matched_catalog:
+            for entry in matched_catalog[:2]:
+                pattern = str(entry.get("pattern") or "").strip()
+                normalized = _normalize_proxy_block_pattern(pattern)
+                if normalized in seen_patterns:
+                    continue
+                seen_patterns.add(normalized)
+                suggestions.append({
+                    "id": f"live-{entry.get('id')}",
+                    "label": str(entry.get("label") or pattern),
+                    "pattern": pattern,
+                    "description": f"Live match for '{term}'.",
+                    "source": "live",
+                })
+            continue
+
+        domain = _guess_domain_from_phrase(term)
+        if not domain:
+            continue
+        normalized = _normalize_proxy_block_pattern(domain)
+        if normalized in seen_patterns:
+            continue
+        seen_patterns.add(normalized)
+        suggestions.append({
+            "id": f"live-domain-{index}",
+            "label": term.title(),
+            "pattern": domain,
+            "description": f"Live web suggestion for '{term}'.",
+            "source": "live",
+        })
+
+    final = suggestions[:10]
+    proxy_blocklist_suggestion_cache[q] = (now, final)
+    return final
 
 
 def _register_proxy_client_writer(writer: asyncio.StreamWriter) -> None:
@@ -564,8 +1022,9 @@ def _gateway_audit_details(event: Dict[str, Any]) -> str:
     if event.get("scan_url"):
         parts.append(f"scan_url={event.get('scan_url')}")
     if event.get("static_status"):
-        score = event.get("static_threat_score")
-        parts.append(f"url_static={event.get('static_status')} score={score}")
+        parts.append(f"url_static={event.get('static_status')}")
+    if event.get("static_threat_score") is not None:
+        parts.append(f"score={event.get('static_threat_score')}")
     if event.get("static_match_type") and event.get("static_match_type") != "none":
         parts.append(f"match={event.get('static_match_type')}")
     if event.get("static_source"):
@@ -3106,6 +3565,28 @@ async def gateway_blocklist_list(
         "created_at": r.created_at.isoformat() if r.created_at else None,
         "updated_at": r.updated_at.isoformat() if r.updated_at else None,
     } for r in rows]
+
+
+@app.get("/gateway/blocklist/suggest")
+async def gateway_blocklist_suggest(
+        q: str = Query("", min_length=0),
+        current_user: User = Depends(require_admin)
+):
+    del current_user
+    return _build_proxy_blocklist_suggestions(q)
+
+
+@app.post("/gateway/blocklist/suggest/reindex")
+async def gateway_blocklist_suggest_reindex(
+        current_user: User = Depends(require_admin)
+):
+    del current_user
+    if not _meili_enabled():
+        raise HTTPException(status_code=400, detail="Meilisearch suggestion engine is not enabled")
+    try:
+        return _seed_meili_index()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to seed Meilisearch index: {exc}")
 
 
 @app.post("/gateway/blocklist")
