@@ -1,502 +1,633 @@
-import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
-  AlertTriangle,
-  BarChart3,
   Briefcase,
-  CheckCircle,
   Clock3,
-  Network,
   Shield,
+  UserCheck,
+  UserPlus,
   Users,
-  Wifi,
-  XCircle,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
 import { apiUrl } from '../config/api';
 
-type EmployeeUsage = {
-  name: string;
-  team: string;
-  totalSearches: number;
-  risk: 'low' | 'medium' | 'high';
-};
+type MonitoringTab = 'overview' | 'employees' | 'sessions';
 
-type DeviceStatus = {
-  hostname: string;
-  ip: string;
-  state: 'online' | 'warning' | 'offline';
-  lastSync: string;
+type UserRow = {
+  id: number;
+  email: string;
+  first_name?: string | null;
+  last_name?: string | null;
+  sex?: string | null;
+  department?: string | null;
+  group_name?: string | null;
+  role?: string | null;
+  is_admin: boolean;
+  created_at: string;
 };
 
 type ScanRow = {
   id: number;
+  user_id?: number | null;
   scan_type: string;
   target: string;
   status: string;
   created_at: string;
 };
 
-type SiteStat = {
-  domain: string;
-  label: string;
-  hits: number;
-  percent: number;
-  color: string;
-  iconUrl: string;
+type DesktopSessionRow = {
+  session_id: string;
+  user_id: number;
+  user_name: string;
+  email: string;
+  department?: string | null;
+  group_name?: string | null;
+  role?: string | null;
+  is_admin: boolean;
+  device_id?: string | null;
+  hostname?: string | null;
+  platform?: string | null;
+  app_version?: string | null;
+  proxy_host?: string | null;
+  proxy_port?: number | null;
+  started_at?: string | null;
+  last_heartbeat?: string | null;
+  online: boolean;
+  disconnect_reason?: string | null;
+  seconds_since_last_heartbeat?: number | null;
 };
 
-type TrafficEvent = {
-  mode: 'Blocked' | 'Monitored' | 'Allowed';
-  domain: string;
-  source: string;
-  timeLabel: string;
+type EmployeeSlot = {
+  key: string;
+  id: number | null;
+  name: string;
+  email: string | null;
+  sex: string | null;
+  department: string;
+  group_name: string;
+  joinedAt: string | null;
+  state: 'registered' | 'placeholder';
 };
 
-const mockEmployees: EmployeeUsage[] = [
-  { name: 'Nora A.', team: 'Support', totalSearches: 116, risk: 'high' },
-  { name: 'Khaled M.', team: 'Sales', totalSearches: 84, risk: 'medium' },
-  { name: 'Imane T.', team: 'HR', totalSearches: 52, risk: 'low' },
-  { name: 'Yassine B.', team: 'Finance', totalSearches: 73, risk: 'medium' },
-];
+const EXPECTED_GROUP_EMPLOYEES = 3;
 
-const mockDevices: DeviceStatus[] = [
-  { hostname: 'PC-ACCOUNTING-03', ip: '10.10.4.28', state: 'online', lastSync: '8s ago' },
-  { hostname: 'PC-SALES-11', ip: '10.10.5.77', state: 'warning', lastSync: '44s ago' },
-  { hostname: 'PC-SUPPORT-02', ip: '10.10.6.15', state: 'online', lastSync: '3s ago' },
-  { hostname: 'PC-LOBBY-01', ip: '10.10.9.12', state: 'offline', lastSync: '9m ago' },
-];
-
-const mockPolicies = [
-  { category: 'Streaming and Entertainment', mode: 'Blocked', matches: 74, active: true },
-  { category: 'AI Assistants', mode: 'Monitored', matches: 183, active: true },
-  { category: 'Social Media', mode: 'Blocked', matches: 41, active: true },
-  { category: 'Professional Platforms', mode: 'Allowed', matches: 129, active: true },
-  { category: 'Unknown Domains', mode: 'Challenge', matches: 16, active: true },
-];
-
-const palette = ['#06b6d4', '#ef4444', '#3b82f6', '#22c55e', '#f59e0b'];
-
-const riskBadge = (risk: EmployeeUsage['risk']) =>
-  risk === 'high'
-    ? 'text-red-400 bg-red-500/10 border-red-500/30'
-    : risk === 'medium'
-    ? 'text-yellow-400 bg-yellow-500/10 border-yellow-500/30'
-    : 'text-green-400 bg-green-500/10 border-green-500/30';
-
-const deviceIcon = (state: DeviceStatus['state']) =>
-  state === 'online' ? (
-    <CheckCircle className="w-4 h-4 text-green-400" />
-  ) : state === 'warning' ? (
-    <AlertTriangle className="w-4 h-4 text-yellow-400" />
-  ) : (
-    <XCircle className="w-4 h-4 text-red-400" />
-  );
-
-const normalizeDomain = (value: string): string | null => {
-  if (!value) return null;
-  const raw = value.trim();
-
-  try {
-    const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
-    const host = new URL(withScheme).hostname.toLowerCase().replace(/^www\./, '');
-    return host || null;
-  } catch {
-    return null;
-  }
+const formatName = (user: UserRow) => {
+  const first = (user.first_name || '').trim();
+  const last = (user.last_name || '').trim();
+  const combined = `${first} ${last}`.trim();
+  return combined || user.email;
 };
 
-const domainToLabel = (domain: string): string => {
-  const first = domain.split('.')[0] || domain;
-  return first.charAt(0).toUpperCase() + first.slice(1);
+const formatDate = (value: string | null) => {
+  if (!value) return 'Pending';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Pending';
+  return date.toLocaleDateString();
 };
 
-const faviconUrl = (domain: string): string =>
-  `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=64`;
-
-const percentageBreakdown = (weights: number[]): number[] => {
-  const total = weights.reduce((sum, v) => sum + v, 0) || 1;
-  return weights.map((w) => Math.round((w / total) * 100));
+const formatDateTime = (value: string | null) => {
+  if (!value) return 'No activity yet';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'No activity yet';
+  return date.toLocaleString();
 };
-
-const ringStyle = (color: string, percent: number) => ({
-  background: `conic-gradient(${color} ${Math.min(100, Math.max(0, percent)) * 3.6}deg, #1e293b 0deg)`,
-});
 
 export function GatewayStartView() {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
   const { translateText } = useLanguage();
-  const [activePanel, setActivePanel] = useState<'overview' | 'employees' | 'policies'>('overview');
+  const [activePanel, setActivePanel] = useState<MonitoringTab>('overview');
+  const [users, setUsers] = useState<UserRow[]>([]);
   const [scanRows, setScanRows] = useState<ScanRow[]>([]);
+  const [desktopSessions, setDesktopSessions] = useState<DesktopSessionRow[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!token) return;
 
-    const loadScanRows = async () => {
+    const loadMonitoringData = async () => {
+      setLoading(true);
       try {
-        const res = await fetch(apiUrl('/scans?limit=500'), {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) return;
-        const data: ScanRow[] = await res.json();
-        setScanRows(Array.isArray(data) ? data : []);
+        const [usersRes, scansRes, sessionsRes] = await Promise.all([
+          fetch(apiUrl('/users'), {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+          fetch(apiUrl('/scans?limit=500'), {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+          fetch(apiUrl('/monitoring/desktop/sessions'), {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+        ]);
+
+        if (usersRes.ok) {
+          const userData: UserRow[] = await usersRes.json();
+          setUsers(Array.isArray(userData) ? userData : []);
+        } else {
+          setUsers([]);
+        }
+
+        if (scansRes.ok) {
+          const scanData: ScanRow[] = await scansRes.json();
+          setScanRows(Array.isArray(scanData) ? scanData : []);
+        } else {
+          setScanRows([]);
+        }
+
+        if (sessionsRes.ok) {
+          const sessionData = await sessionsRes.json();
+          const rows = Array.isArray(sessionData?.sessions) ? sessionData.sessions : [];
+          setDesktopSessions(rows as DesktopSessionRow[]);
+        } else {
+          setDesktopSessions([]);
+        }
       } catch {
-        // Design page should keep working even when API is unavailable.
+        setUsers([]);
+        setScanRows([]);
+        setDesktopSessions([]);
+      } finally {
+        setLoading(false);
       }
     };
 
-    void loadScanRows();
+    void loadMonitoringData();
+    const intervalId = window.setInterval(() => {
+      void loadMonitoringData();
+    }, 10000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
   }, [token]);
 
-  const topSites = useMemo<SiteStat[]>(() => {
-    const domainHits = new Map<string, number>();
+  const adminDepartment = user?.department || '';
+  const adminGroup = user?.group_name || '';
 
-    for (const scan of scanRows) {
-      if (!scan.target) continue;
-      if (!scan.scan_type?.toLowerCase().includes('url')) continue;
+  const realEmployees = useMemo(() => {
+    if (!adminDepartment || !adminGroup) return [];
+    return users.filter(
+      (entry) =>
+        !entry.is_admin &&
+        entry.department === adminDepartment &&
+        entry.group_name === adminGroup,
+    );
+  }, [adminDepartment, adminGroup, users]);
 
-      const domain = normalizeDomain(scan.target);
-      if (!domain) continue;
-      domainHits.set(domain, (domainHits.get(domain) || 0) + 1);
-    }
-
-    let entries = Array.from(domainHits.entries()).sort((a, b) => b[1] - a[1]).slice(0, 6);
-
-    if (!entries.length) {
-      entries = [
-        ['chatgpt.com', 46],
-        ['youtube.com', 24],
-        ['linkedin.com', 14],
-        ['github.com', 10],
-        ['facebook.com', 4],
-        ['wikipedia.org', 2],
-      ];
-    }
-
-    const total = entries.reduce((sum, [, hits]) => sum + hits, 0) || 1;
-
-    return entries.map(([domain, hits], idx) => ({
-      domain,
-      label: domainToLabel(domain),
-      hits,
-      percent: Math.round((hits / total) * 100),
-      color: palette[idx % palette.length],
-      iconUrl: faviconUrl(domain),
+  const employeeSlots = useMemo<EmployeeSlot[]>(() => {
+    const registered = realEmployees.map((entry) => ({
+      key: `user-${entry.id}`,
+      id: entry.id,
+      name: formatName(entry),
+      email: entry.email,
+      sex: entry.sex || null,
+      department: entry.department || adminDepartment,
+      group_name: entry.group_name || adminGroup,
+      joinedAt: entry.created_at,
+      state: 'registered' as const,
     }));
-  }, [scanRows]);
 
-  const employeeSiteUsage = useMemo(() => {
-    return mockEmployees.map((employee, employeeIndex) => {
-      const baseSeed = employee.name.split('').reduce((sum, ch) => sum + ch.charCodeAt(0), 0);
-      const weights = topSites.map((site, siteIndex) => {
-        const base = (baseSeed * (siteIndex + 3)) % 37;
-        const riskBoost = employee.risk === 'high' && siteIndex === 0 ? 15 : employee.risk === 'medium' && siteIndex === 0 ? 7 : 0;
-        return Math.max(10, base + riskBoost + (site.percent / 5) + employeeIndex * 2);
-      });
+    const missing = Math.max(0, EXPECTED_GROUP_EMPLOYEES - registered.length);
+    const placeholders = Array.from({ length: missing }, (_, index) => ({
+      key: `placeholder-${index + 1}`,
+      id: null,
+      name: `Employee Slot ${index + 1}`,
+      email: null,
+      sex: null,
+      department: adminDepartment,
+      group_name: adminGroup,
+      joinedAt: null,
+      state: 'placeholder' as const,
+    }));
 
-      const percents = percentageBreakdown(weights);
+    return [...registered, ...placeholders];
+  }, [adminDepartment, adminGroup, realEmployees]);
 
-      const sites = topSites.map((site, idx) => ({
-        ...site,
-        percent: percents[idx] ?? 0,
-      }));
+  const employeeIds = useMemo(
+    () => new Set(realEmployees.map((entry) => entry.id)),
+    [realEmployees],
+  );
 
-      const nonWorkPercent = sites
-        .filter((s) => /(youtube|facebook|instagram|tiktok|netflix|x\.com)/i.test(s.domain))
-        .reduce((sum, s) => sum + s.percent, 0);
+  const groupScans = useMemo(
+    () => scanRows.filter((row) => row.user_id && employeeIds.has(row.user_id)),
+    [scanRows, employeeIds],
+  );
 
-      return { employee, sites, nonWorkPercent };
-    });
-  }, [topSites]);
-
-  const liveTraffic = useMemo<TrafficEvent[]>(() => {
-    const usable = scanRows
-      .filter((row) => row.scan_type?.toLowerCase().includes('url') && !!normalizeDomain(row.target))
-      .slice(0, 8);
-
-    if (usable.length) {
-      return usable.map((row, idx) => {
-        const domain = normalizeDomain(row.target) || 'unknown.local';
-        const mode: TrafficEvent['mode'] =
-          row.status === 'malicious' ? 'Blocked' : row.status === 'suspicious' ? 'Monitored' : 'Allowed';
-        const time = row.created_at ? new Date(row.created_at) : new Date();
-        return {
-          mode,
-          domain,
-          source: mockDevices[idx % mockDevices.length].hostname,
-          timeLabel: time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        };
-      });
+  const scanCountByUser = useMemo(() => {
+    const counts = new Map<number, number>();
+    for (const row of groupScans) {
+      if (!row.user_id) continue;
+      counts.set(row.user_id, (counts.get(row.user_id) || 0) + 1);
     }
+    return counts;
+  }, [groupScans]);
 
-    return [
-      { mode: 'Blocked', domain: 'youtube.com', source: 'PC-SALES-11', timeLabel: '14:10' },
-      { mode: 'Monitored', domain: 'chatgpt.com', source: 'PC-ACCOUNTING-03', timeLabel: '14:08' },
-      { mode: 'Allowed', domain: 'linkedin.com', source: 'PC-HR-04', timeLabel: '14:02' },
-      { mode: 'Blocked', domain: 'facebook.com', source: 'PC-SUPPORT-02', timeLabel: '13:57' },
-    ];
-  }, [scanRows]);
+  const latestSessionByUser = useMemo(() => {
+    const next = new Map<number, DesktopSessionRow>();
+    for (const session of desktopSessions) {
+      const current = next.get(session.user_id);
+      if (!current) {
+        next.set(session.user_id, session);
+        continue;
+      }
 
-  const stats = useMemo(() => {
-    const totalQueries = scanRows.filter((row) => !!normalizeDomain(row.target)).length || mockEmployees.reduce((sum, e) => sum + e.totalSearches, 0);
-    const highRiskUsers = employeeSiteUsage.filter((entry) => entry.employee.risk === 'high').length;
-    const onlineGateways = mockDevices.filter((d) => d.state === 'online').length;
-    const policyHits = scanRows.filter((row) => row.status === 'malicious' || row.status === 'suspicious').length || mockPolicies.reduce((sum, p) => sum + p.matches, 0);
-    return { totalQueries, highRiskUsers, onlineGateways, policyHits };
-  }, [scanRows, employeeSiteUsage]);
+      if (session.online && !current.online) {
+        next.set(session.user_id, session);
+        continue;
+      }
 
-  const onlinePercent = Math.round((stats.onlineGateways / mockDevices.length) * 100);
+      const currentTs = current.last_heartbeat ? new Date(current.last_heartbeat).getTime() : 0;
+      const nextTs = session.last_heartbeat ? new Date(session.last_heartbeat).getTime() : 0;
+      if (nextTs > currentTs) {
+        next.set(session.user_id, session);
+      }
+    }
+    return next;
+  }, [desktopSessions]);
+
+  const onlineEmployees = useMemo(
+    () => realEmployees.filter((entry) => latestSessionByUser.get(entry.id)?.online).length,
+    [latestSessionByUser, realEmployees],
+  );
+
+  const suspiciousCount = useMemo(
+    () =>
+      groupScans.filter(
+        (row) => row.status === 'suspicious' || row.status === 'malicious',
+      ).length,
+    [groupScans],
+  );
+
+  const latestActivity = useMemo(() => {
+    const latest = groupScans[0]?.created_at || null;
+    return formatDateTime(latest);
+  }, [groupScans]);
+
+  const recentScans = useMemo(() => groupScans.slice(0, 5), [groupScans]);
+
+  const tabs: { id: MonitoringTab; label: string; icon: typeof Activity }[] = [
+    { id: 'overview', label: translateText('Overview'), icon: Activity },
+    { id: 'employees', label: translateText('Employees'), icon: Users },
+    { id: 'sessions', label: 'Session Presence', icon: Briefcase },
+  ];
 
   return (
-    <div className="gateway-start flex-1 bg-slate-900 global-scroll">
-      <div className="p-8 space-y-6">
+    <div className="gateway-start global-scroll flex-1 bg-slate-900">
+      <div className="space-y-6 p-8">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h2 className="text-3xl font-bold text-white mb-2">{translateText('Monitoring')}</h2>
-            <p className="text-slate-400">{translateText('Design preview for employee web-usage gateway monitoring and policy control.')}</p>
+            <h2 className="mb-2 text-3xl font-bold text-white">{translateText('Monitoring')}</h2>
+            <p className="text-slate-400">
+              Real group-based monitoring for the current admin scope.
+            </p>
           </div>
-          <div className="px-3 py-2 rounded-lg border border-cyan-500/30 bg-cyan-500/10 text-cyan-300 text-sm">
-            {translateText('UI Mock + Real Scan Flavor')}
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-slate-400 text-sm">{translateText('Active Gateways')}</p>
-              <Network className="w-5 h-5 text-cyan-400" />
-            </div>
-            <p className="text-3xl font-bold text-white">{stats.onlineGateways}/{mockDevices.length}</p>
-          </div>
-          <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-slate-400 text-sm">{translateText('Tracked Searches')}</p>
-              <BarChart3 className="w-5 h-5 text-cyan-400" />
-            </div>
-            <p className="text-3xl font-bold text-white">{stats.totalQueries}</p>
-          </div>
-          <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-slate-400 text-sm">{translateText('Policy Hits')}</p>
-              <Shield className="w-5 h-5 text-cyan-400" />
-            </div>
-            <p className="text-3xl font-bold text-white">{stats.policyHits}</p>
-          </div>
-          <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-slate-400 text-sm">{translateText('High-Risk Users')}</p>
-              <AlertTriangle className="w-5 h-5 text-red-400" />
-            </div>
-            <p className="text-3xl font-bold text-red-400">{stats.highRiskUsers}</p>
+          <div className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-sm text-cyan-300">
+            {adminDepartment && adminGroup
+              ? `${adminDepartment} · ${adminGroup}`
+              : 'Missing admin scope'}
           </div>
         </div>
 
-        <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-2 flex gap-2">
-          {[
-            { id: 'overview', label: translateText('Overview'), icon: Activity },
-            { id: 'employees', label: translateText('Employees'), icon: Users },
-            { id: 'policies', label: translateText('Policies'), icon: Briefcase },
-          ].map((tab) => {
+        {!adminDepartment || !adminGroup ? (
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-5 text-amber-200">
+            The current admin account does not have a department/group scope yet. Monitoring needs
+            both values to build the employee view.
+          </div>
+        ) : null}
+
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
+          <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-sm text-slate-400">Expected Employees</p>
+              <Users className="h-5 w-5 text-cyan-400" />
+            </div>
+            <p className="text-3xl font-bold text-white">{EXPECTED_GROUP_EMPLOYEES}</p>
+          </div>
+          <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-sm text-slate-400">Registered Employees</p>
+              <UserCheck className="h-5 w-5 text-emerald-400" />
+            </div>
+            <p className="text-3xl font-bold text-white">{realEmployees.length}</p>
+          </div>
+          <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-sm text-slate-400">Open Slots</p>
+              <UserPlus className="h-5 w-5 text-amber-400" />
+            </div>
+            <p className="text-3xl font-bold text-white">
+              {Math.max(0, EXPECTED_GROUP_EMPLOYEES - realEmployees.length)}
+            </p>
+          </div>
+          <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-sm text-slate-400">Online Employees</p>
+              <Activity className="h-5 w-5 text-emerald-400" />
+            </div>
+            <p className="text-3xl font-bold text-white">{onlineEmployees}</p>
+          </div>
+          <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-sm text-slate-400">Group Scans</p>
+              <Shield className="h-5 w-5 text-cyan-400" />
+            </div>
+            <p className="text-3xl font-bold text-white">{groupScans.length}</p>
+          </div>
+        </div>
+
+        <div className="flex gap-2 rounded-xl border border-slate-700 bg-slate-800/50 p-2">
+          {tabs.map((tab) => {
             const Icon = tab.icon;
             const active = activePanel === tab.id;
             return (
               <button
                 key={tab.id}
-                onClick={() => setActivePanel(tab.id as 'overview' | 'employees' | 'policies')}
-                className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg transition ${
+                onClick={() => setActivePanel(tab.id)}
+                className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-3 transition ${
                   active
                     ? 'bg-cyan-500 text-white shadow-lg'
                     : 'text-slate-300 hover:bg-cyan-500/10 hover:text-cyan-400'
                 }`}
               >
-                <Icon className="w-4 h-4" />
+                <Icon className="h-4 w-4" />
                 <span className="font-medium">{tab.label}</span>
               </button>
             );
           })}
         </div>
 
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-          <div className="xl:col-span-2 bg-slate-800/50 border border-slate-700 rounded-xl p-6">
-            <h3 className="text-xl font-bold text-white mb-4">
-              {activePanel === 'overview' && translateText('Employee Search Distribution')}
-              {activePanel === 'employees' && translateText('Employee Behavior Breakdown')}
-              {activePanel === 'policies' && translateText('Policy Builder Preview')}
-            </h3>
-
-            {(activePanel === 'overview' || activePanel === 'employees') && (
-              <>
-                <div className="bg-slate-900/50 border border-slate-700 rounded-lg p-4 mb-4">
-                  <div className="flex items-center justify-between mb-3">
-                    <p className="text-slate-200 text-sm font-semibold">{translateText('Top websites from URL scan data')}</p>
-                    <span className="text-xs text-slate-400">{topSites.reduce((sum, site) => sum + site.hits, 0)} {translateText('tracked hits')}</span>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {topSites.map((site) => (
-                      <div key={site.domain} className="gateway-stat-item rounded-lg border border-slate-700 bg-slate-800/70 p-3">
-                        <div className="flex items-center justify-between gap-2 mb-2">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <img src={site.iconUrl} alt={site.label} className="w-5 h-5 rounded" />
-                            <span className="text-slate-100 text-sm font-medium truncate">{site.domain}</span>
-                          </div>
-                          <span className="text-cyan-300 text-xs font-semibold">{site.percent}%</span>
-                        </div>
-                        <div className="w-full h-2 rounded-full bg-slate-900 border border-slate-700 overflow-hidden">
-                          <div className="h-full rounded-full" style={{ width: `${site.percent}%`, backgroundColor: site.color }} />
-                        </div>
-                        <p className="text-slate-400 text-xs mt-2">{site.hits} {translateText('scans')}</p>
-                      </div>
-                    ))}
-                  </div>
+        {activePanel === 'overview' && (
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+            <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
+              <div className="mb-5 flex items-center justify-between">
+                <div>
+                  <h3 className="text-xl font-bold text-white">Group Overview</h3>
+                  <p className="mt-1 text-sm text-slate-400">
+                    Built from the employees registered in the current admin group.
+                  </p>
                 </div>
+                {loading && <span className="text-sm text-slate-500">Loading...</span>}
+              </div>
 
-                <div className="space-y-4">
-                  {employeeSiteUsage.map(({ employee, sites, nonWorkPercent }) => (
-                    <div key={employee.name} className="gateway-employee-card bg-slate-900/50 border border-slate-700 rounded-lg p-4">
-                      <div className="flex items-start justify-between mb-4">
-                        <div>
-                          <p className="text-white font-semibold text-lg">{employee.name}</p>
-                          <p className="text-slate-400 text-sm">{employee.team} - {employee.totalSearches} {translateText('searches')}</p>
-                        </div>
-                        <div className="text-right">
-                          <span className={`px-2 py-1 text-xs rounded-full border ${riskBadge(employee.risk)}`}>
-                            {translateText(employee.risk.toUpperCase())} {translateText('RISK')}
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                  <p className="text-sm text-slate-400">Latest Group Activity</p>
+                  <p className="mt-3 text-lg font-semibold text-white">{latestActivity}</p>
+                </div>
+                <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                  <p className="text-sm text-slate-400">Suspicious or Malicious Scans</p>
+                  <p className="mt-3 text-lg font-semibold text-amber-300">{suspiciousCount}</p>
+                </div>
+                <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                  <p className="text-sm text-slate-400">Registered vs Expected</p>
+                  <p className="mt-3 text-lg font-semibold text-white">
+                    {realEmployees.length} / {EXPECTED_GROUP_EMPLOYEES}
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-6">
+                <h4 className="mb-3 text-lg font-semibold text-white">Employee Slots</h4>
+                <div className="space-y-3">
+                  {employeeSlots.map((entry) => {
+                    const latestSession = entry.id ? latestSessionByUser.get(entry.id) : undefined;
+                    return (
+                      <div
+                        key={entry.key}
+                        className={`rounded-xl border p-4 ${
+                          entry.state === 'registered'
+                            ? 'border-slate-700 bg-slate-900/50'
+                            : 'border-dashed border-slate-700 bg-slate-950/35'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-4">
+                          <div>
+                            <p className="text-base font-semibold text-white">{entry.name}</p>
+                            <p className="mt-1 text-sm text-slate-400">
+                              {entry.email || 'Waiting for first employee login'}
+                            </p>
+                            {latestSession ? (
+                              <p className="mt-2 text-xs text-slate-500">
+                                {latestSession.online
+                                  ? `Connected from ${latestSession.hostname || latestSession.device_id || 'desktop'}`
+                                  : `Last heartbeat ${formatDateTime(latestSession.last_heartbeat || null)}`}
+                              </p>
+                            ) : null}
+                          </div>
+                          <span
+                            className={`rounded-full border px-3 py-1 text-xs font-semibold ${
+                              entry.state !== 'registered'
+                                ? 'border-slate-700 bg-slate-800/70 text-slate-400'
+                                : latestSession?.online
+                                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                                  : 'border-slate-700 bg-slate-800/70 text-slate-300'
+                            }`}
+                          >
+                            {entry.state !== 'registered'
+                              ? 'Placeholder'
+                              : latestSession?.online
+                                ? 'Online'
+                                : 'Registered'}
                           </span>
-                          <p className="text-slate-400 text-xs mt-2">{translateText('Non-work trend:')} {nonWorkPercent}%</p>
                         </div>
                       </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
 
-                      <div className="flex flex-wrap gap-5">
-                        {sites.map((site) => (
-                          <div key={`${employee.name}-${site.domain}`} className="min-w-[96px] text-center">
-                            <div className="relative w-16 h-16 mx-auto rounded-full p-[4px]" style={ringStyle(site.color, site.percent)}>
-                              <div className="w-full h-full rounded-full bg-slate-900 border border-slate-700 flex items-center justify-center">
-                                <img src={site.iconUrl} alt={site.label} className="w-8 h-8 rounded" />
-                              </div>
-                            </div>
-                            <p className="text-slate-200 text-sm mt-2 font-medium">{site.label}</p>
-                            <p className="text-slate-400 text-xs">{site.percent}%</p>
-                          </div>
-                        ))}
+            <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
+              <div className="mb-4 flex items-center gap-2">
+                <Clock3 className="h-5 w-5 text-cyan-300" />
+                <h3 className="text-xl font-bold text-white">Recent Group Scans</h3>
+              </div>
+              {recentScans.length ? (
+                <div className="space-y-3">
+                  {recentScans.map((scan) => (
+                    <div key={scan.id} className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold text-white">{scan.target}</p>
+                          <p className="mt-1 text-xs text-slate-400">
+                            {scan.scan_type} · {formatDateTime(scan.created_at)}
+                          </p>
+                        </div>
+                        <span
+                          className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${
+                            scan.status === 'malicious'
+                              ? 'border-red-500/30 bg-red-500/10 text-red-300'
+                              : scan.status === 'suspicious'
+                                ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+                                : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                          }`}
+                        >
+                          {scan.status}
+                        </span>
                       </div>
                     </div>
                   ))}
                 </div>
-              </>
-            )}
-
-            {activePanel === 'policies' && (
-              <div className="space-y-3">
-                {mockPolicies.map((policy) => (
-                  <div key={policy.category} className="bg-slate-900/50 border border-slate-700 rounded-lg p-4 flex items-center justify-between">
-                    <div>
-                      <p className="text-white font-medium">{policy.category}</p>
-                      <p className="text-slate-400 text-sm">{translateText('Mode')}: {translateText(policy.mode)} - {policy.matches} {translateText('matches this week')}</p>
-                    </div>
-                    <div className={`px-3 py-1 rounded-full text-xs border ${
-                      policy.mode === 'Blocked'
-                        ? 'text-red-400 bg-red-500/10 border-red-500/30'
-                        : policy.mode === 'Monitored'
-                        ? 'text-yellow-400 bg-yellow-500/10 border-yellow-500/30'
-                        : 'text-green-400 bg-green-500/10 border-green-500/30'
-                    }`}>
-                      {policy.active ? translateText('ACTIVE') : translateText('DISABLED')}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="space-y-6">
-            <div className="gateway-status-card bg-gradient-to-br from-cyan-500/20 via-blue-500/10 to-slate-900/60 border border-cyan-400/30 rounded-2xl p-6 shadow-[0_0_40px_rgba(6,182,212,0.12)]">
-              <div className="flex items-center justify-between mb-4">
-                <h4 className="text-white font-semibold flex items-center gap-2 text-lg">
-                  <Wifi className="w-5 h-5 text-cyan-300" />
-                  {translateText('Gateway Device Status')}
-                </h4>
-                <span className="text-cyan-200 text-xs border border-cyan-400/30 bg-cyan-500/10 px-3 py-1 rounded-full">{translateText('Real-time')}</span>
-              </div>
-
-              <div className="grid grid-cols-[1fr_auto] gap-4 items-end mb-5">
-                <div>
-                  <p className="text-slate-300 text-sm mb-1">{translateText('Gateway Health Index')}</p>
-                  <p className="text-7xl font-black tracking-tight text-white leading-none">{onlinePercent}%</p>
-                  <p className="text-slate-300 text-base mt-2">{stats.onlineGateways} / {mockDevices.length} {translateText('endpoints operational')}</p>
+              ) : (
+                <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/35 p-5 text-sm text-slate-400">
+                  No scans from the current group yet. Once group members start scanning, this panel
+                  will populate automatically.
                 </div>
-                <div className="w-20 h-20 rounded-2xl bg-cyan-500/15 border border-cyan-400/30 flex items-center justify-center">
-                  <Network className="w-10 h-10 text-cyan-300" />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-3 gap-2 mb-5">
-                <div className="gateway-mini-stat bg-slate-900/70 border border-slate-700 rounded-lg p-3 text-center">
-                  <p className="text-xs text-slate-400">{translateText('Online')}</p>
-                  <p className="text-2xl font-extrabold text-green-400">{mockDevices.filter((d) => d.state === 'online').length}</p>
-                </div>
-                <div className="gateway-mini-stat bg-slate-900/70 border border-slate-700 rounded-lg p-3 text-center">
-                  <p className="text-xs text-slate-400">{translateText('Warning')}</p>
-                  <p className="text-2xl font-extrabold text-yellow-400">{mockDevices.filter((d) => d.state === 'warning').length}</p>
-                </div>
-                <div className="gateway-mini-stat bg-slate-900/70 border border-slate-700 rounded-lg p-3 text-center">
-                  <p className="text-xs text-slate-400">{translateText('Offline')}</p>
-                  <p className="text-2xl font-extrabold text-red-400">{mockDevices.filter((d) => d.state === 'offline').length}</p>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                {mockDevices.map((device) => (
-                  <div key={device.hostname} className="gateway-device-row bg-slate-900/70 border border-slate-700 rounded-lg p-3">
-                    <div className="flex items-center justify-between">
-                      <p className="text-slate-100 font-semibold text-sm">{device.hostname}</p>
-                      {deviceIcon(device.state)}
-                    </div>
-                    <p className="text-slate-400 text-xs mt-1">{device.ip} - {translateText('last sync')} {device.lastSync}</p>
-                  </div>
-                ))}
-              </div>
+              )}
             </div>
+          </div>
+        )}
 
-            <div className="gateway-traffic-card bg-slate-800/60 border border-slate-700 rounded-2xl p-5">
-              <div className="flex items-center justify-between mb-4">
-                <h4 className="text-white font-semibold flex items-center gap-2 text-lg">
-                  <Activity className="w-5 h-5 text-cyan-300" />
-                  {translateText('Live Traffic Snapshot')}
-                </h4>
-                <span className="text-slate-400 text-xs">{liveTraffic.length} {translateText('recent events')}</span>
-              </div>
-
-              <div className="space-y-3">
-                {liveTraffic.map((event, idx) => (
-                  <div key={`${event.domain}-${idx}`} className="gateway-traffic-row bg-slate-900/60 border border-slate-700 rounded-xl p-3">
-                    <div className="flex items-center justify-between gap-2 mb-2">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <img src={faviconUrl(event.domain)} alt={event.domain} className="w-6 h-6 rounded" />
-                        <p className="text-slate-100 text-base font-semibold truncate">{event.domain}</p>
+        {activePanel === 'employees' && (
+          <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
+            <h3 className="mb-5 text-xl font-bold text-white">Employees in Current Group</h3>
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              {employeeSlots.map((entry) => {
+                const scanCount = entry.id ? scanCountByUser.get(entry.id) || 0 : 0;
+                const latestSession = entry.id ? latestSessionByUser.get(entry.id) : undefined;
+                return (
+                  <div
+                    key={entry.key}
+                    className={`rounded-xl border p-5 ${
+                      entry.state === 'registered'
+                        ? 'border-slate-700 bg-slate-900/50'
+                        : 'border-dashed border-slate-700 bg-slate-950/35'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <p className="text-lg font-semibold text-white">{entry.name}</p>
+                        <p className="mt-1 text-sm text-slate-400">
+                          {entry.email || 'Reserved employee slot'}
+                        </p>
                       </div>
-                      <span className={`px-2.5 py-1 rounded-full text-xs border font-semibold ${
-                        event.mode === 'Blocked'
-                          ? 'text-red-400 bg-red-500/10 border-red-500/30'
-                          : event.mode === 'Monitored'
-                          ? 'text-yellow-400 bg-yellow-500/10 border-yellow-500/30'
-                          : 'text-green-400 bg-green-500/10 border-green-500/30'
-                      }`}>
-                        {translateText(event.mode)}
-                      </span>
+                      <div className="flex flex-col items-end gap-2">
+                        <span className="rounded-full border border-slate-700 bg-slate-800/70 px-3 py-1 text-xs text-slate-300">
+                          {entry.department || '-'}
+                        </span>
+                        <span
+                          className={`rounded-full border px-3 py-1 text-xs font-semibold ${
+                            entry.state !== 'registered'
+                              ? 'border-slate-700 bg-slate-800/70 text-slate-400'
+                              : latestSession?.online
+                                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                                : 'border-slate-700 bg-slate-800/70 text-slate-300'
+                          }`}
+                        >
+                          {entry.state !== 'registered'
+                            ? 'Placeholder'
+                            : latestSession?.online
+                              ? 'Online'
+                              : 'Offline'}
+                        </span>
+                      </div>
                     </div>
 
-                    <div className="flex items-center justify-between text-sm text-slate-400">
-                      <span>{event.source}</span>
-                      <span className="inline-flex items-center gap-1"><Clock3 className="w-3.5 h-3.5" />{event.timeLabel}</span>
+                    <div className="mt-5 grid grid-cols-2 gap-3">
+                      <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Group</p>
+                        <p className="mt-2 text-sm font-medium text-slate-200">{entry.group_name || '-'}</p>
+                      </div>
+                      <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Scans</p>
+                        <p className="mt-2 text-sm font-medium text-slate-200">{scanCount}</p>
+                      </div>
+                      <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Sex</p>
+                        <p className="mt-2 text-sm font-medium text-slate-200">{entry.sex || 'Pending'}</p>
+                      </div>
+                      <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Joined</p>
+                        <p className="mt-2 text-sm font-medium text-slate-200">{formatDate(entry.joinedAt)}</p>
+                      </div>
+                      <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Device</p>
+                        <p className="mt-2 text-sm font-medium text-slate-200">
+                          {latestSession?.hostname || 'No desktop session'}
+                        </p>
+                      </div>
+                      <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Last heartbeat</p>
+                        <p className="mt-2 text-sm font-medium text-slate-200">
+                          {latestSession ? formatDateTime(latestSession.last_heartbeat || null) : 'No session yet'}
+                        </p>
+                      </div>
                     </div>
                   </div>
-                ))}
-              </div>
+                );
+              })}
             </div>
           </div>
-        </div>
+        )}
+
+        {activePanel === 'sessions' && (
+          <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
+            <div className="mb-5 flex items-center gap-2">
+              <Briefcase className="h-5 w-5 text-cyan-300" />
+              <h3 className="text-xl font-bold text-white">Desktop Session Presence</h3>
+            </div>
+
+            <div className="mb-5 rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4 text-sm leading-6 text-slate-300">
+              Presence is now based on explicit desktop heartbeats sent by the executable. A worker
+              stays online while the app is still connected, even if no proxy traffic is flowing.
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              {desktopSessions.length ? desktopSessions.map((session) => (
+                <div key={session.session_id} className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-white">{session.user_name}</p>
+                      <p className="mt-1 text-xs text-slate-400">{session.email}</p>
+                    </div>
+                    <span
+                      className={`rounded-full border px-3 py-1 text-xs font-semibold ${
+                        session.online
+                          ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                          : 'border-slate-700 bg-slate-800/70 text-slate-300'
+                      }`}
+                    >
+                      {session.online ? 'Online' : 'Offline'}
+                    </span>
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-2 gap-3">
+                    <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                      <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Device</p>
+                      <p className="mt-2 text-sm font-medium text-slate-200">
+                        {session.hostname || session.device_id || 'Unknown device'}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                      <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Heartbeat</p>
+                      <p className="mt-2 text-sm font-medium text-slate-200">
+                        {formatDateTime(session.last_heartbeat || null)}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                      <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Platform</p>
+                      <p className="mt-2 text-sm font-medium text-slate-200">
+                        {session.platform || 'Unknown'}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                      <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Disconnect</p>
+                      <p className="mt-2 text-sm font-medium text-slate-200">
+                        {session.disconnect_reason || 'Active'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )) : (
+                <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/35 p-5 text-sm text-slate-400">
+                  No desktop sessions detected yet for the current group. Once workers open the
+                  executable and authenticate, their presence will appear here automatically.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
 }
+

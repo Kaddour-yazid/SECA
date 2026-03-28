@@ -112,6 +112,8 @@ gateway_audit_queue_lock = threading.Lock()
 gateway_started_at = datetime.utcnow()
 proxy_client_writers: set = set()
 proxy_client_writers_lock = threading.Lock()
+desktop_sessions: Dict[str, Dict[str, Any]] = {}
+desktop_session_lock = threading.Lock()
 GATEWAY_INGEST_TOKEN = os.environ.get("SECA_GATEWAY_INGEST_TOKEN", "").strip()
 DEFAULT_PROXY_BLOCK_RULES = [
     ("*.youtube.com", "Starter default rule"),
@@ -185,6 +187,19 @@ SECA_MEILI_MASTER_KEY = os.environ.get("SECA_MEILI_MASTER_KEY", "").strip()
 SECA_MEILI_INDEX = os.environ.get("SECA_MEILI_INDEX", "website_suggestions").strip() or "website_suggestions"
 SECA_MEILI_TIMEOUT_SECONDS = _read_float_env("SECA_MEILI_TIMEOUT_SECONDS", 1.0, minimum=0.2, maximum=5.0)
 SECA_MEILI_AUTOSEED = _read_bool_env("SECA_MEILI_AUTOSEED", True)
+SECA_DESKTOP_HEARTBEAT_INTERVAL_SECONDS = _read_int_env("SECA_DESKTOP_HEARTBEAT_INTERVAL_SECONDS", 15, minimum=5, maximum=120)
+SECA_DESKTOP_HEARTBEAT_TIMEOUT_SECONDS = _read_int_env(
+    "SECA_DESKTOP_HEARTBEAT_TIMEOUT_SECONDS",
+    max(SECA_DESKTOP_HEARTBEAT_INTERVAL_SECONDS * 3, 45),
+    minimum=15,
+    maximum=600,
+)
+SECA_DESKTOP_SESSION_RETENTION_SECONDS = _read_int_env(
+    "SECA_DESKTOP_SESSION_RETENTION_SECONDS",
+    3600,
+    minimum=300,
+    maximum=86400,
+)
 proxy_server = None
 proxy_blocklist_cache: List[str] = []
 proxy_blocklist_last_fetch = 0.0
@@ -401,6 +416,22 @@ class GatewayBlockRuleUpdate(BaseModel):
     pattern: Optional[str] = None
     note: Optional[str] = None
     enabled: Optional[bool] = None
+
+
+class DesktopSessionHeartbeat(BaseModel):
+    session_id: Optional[str] = None
+    device_id: Optional[str] = None
+    hostname: Optional[str] = None
+    app_version: Optional[str] = None
+    platform: Optional[str] = None
+    proxy_host: Optional[str] = None
+    proxy_port: Optional[int] = None
+
+
+class DesktopSessionStop(BaseModel):
+    session_id: Optional[str] = None
+    device_id: Optional[str] = None
+    reason: Optional[str] = None
 
 
 def _require_gateway_ingest_token(x_gateway_token: Optional[str]) -> None:
@@ -955,6 +986,188 @@ def _emit_system_audit_log(action: str, details: str, db: Optional[Session] = No
         gateway_audit_queue.append((action, details))
 
 
+def _desktop_user_display_name(user: User) -> str:
+    parts = [str(user.first_name or "").strip(), str(user.last_name or "").strip()]
+    combined = " ".join(part for part in parts if part).strip()
+    return combined or str(user.email or f"user-{user.id}")
+
+
+def _desktop_presence_details(session: Dict[str, Any], online: bool, reason: Optional[str] = None) -> str:
+    user_name = session.get("user_name") or session.get("email") or f"user-{session.get('user_id')}"
+    device_label = session.get("hostname") or session.get("device_id") or "unknown-device"
+    scope = f"{session.get('department') or '-'} / {session.get('group_name') or '-'}"
+    if online:
+        return f"{user_name} connected from {device_label} to SECA desktop. scope={scope}"
+    suffix = f" reason={reason}" if reason else ""
+    return f"{user_name} disconnected from SECA desktop on {device_label}. scope={scope}{suffix}"
+
+
+def _emit_desktop_presence_audit(session: Dict[str, Any], online: bool, reason: Optional[str] = None) -> None:
+    action = "Desktop Session Online" if online else "Desktop Session Offline"
+    _emit_system_audit_log(action, _desktop_presence_details(session, online, reason=reason))
+
+
+def _desktop_session_scope_matches(session: Dict[str, Any], current_user: User) -> bool:
+    admin_department = str(current_user.department or "").strip()
+    admin_group = str(current_user.group_name or "").strip()
+    if not admin_department or not admin_group:
+        return True
+    return (
+        str(session.get("department") or "").strip() == admin_department
+        and str(session.get("group_name") or "").strip() == admin_group
+        and not bool(session.get("is_admin"))
+    )
+
+
+def _desktop_session_payload(session: Dict[str, Any]) -> Dict[str, Any]:
+    last_heartbeat_ts = float(session.get("last_heartbeat_ts") or 0.0)
+    seconds_since_last_heartbeat = int(max(0.0, time.time() - last_heartbeat_ts)) if last_heartbeat_ts > 0 else None
+    return {
+        "session_id": session.get("session_id"),
+        "user_id": session.get("user_id"),
+        "user_name": session.get("user_name"),
+        "email": session.get("email"),
+        "department": session.get("department"),
+        "group_name": session.get("group_name"),
+        "role": session.get("role"),
+        "is_admin": bool(session.get("is_admin", False)),
+        "device_id": session.get("device_id"),
+        "hostname": session.get("hostname"),
+        "platform": session.get("platform"),
+        "app_version": session.get("app_version"),
+        "proxy_host": session.get("proxy_host"),
+        "proxy_port": session.get("proxy_port"),
+        "started_at": session.get("started_at"),
+        "last_heartbeat": session.get("last_heartbeat"),
+        "online": bool(session.get("online", False)),
+        "disconnect_reason": session.get("disconnect_reason"),
+        "seconds_since_last_heartbeat": seconds_since_last_heartbeat,
+    }
+
+
+def _find_existing_desktop_session(user: User, device_id: str, session_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    requested_session_id = str(session_id or "").strip()
+    normalized_device_id = str(device_id or "").strip()
+    if not normalized_device_id:
+        return None
+
+    session_for_device: Optional[Dict[str, Any]] = None
+    for existing in desktop_sessions.values():
+        if int(existing.get("user_id") or 0) != int(user.id):
+            continue
+        if requested_session_id and str(existing.get("session_id")) == requested_session_id:
+            return existing
+        if str(existing.get("device_id") or "").strip() == normalized_device_id:
+            session_for_device = existing
+    return session_for_device
+
+
+def _touch_desktop_session(user: User, payload: DesktopSessionHeartbeat) -> Tuple[Dict[str, Any], bool]:
+    now_dt = datetime.utcnow()
+    now_iso = now_dt.isoformat()
+    now_ts = now_dt.timestamp()
+    normalized_device_id = str(payload.device_id or "").strip() or f"user-{user.id}"
+    normalized_hostname = str(payload.hostname or "").strip() or normalized_device_id
+    normalized_platform = str(payload.platform or "").strip() or ""
+    normalized_app_version = str(payload.app_version or "").strip() or ""
+    normalized_proxy_host = str(payload.proxy_host or "").strip() or None
+    normalized_proxy_port = payload.proxy_port if payload.proxy_port and payload.proxy_port > 0 else None
+    created = False
+
+    with desktop_session_lock:
+        session = _find_existing_desktop_session(user, normalized_device_id, payload.session_id)
+        if not session:
+            created = True
+            session = {
+                "session_id": str(uuid.uuid4()),
+                "user_id": user.id,
+                "user_name": _desktop_user_display_name(user),
+                "email": user.email,
+                "department": user.department,
+                "group_name": user.group_name,
+                "role": getattr(user, "role", None),
+                "is_admin": bool(user.is_admin),
+                "device_id": normalized_device_id,
+                "hostname": normalized_hostname,
+                "platform": normalized_platform,
+                "app_version": normalized_app_version,
+                "proxy_host": normalized_proxy_host,
+                "proxy_port": normalized_proxy_port,
+                "started_at": now_iso,
+                "last_heartbeat": now_iso,
+                "last_heartbeat_ts": now_ts,
+                "online": True,
+                "disconnect_reason": None,
+            }
+            desktop_sessions[session["session_id"]] = session
+        else:
+            session["user_name"] = _desktop_user_display_name(user)
+            session["email"] = user.email
+            session["department"] = user.department
+            session["group_name"] = user.group_name
+            session["role"] = getattr(user, "role", None)
+            session["is_admin"] = bool(user.is_admin)
+            session["device_id"] = normalized_device_id
+            session["hostname"] = normalized_hostname
+            session["platform"] = normalized_platform or session.get("platform")
+            session["app_version"] = normalized_app_version or session.get("app_version")
+            session["proxy_host"] = normalized_proxy_host or session.get("proxy_host")
+            session["proxy_port"] = normalized_proxy_port or session.get("proxy_port")
+            session["last_heartbeat"] = now_iso
+            session["last_heartbeat_ts"] = now_ts
+            session["online"] = True
+            session["disconnect_reason"] = None
+
+    if created:
+        _emit_desktop_presence_audit(session, True)
+    return _desktop_session_payload(session), created
+
+
+def _stop_desktop_session(user: User, payload: DesktopSessionStop) -> Optional[Dict[str, Any]]:
+    normalized_session_id = str(payload.session_id or "").strip()
+    normalized_device_id = str(payload.device_id or "").strip()
+    reason = str(payload.reason or "").strip() or "manual-stop"
+    now_iso = datetime.utcnow().isoformat()
+    stopped_session: Optional[Dict[str, Any]] = None
+    should_emit_offline = False
+
+    with desktop_session_lock:
+        for existing in desktop_sessions.values():
+            if int(existing.get("user_id") or 0) != int(user.id):
+                continue
+            if normalized_session_id and str(existing.get("session_id")) != normalized_session_id:
+                continue
+            if normalized_device_id and str(existing.get("device_id") or "").strip() != normalized_device_id:
+                continue
+            if existing.get("online"):
+                existing["online"] = False
+                existing["disconnect_reason"] = reason
+                existing["last_heartbeat"] = now_iso
+                existing["last_heartbeat_ts"] = time.time()
+                should_emit_offline = True
+            stopped_session = dict(existing)
+            break
+
+    if stopped_session and should_emit_offline:
+        _emit_desktop_presence_audit(stopped_session, False, reason=reason)
+    return _desktop_session_payload(stopped_session) if stopped_session else None
+
+
+def _collect_desktop_sessions_for_admin(current_user: User) -> List[Dict[str, Any]]:
+    with desktop_session_lock:
+        sessions = [_desktop_session_payload(session) for session in desktop_sessions.values()]
+
+    scoped = [session for session in sessions if _desktop_session_scope_matches(session, current_user)]
+    scoped.sort(
+        key=lambda session: (
+            not bool(session.get("online")),
+            int(session.get("seconds_since_last_heartbeat") or 10**9),
+            str(session.get("user_name") or ""),
+        )
+    )
+    return scoped
+
+
 def _flush_gateway_audit_queue_sync() -> int:
     if not SECA_GATEWAY_AUDIT_ASYNC:
         return 0
@@ -985,6 +1198,33 @@ async def flush_gateway_audit_loop() -> None:
     while True:
         await asyncio.sleep(SECA_GATEWAY_AUDIT_FLUSH_SECONDS)
         await asyncio.to_thread(_flush_gateway_audit_queue_sync)
+
+
+async def monitor_desktop_sessions() -> None:
+    while True:
+        await asyncio.sleep(1.0)
+        now_ts = time.time()
+        timeout = float(SECA_DESKTOP_HEARTBEAT_TIMEOUT_SECONDS)
+        retention = float(SECA_DESKTOP_SESSION_RETENTION_SECONDS)
+        expired_sessions: List[Dict[str, Any]] = []
+
+        with desktop_session_lock:
+            stale_session_ids: List[str] = []
+            for session_id, session in list(desktop_sessions.items()):
+                last_heartbeat_ts = float(session.get("last_heartbeat_ts") or 0.0)
+                if session.get("online") and last_heartbeat_ts > 0 and (now_ts - last_heartbeat_ts) > timeout:
+                    session["online"] = False
+                    session["disconnect_reason"] = "heartbeat-timeout"
+                    expired_sessions.append(dict(session))
+
+                if not session.get("online") and last_heartbeat_ts > 0 and (now_ts - last_heartbeat_ts) > retention:
+                    stale_session_ids.append(session_id)
+
+            for session_id in stale_session_ids:
+                desktop_sessions.pop(session_id, None)
+
+        for session in expired_sessions:
+            await asyncio.to_thread(_emit_desktop_presence_audit, session, False, "heartbeat-timeout")
 
 
 async def monitor_gateway_presence() -> None:
@@ -1647,6 +1887,7 @@ async def on_startup():
         logger.info("TLS interception readiness assets detected. CONNECT flow is still domain-only until MITM path is completed.")
     app.state.proxy_presence_task = asyncio.create_task(monitor_gateway_presence())
     app.state.proxy_audit_flush_task = asyncio.create_task(flush_gateway_audit_loop())
+    app.state.desktop_session_monitor_task = asyncio.create_task(monitor_desktop_sessions())
     if SECA_PROXY_AUTOSTART:
         app.state.proxy_task = asyncio.create_task(start_embedded_proxy())
 
@@ -1656,6 +1897,7 @@ async def on_shutdown():
     task = getattr(app.state, "proxy_task", None)
     presence_task = getattr(app.state, "proxy_presence_task", None)
     flush_task = getattr(app.state, "proxy_audit_flush_task", None)
+    desktop_session_task = getattr(app.state, "desktop_session_monitor_task", None)
     if proxy_server is not None:
         proxy_server.close()
         await proxy_server.wait_closed()
@@ -1665,6 +1907,8 @@ async def on_shutdown():
         presence_task.cancel()
     if flush_task and not flush_task.done():
         flush_task.cancel()
+    if desktop_session_task and not desktop_session_task.done():
+        desktop_session_task.cancel()
     await asyncio.to_thread(_flush_gateway_audit_queue_sync)
 
 @app.middleware("http")
@@ -3302,6 +3546,7 @@ async def get_scans(
         for s in scans:
             row = {
                 "id": s.id,
+                "user_id": s.user_id,
                 "scan_type": s.scan_type,
                 "target": s.target,
                 "status": s.status,
@@ -3859,6 +4104,12 @@ async def get_users(
     return [{
         "id": u.id,
         "email": u.email,
+        "first_name": u.first_name,
+        "last_name": u.last_name,
+        "sex": u.sex,
+        "department": u.department,
+        "group_name": u.group_name,
+        "role": u.role,
         "is_admin": u.is_admin,
         "created_at": u.created_at.isoformat()
     } for u in users]
@@ -3871,7 +4122,61 @@ async def read_users_me(current_user: User = Depends(get_current_user)):
     return {
         "id": current_user.id,
         "email": current_user.email,
+        "first_name": current_user.first_name,
+        "last_name": current_user.last_name,
+        "sex": current_user.sex,
+        "department": current_user.department,
+        "group_name": current_user.group_name,
+        "role": current_user.role,
         "is_admin": current_user.is_admin
+    }
+
+
+@app.get("/desktop/session/config")
+async def get_desktop_session_config(current_user: User = Depends(get_current_user)):
+    return {
+        "heartbeat_interval_seconds": SECA_DESKTOP_HEARTBEAT_INTERVAL_SECONDS,
+        "heartbeat_timeout_seconds": SECA_DESKTOP_HEARTBEAT_TIMEOUT_SECONDS,
+        "retention_seconds": SECA_DESKTOP_SESSION_RETENTION_SECONDS,
+        "user_id": current_user.id,
+        "department": current_user.department,
+        "group_name": current_user.group_name,
+    }
+
+
+@app.post("/desktop/session/heartbeat")
+async def desktop_session_heartbeat(
+        payload: DesktopSessionHeartbeat,
+        current_user: User = Depends(get_current_user)
+):
+    session, created = await asyncio.to_thread(_touch_desktop_session, current_user, payload)
+    return {
+        "ok": True,
+        "created": created,
+        "session": session,
+        "heartbeat_interval_seconds": SECA_DESKTOP_HEARTBEAT_INTERVAL_SECONDS,
+        "heartbeat_timeout_seconds": SECA_DESKTOP_HEARTBEAT_TIMEOUT_SECONDS,
+    }
+
+
+@app.post("/desktop/session/stop")
+async def desktop_session_stop(
+        payload: DesktopSessionStop,
+        current_user: User = Depends(get_current_user)
+):
+    session = await asyncio.to_thread(_stop_desktop_session, current_user, payload)
+    return {
+        "ok": True,
+        "session": session,
+    }
+
+
+@app.get("/monitoring/desktop/sessions")
+async def monitoring_desktop_sessions(current_user: User = Depends(require_admin)):
+    return {
+        "sessions": await asyncio.to_thread(_collect_desktop_sessions_for_admin, current_user),
+        "heartbeat_interval_seconds": SECA_DESKTOP_HEARTBEAT_INTERVAL_SECONDS,
+        "heartbeat_timeout_seconds": SECA_DESKTOP_HEARTBEAT_TIMEOUT_SECONDS,
     }
 
 
