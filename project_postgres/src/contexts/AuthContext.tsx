@@ -5,6 +5,22 @@ type User = {
   id: number;
   email: string;
   is_admin: boolean;
+  role?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+  sex?: string | null;
+  department?: string | null;
+  group_name?: string | null;
+};
+
+type SignupPayload = {
+  first_name: string;
+  last_name: string;
+  email: string;
+  sex: string;
+  department: string;
+  group_name: string;
+  password: string;
 };
 
 type OtpResponse = {
@@ -20,7 +36,7 @@ type AuthContextType = {
   user: User | null;
   token: string | null;
   signIn: (email: string, password: string) => Promise<boolean>;
-  requestSignUpOtp: (email: string, password: string) => Promise<OtpResponse>;
+  requestSignUpOtp: (payload: SignupPayload) => Promise<OtpResponse>;
   verifySignUpOtp: (email: string, code: string) => Promise<boolean>;
   requestPasswordResetOtp: (email: string) => Promise<OtpResponse>;
   confirmPasswordReset: (email: string, code: string, newPassword: string) => Promise<boolean>;
@@ -76,11 +92,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return true;
   };
 
-  const requestSignUpOtp = async (email: string, password: string): Promise<OtpResponse> => {
+  const requestSignUpOtp = async (payload: SignupPayload): Promise<OtpResponse> => {
     const res = await fetch(apiUrl('/register/request-otp'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password })
+      body: JSON.stringify(payload)
     });
     return parseJson(res);
   };

@@ -34,6 +34,14 @@ export function ParametersView() {
         ? 'border-cyan-400 bg-cyan-500/10 text-white'
         : 'border-slate-700 bg-slate-950/40 text-slate-300 hover:border-slate-500 hover:text-white'
     }`;
+  const accountDetails = [
+    { label: 'Full Name', value: [user?.first_name, user?.last_name].filter(Boolean).join(' ') || '-' },
+    { label: 'Email', value: user?.email || '-' },
+    { label: 'Role', value: user?.role || (user?.is_admin ? translateText('Admin') : translateText('User')) },
+    { label: 'Sex', value: user?.sex || '-' },
+    { label: 'Department', value: user?.department || '-' },
+    { label: 'Group', value: user?.group_name || '-' },
+  ];
 
   return (
     <div className="flex-1 bg-slate-900 global-scroll p-8 space-y-6">
@@ -136,20 +144,18 @@ export function ParametersView() {
                 <p className="text-slate-400 mt-1">{translateText('Current account information for the active session.')}</p>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                  <p className="text-sm text-slate-400">{translateText('Email')}</p>
-                  <p className="text-white font-medium mt-1 break-all">{user?.email || '-'}</p>
-                </div>
-                <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                  <p className="text-sm text-slate-400">{translateText('Role')}</p>
-                  <p className="text-white font-medium mt-1">{user?.is_admin ? translateText('Admin') : translateText('User')}</p>
-                </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                {accountDetails.map((item) => (
+                  <div key={item.label} className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                    <p className="text-sm text-slate-400">{item.label}</p>
+                    <p className="text-white font-medium mt-1 break-words">{item.value}</p>
+                  </div>
+                ))}
               </div>
 
               <div className="rounded-xl border border-dashed border-slate-700 bg-slate-900/40 p-4">
-                <p className="text-slate-200 font-medium">{translateText('More account options will be added here.')}</p>
-                <p className="text-slate-400 text-sm mt-1">{translateText('For now, this section shows the active account and lets you manage language, theme, and logout from this page.')}</p>
+                <p className="text-slate-200 font-medium">Profile data shown here is loaded from the authenticated account.</p>
+                <p className="text-slate-400 text-sm mt-1">This now includes the extra registration information captured during the multistep signup flow.</p>
               </div>
             </div>
           )}

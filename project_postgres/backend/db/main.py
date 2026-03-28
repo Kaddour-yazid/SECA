@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Que
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy import or_
+from sqlalchemy import or_, inspect, text
 from sqlalchemy.orm import Session
 from typing import Dict, Any, Optional, List, Tuple
 from pydantic import BaseModel
@@ -55,6 +55,43 @@ logger = logging.getLogger(__name__)
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
+
+
+def _ensure_auth_profile_columns() -> None:
+    column_defs = {
+        "users": {
+            "first_name": "VARCHAR",
+            "last_name": "VARCHAR",
+            "sex": "VARCHAR",
+            "department": "VARCHAR",
+            "group_name": "VARCHAR",
+        },
+        "email_otps": {
+            "first_name": "VARCHAR",
+            "last_name": "VARCHAR",
+            "sex": "VARCHAR",
+            "department": "VARCHAR",
+            "group_name": "VARCHAR",
+        },
+    }
+
+    with engine.begin() as connection:
+        inspector = inspect(connection)
+        for table_name, columns in column_defs.items():
+            try:
+                existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
+            except Exception as exc:
+                logger.warning("Unable to inspect %s for auth profile migration: %s", table_name, exc)
+                continue
+
+            for column_name, column_type in columns.items():
+                if column_name in existing_columns:
+                    continue
+                connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"))
+                logger.info("Added missing column %s.%s", table_name, column_name)
+
+
+_ensure_auth_profile_columns()
 
 app = FastAPI(title="Security Analyzer API")
 

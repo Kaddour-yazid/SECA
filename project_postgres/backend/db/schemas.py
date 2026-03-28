@@ -6,6 +6,11 @@ from datetime import datetime
 class UserCreate(BaseModel):
     email: str
     password: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    sex: Optional[str] = None
+    department: Optional[str] = None
+    group_name: Optional[str] = None
 
 
 class UserLogin(BaseModel):
@@ -14,7 +19,12 @@ class UserLogin(BaseModel):
 
 
 class SignupOtpRequest(BaseModel):
+    first_name: str
+    last_name: str
     email: str
+    sex: str
+    department: str
+    group_name: str
     password: str
 
 
@@ -36,6 +46,11 @@ class PasswordResetConfirm(BaseModel):
 class UserResponse(BaseModel):
     id: int
     email: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    sex: Optional[str] = None
+    department: Optional[str] = None
+    group_name: Optional[str] = None
 
     class Config:
         from_attributes = True

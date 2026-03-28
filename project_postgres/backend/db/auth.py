@@ -49,6 +49,42 @@ def _get_otp_secret() -> str:
 ACCESS_TOKEN_EXPIRE_MINUTES = _get_token_expiry_minutes()
 OTP_EXPIRE_MINUTES = _get_otp_expiry_minutes()
 
+DEPARTMENT_GROUPS = {
+    "RXS": {
+        "label": "RXS",
+        "groups": {
+            "Infrastructure (Sauvegarde & Stockage)": "Infrastructure (Sauvegarde & Stockage)",
+            "Service Système (Messagerie, Identité & Accès)": "Service Système (Messagerie, Identité & Accès)",
+            "Service Interconnexion (Routage, Commutation & Sécurité Périmétrique)": "Service Interconnexion (Routage, Commutation & Sécurité Périmétrique)",
+            "Service Support (Matériel & Déploiement Logiciel)": "Service Support (Matériel & Déploiement Logiciel)",
+            "Service Data Center": "Service Data Center",
+        },
+    },
+    "SLM": {
+        "label": "SLM",
+        "groups": {
+            "Groupe GED": "Groupe GED",
+            "Groupe Maintenance": "Groupe Maintenance",
+            "Groupe DBA": "Groupe DBA",
+            "Groupe Développement": "Groupe Développement",
+            "Groupe Qualité": "Groupe Qualité",
+            "Groupe Décisionnel & Veille Technologique": "Groupe Décisionnel & Veille Technologique",
+        },
+    },
+    "SSI": {
+        "label": "SSI",
+        "groups": {
+            "Pôle SOC & Sécurité des systèmes": "Pôle SOC & Sécurité des systèmes",
+            "Pôle Sécurité Industrielle (OT)": "Pôle Sécurité Industrielle (OT)",
+            "Pôle Sécurité Applicative & Gouvernance": "Pôle Sécurité Applicative & Gouvernance",
+        },
+    },
+}
+DEPARTMENT_ALIASES = {
+    "SSE": "SSI",
+}
+SEX_VALUES = {"male": "Male", "female": "Female"}
+
 
 def _get_otp_resend_cooldown_seconds() -> int:
     raw = os.environ.get("SECA_OTP_RESEND_COOLDOWN_SECONDS", "60").strip()
@@ -96,6 +132,38 @@ def verify_token(token: str) -> Optional[int]:
 
 def _normalize_email(email: str) -> str:
     return (email or "").strip().lower()
+
+
+def _clean_profile_field(value: Optional[str], field_name: str, max_length: int = 120) -> str:
+    cleaned = (value or "").strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail=f"{field_name} is required")
+    if len(cleaned) > max_length:
+        raise HTTPException(status_code=400, detail=f"{field_name} is too long")
+    return cleaned
+
+
+def _normalize_sex(value: Optional[str]) -> str:
+    cleaned = _clean_profile_field(value, "Sex", 20).lower()
+    if cleaned not in SEX_VALUES:
+        raise HTTPException(status_code=400, detail="Invalid sex value")
+    return SEX_VALUES[cleaned]
+
+
+def _normalize_department(value: Optional[str]) -> str:
+    cleaned = _clean_profile_field(value, "Department", 40).upper()
+    cleaned = DEPARTMENT_ALIASES.get(cleaned, cleaned)
+    if cleaned not in DEPARTMENT_GROUPS:
+        raise HTTPException(status_code=400, detail="Invalid department")
+    return cleaned
+
+
+def _normalize_group_name(department: str, group_name: Optional[str]) -> str:
+    cleaned = _clean_profile_field(group_name, "Group", 160)
+    available = DEPARTMENT_GROUPS[department]["groups"]
+    if cleaned not in available:
+        raise HTTPException(status_code=400, detail="Invalid group for selected department")
+    return available[cleaned]
 
 
 def _otp_hash(email: str, purpose: str, code: str) -> str:
@@ -174,6 +242,11 @@ def _issue_email_otp(
     purpose: str,
     user_id: Optional[int] = None,
     password_hash: Optional[str] = None,
+    first_name: Optional[str] = None,
+    last_name: Optional[str] = None,
+    sex: Optional[str] = None,
+    department: Optional[str] = None,
+    group_name: Optional[str] = None,
 ) -> dict:
     now = datetime.utcnow()
     latest = (
@@ -224,6 +297,11 @@ def _issue_email_otp(
         purpose=purpose,
         code_hash=_otp_hash(email, purpose, code),
         password_hash=password_hash,
+        first_name=first_name,
+        last_name=last_name,
+        sex=sex,
+        department=department,
+        group_name=group_name,
         expires_at=now + timedelta(minutes=OTP_EXPIRE_MINUTES),
     )
     db.add(otp)
@@ -269,11 +347,22 @@ def register_request_otp(payload: schemas.SignupOtpRequest, db: Session = Depend
     if db.query(models.User).filter(models.User.email == email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
 
+    first_name = _clean_profile_field(payload.first_name, "First name")
+    last_name = _clean_profile_field(payload.last_name, "Last name")
+    sex = _normalize_sex(payload.sex)
+    department = _normalize_department(payload.department)
+    group_name = _normalize_group_name(department, payload.group_name)
+
     response = _issue_email_otp(
         db,
         email=email,
         purpose="signup",
         password_hash=hash_password(payload.password),
+        first_name=first_name,
+        last_name=last_name,
+        sex=sex,
+        department=department,
+        group_name=group_name,
     )
     return {
         "email": email,
@@ -294,6 +383,11 @@ def register_verify_otp(payload: schemas.SignupOtpVerify, db: Session = Depends(
     new_user = models.User(
         email=email,
         password=otp.password_hash,
+        first_name=otp.first_name,
+        last_name=otp.last_name,
+        sex=otp.sex,
+        department=otp.department,
+        group_name=otp.group_name,
         is_admin=False,
         role="user",
     )
@@ -306,7 +400,18 @@ def register_verify_otp(payload: schemas.SignupOtpVerify, db: Session = Depends(
 
 @router.post("/register")
 def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    return register_request_otp(schemas.SignupOtpRequest(email=user.email, password=user.password), db)
+    return register_request_otp(
+        schemas.SignupOtpRequest(
+            first_name=user.first_name or "",
+            last_name=user.last_name or "",
+            email=user.email,
+            sex=user.sex or "",
+            department=user.department or "",
+            group_name=user.group_name or "",
+            password=user.password,
+        ),
+        db,
+    )
 
 
 @router.post("/password-reset/request-otp")
@@ -363,7 +468,12 @@ def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
         "user": {
             "id": db_user.id,
             "email": db_user.email,
-            "is_admin": db_user.is_admin
+            "is_admin": db_user.is_admin,
+            "first_name": db_user.first_name,
+            "last_name": db_user.last_name,
+            "sex": db_user.sex,
+            "department": db_user.department,
+            "group_name": db_user.group_name,
         }
     }
 
@@ -392,5 +502,10 @@ def get_me(current_user: models.User = Depends(get_current_user)):
         "id": current_user.id,
         "email": current_user.email,
         "is_admin": current_user.is_admin,
-        "role": current_user.role
+        "role": current_user.role,
+        "first_name": current_user.first_name,
+        "last_name": current_user.last_name,
+        "sex": current_user.sex,
+        "department": current_user.department,
+        "group_name": current_user.group_name,
     }

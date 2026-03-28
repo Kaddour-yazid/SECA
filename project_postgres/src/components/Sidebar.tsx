@@ -42,6 +42,8 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
     : baseMenuItems;
 
   const isLight = theme === 'light';
+  const isFemale = (user?.sex || '').toLowerCase() === 'female';
+  const userDisplayName = [user?.first_name, user?.last_name].filter(Boolean).join(' ') || user?.email || 'User';
   const sidebarShellClass = isLight
     ? 'w-64 bg-[#f8fbff] border-r border-[#d9e6f2] flex flex-col'
     : 'w-64 bg-slate-800 border-r border-slate-700 flex flex-col';
@@ -52,6 +54,18 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
   const subtitleClass = isLight ? 'text-slate-500 text-xs' : 'text-slate-400 text-xs';
   const emailClass = isLight ? 'text-slate-900 text-sm font-medium truncate' : 'text-white text-sm font-medium truncate';
   const userRoleClass = isLight ? 'text-slate-500 text-xs' : 'text-slate-400 text-xs';
+  const userCardToneClass = isLight
+    ? isFemale
+      ? 'border border-pink-200 bg-pink-50/90'
+      : 'border border-[#d9e6f2] bg-white/90'
+    : isFemale
+      ? 'border border-pink-500/20 bg-pink-500/10'
+      : 'bg-slate-900/50';
+  const userIconToneClass = isFemale
+    ? 'bg-pink-500/20 text-pink-300'
+    : 'bg-cyan-500/20 text-cyan-400';
+  const userNameClass = isLight ? 'text-slate-900 text-sm font-semibold truncate' : isFemale ? 'text-pink-100 text-sm font-semibold truncate' : 'text-white text-sm font-semibold truncate';
+  const userMetaAccentClass = isFemale ? 'text-pink-300' : 'text-cyan-400';
   const navDefaultClass = isLight
     ? 'text-slate-700 bg-transparent hover:bg-sky-100 hover:text-sky-700'
     : 'text-slate-300 bg-transparent hover:bg-cyan-500/10 hover:text-cyan-400';
@@ -116,17 +130,18 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
 
       {/* User Info */}
       <div className={`p-4 ${userBorderClass}`}>
-        <div className={`flex items-center gap-3 px-2 py-2 rounded-lg ${userCardClass}`}>
-          <div className="w-8 h-8 bg-cyan-500/20 rounded-full flex items-center justify-center">
-            <User className="w-4 h-4 text-cyan-400" />
+        <div className={`flex items-center gap-3 px-3 py-3 rounded-xl ${userCardClass} ${userCardToneClass}`}>
+          <div className={`w-9 h-9 rounded-full flex items-center justify-center ${userIconToneClass}`}>
+            <User className="w-4 h-4" />
           </div>
           <div className="flex-1 min-w-0">
+            <p className={userNameClass}>{userDisplayName}</p>
             <p className={emailClass}>{user?.email}</p>
             <p className={userRoleClass}>
               {user?.is_admin ? (
-                <span className="text-cyan-400 font-medium">{translateText('Admin')}</span>
+                <span className={`${userMetaAccentClass} font-medium`}>{translateText('Admin')}</span>
               ) : (
-                translateText('User')
+                <span className={userMetaAccentClass}>{user?.department || translateText('User')}</span>
               )}
             </p>
           </div>
