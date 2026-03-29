@@ -58,6 +58,28 @@ type DesktopSessionRow = {
   seconds_since_last_heartbeat?: number | null;
 };
 
+type GatewayHistoryRow = {
+  timestamp?: string | null;
+  host?: string | null;
+  method?: string | null;
+  blocked?: boolean;
+  block_reason?: string | null;
+  user_name?: string | null;
+  user_email?: string | null;
+  department?: string | null;
+  group_name?: string | null;
+  hostname?: string | null;
+};
+
+type GroupProxyAssignment = {
+  department: string;
+  group_name: string;
+  proxy_host: string;
+  proxy_port: number;
+  enabled: boolean;
+  note?: string | null;
+};
+
 type EmployeeSlot = {
   key: string;
   id: number | null;
@@ -100,6 +122,8 @@ export function GatewayStartView() {
   const [users, setUsers] = useState<UserRow[]>([]);
   const [scanRows, setScanRows] = useState<ScanRow[]>([]);
   const [desktopSessions, setDesktopSessions] = useState<DesktopSessionRow[]>([]);
+  const [gatewayHistory, setGatewayHistory] = useState<GatewayHistoryRow[]>([]);
+  const [groupProxyAssignment, setGroupProxyAssignment] = useState<GroupProxyAssignment | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -108,7 +132,7 @@ export function GatewayStartView() {
     const loadMonitoringData = async () => {
       setLoading(true);
       try {
-        const [usersRes, scansRes, sessionsRes] = await Promise.all([
+        const [usersRes, scansRes, sessionsRes, historyRes, assignmentRes] = await Promise.all([
           fetch(apiUrl('/users'), {
             headers: { Authorization: `Bearer ${token}` },
           }),
@@ -116,6 +140,12 @@ export function GatewayStartView() {
             headers: { Authorization: `Bearer ${token}` },
           }),
           fetch(apiUrl('/monitoring/desktop/sessions'), {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+          fetch(apiUrl('/gateway/api/history?limit=25'), {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+          fetch(apiUrl('/monitoring/group-proxy-assignment'), {
             headers: { Authorization: `Bearer ${token}` },
           }),
         ]);
@@ -141,10 +171,26 @@ export function GatewayStartView() {
         } else {
           setDesktopSessions([]);
         }
+
+        if (historyRes.ok) {
+          const historyData: GatewayHistoryRow[] = await historyRes.json();
+          setGatewayHistory(Array.isArray(historyData) ? historyData : []);
+        } else {
+          setGatewayHistory([]);
+        }
+
+        if (assignmentRes.ok) {
+          const assignmentData = await assignmentRes.json();
+          setGroupProxyAssignment(assignmentData?.assignment ?? null);
+        } else {
+          setGroupProxyAssignment(null);
+        }
       } catch {
         setUsers([]);
         setScanRows([]);
         setDesktopSessions([]);
+        setGatewayHistory([]);
+        setGroupProxyAssignment(null);
       } finally {
         setLoading(false);
       }
@@ -569,6 +615,63 @@ export function GatewayStartView() {
             <div className="mb-5 rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4 text-sm leading-6 text-slate-300">
               Presence is now based on explicit desktop heartbeats sent by the executable. A worker
               stays online while the app is still connected, even if no proxy traffic is flowing.
+            </div>
+
+            <div className="mb-5 grid grid-cols-1 gap-4 lg:grid-cols-[0.9fr_1.1fr]">
+              <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Group Proxy Assignment</p>
+                {groupProxyAssignment ? (
+                  <>
+                    <p className="mt-3 text-lg font-semibold text-white">
+                      {groupProxyAssignment.proxy_host}:{groupProxyAssignment.proxy_port}
+                    </p>
+                    <p className="mt-1 text-sm text-slate-400">
+                      {groupProxyAssignment.department} · {groupProxyAssignment.group_name}
+                    </p>
+                    <p className="mt-2 text-xs text-slate-500">
+                      {groupProxyAssignment.note || 'Fixed group assignment ready for routed gateway mode.'}
+                    </p>
+                  </>
+                ) : (
+                  <p className="mt-3 text-sm text-slate-400">No fixed proxy assignment defined for this group yet.</p>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Recent Attached Gateway Usage</p>
+                {gatewayHistory.length ? (
+                  <div className="mt-3 space-y-3">
+                    {gatewayHistory.slice(0, 4).map((event, index) => (
+                      <div key={`${event.timestamp || 't'}-${index}`} className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-semibold text-white">{event.host || 'Unknown target'}</p>
+                            <p className="mt-1 text-xs text-slate-400">
+                              {(event.user_name || event.user_email || 'Unattached worker')} · {event.hostname || 'Unknown device'}
+                            </p>
+                          </div>
+                          <span
+                            className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${
+                              event.blocked
+                                ? 'border-red-500/30 bg-red-500/10 text-red-300'
+                                : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                            }`}
+                          >
+                            {event.blocked ? 'Blocked' : 'Allowed'}
+                          </span>
+                        </div>
+                        <p className="mt-2 text-xs text-slate-500">
+                          {(event.method || 'HTTP').toUpperCase()} · {formatDateTime(event.timestamp || null)}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-3 text-sm text-slate-400">
+                    No attached gateway events yet. Once workers use the proxy, events will appear here under the active desktop session.
+                  </p>
+                )}
+              </div>
             </div>
 
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">

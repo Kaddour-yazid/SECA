@@ -1,12 +1,15 @@
 from email.message import EmailMessage
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 from typing import Optional
 
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import smtplib
+import unicodedata
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
@@ -74,7 +77,7 @@ DEPARTMENT_GROUPS = {
     "SSI": {
         "label": "SSI",
         "groups": {
-            "Pôle SOC & Sécurité des systèmes": "Pôle SOC & Sécurité des systèmes",
+            "Pôle SOC & Sécurité des Systèmes": "Pôle SOC & Sécurité des Systèmes",
             "Pôle Sécurité Industrielle (OT)": "Pôle Sécurité Industrielle (OT)",
             "Pôle Sécurité Applicative & Gouvernance": "Pôle Sécurité Applicative & Gouvernance",
         },
@@ -158,12 +161,36 @@ def _normalize_department(value: Optional[str]) -> str:
     return cleaned
 
 
+def _group_key(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value or "")
+    normalized = normalized.encode("ascii", "ignore").decode("ascii")
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized.lower()).strip()
+    return normalized
+
+
 def _normalize_group_name(department: str, group_name: Optional[str]) -> str:
     cleaned = _clean_profile_field(group_name, "Group", 160)
     available = DEPARTMENT_GROUPS[department]["groups"]
-    if cleaned not in available:
-        raise HTTPException(status_code=400, detail="Invalid group for selected department")
-    return available[cleaned]
+    if cleaned in available:
+        return available[cleaned]
+
+    cleaned_key = _group_key(cleaned)
+    for candidate, canonical in available.items():
+        if _group_key(candidate) == cleaned_key:
+            return canonical
+
+    best_match = None
+    best_ratio = 0.0
+    for candidate, canonical in available.items():
+        ratio = SequenceMatcher(None, cleaned_key, _group_key(candidate)).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_match = canonical
+
+    if best_match and best_ratio >= 0.78:
+        return best_match
+
+    raise HTTPException(status_code=400, detail="Invalid group for selected department")
 
 
 def _otp_hash(email: str, purpose: str, code: str) -> str:

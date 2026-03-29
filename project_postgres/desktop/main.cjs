@@ -22,6 +22,7 @@ let desktopHeartbeatIntervalMs = DESKTOP_HEARTBEAT_DEFAULT_INTERVAL_MS;
 let desktopSessionId = null;
 let lastAuthToken = '';
 let desktopDeviceIdentity = null;
+let assignedProxyConfig = null;
 
 function uniqueExistingPaths(paths) {
   return [...new Set(paths)].filter((candidate) => candidate && fs.existsSync(candidate));
@@ -199,6 +200,20 @@ function getDesktopDeviceIdentity() {
   return desktopDeviceIdentity;
 }
 
+function getLocalIPv4Addresses() {
+  const networkMap = os.networkInterfaces();
+  const addresses = [];
+  for (const entries of Object.values(networkMap)) {
+    for (const entry of entries || []) {
+      if (!entry || entry.internal || entry.family !== 'IPv4') {
+        continue;
+      }
+      addresses.push(entry.address);
+    }
+  }
+  return [...new Set(addresses)];
+}
+
 function requestJson({ method = 'GET', pathName, token, body, timeout = 5000 }) {
   return new Promise((resolve, reject) => {
     const payload = body ? JSON.stringify(body) : null;
@@ -291,12 +306,18 @@ async function sendDesktopHeartbeat(token) {
       hostname: device.hostname,
       app_version: app.getVersion(),
       platform: process.platform,
+      local_ips: getLocalIPv4Addresses(),
+      proxy_host: assignedProxyConfig && assignedProxyConfig.enabled ? assignedProxyConfig.proxy_host : null,
+      proxy_port: assignedProxyConfig && assignedProxyConfig.enabled ? assignedProxyConfig.proxy_port : null,
     },
   });
 
   const session = response && response.session ? response.session : null;
   if (session && session.session_id) {
     desktopSessionId = session.session_id;
+  }
+  if (response && response.proxy_assignment) {
+    assignedProxyConfig = response.proxy_assignment;
   }
   if (response && Number.isFinite(response.heartbeat_interval_seconds)) {
     desktopHeartbeatIntervalMs = Math.max(5000, Number(response.heartbeat_interval_seconds) * 1000);

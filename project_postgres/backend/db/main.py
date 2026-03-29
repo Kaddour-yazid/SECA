@@ -33,9 +33,26 @@ from html import unescape
 import unicodedata
 
 from database import get_db, engine, Base
-from models import User, Scan, AuditLog, PhishTankEntry, ThreatUrl, ProxyBlockRule
+from models import (
+    User,
+    Scan,
+    AuditLog,
+    PhishTankEntry,
+    ThreatUrl,
+    ProxyBlockRule,
+    DesktopDevice,
+    DesktopSession,
+    GroupProxyAssignment,
+)
 import schemas
-from auth import get_current_user, require_admin, create_access_token, router as auth_router
+from auth import (
+    get_current_user,
+    require_admin,
+    create_access_token,
+    router as auth_router,
+    DEPARTMENT_GROUPS,
+    DEPARTMENT_ALIASES,
+)
 from sandbox_runner import run_dynamic_scan as sandbox_run_dynamic_scan
 from security_utils import sha256_hex
 
@@ -200,6 +217,8 @@ SECA_DESKTOP_SESSION_RETENTION_SECONDS = _read_int_env(
     minimum=300,
     maximum=86400,
 )
+SECA_GROUP_PROXY_DEFAULT_HOST = os.environ.get("SECA_GROUP_PROXY_DEFAULT_HOST", SECA_PROXY_LISTEN_HOST).strip() or SECA_PROXY_LISTEN_HOST
+SECA_GROUP_PROXY_BASE_PORT = _read_int_env("SECA_GROUP_PROXY_BASE_PORT", 3201, minimum=1025, maximum=65000)
 proxy_server = None
 proxy_blocklist_cache: List[str] = []
 proxy_blocklist_last_fetch = 0.0
@@ -424,6 +443,7 @@ class DesktopSessionHeartbeat(BaseModel):
     hostname: Optional[str] = None
     app_version: Optional[str] = None
     platform: Optional[str] = None
+    local_ips: Optional[List[str]] = None
     proxy_host: Optional[str] = None
     proxy_port: Optional[int] = None
 
@@ -992,6 +1012,104 @@ def _desktop_user_display_name(user: User) -> str:
     return combined or str(user.email or f"user-{user.id}")
 
 
+def _normalize_department_code(value: Optional[str]) -> str:
+    cleaned = str(value or "").strip().upper()
+    cleaned = DEPARTMENT_ALIASES.get(cleaned, cleaned)
+    if cleaned not in DEPARTMENT_GROUPS:
+        raise HTTPException(status_code=400, detail="Invalid department")
+    return cleaned
+
+
+def _normalize_local_ip_list(values: Optional[List[str]]) -> List[str]:
+    normalized: List[str] = []
+    seen = set()
+    for raw in values or []:
+        candidate = str(raw or "").strip()
+        if not candidate:
+            continue
+        try:
+            ip_obj = ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        if ip_obj.is_loopback:
+            continue
+        compact = ip_obj.compressed
+        if compact in seen:
+            continue
+        seen.add(compact)
+        normalized.append(compact)
+    return normalized
+
+
+def _serialize_local_ips(values: Optional[List[str]]) -> str:
+    return json.dumps(_normalize_local_ip_list(values))
+
+
+def _deserialize_local_ips(value: Optional[str]) -> List[str]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return _normalize_local_ip_list([str(item) for item in parsed])
+
+
+def _group_proxy_scope_rows() -> List[Tuple[str, str]]:
+    rows: List[Tuple[str, str]] = []
+    for department, payload in DEPARTMENT_GROUPS.items():
+        for group_name in payload.get("groups", {}).values():
+            rows.append((department, group_name))
+    return rows
+
+
+def seed_group_proxy_assignments() -> None:
+    try:
+        with Session(engine) as db:
+            for index, (department, group_name) in enumerate(_group_proxy_scope_rows()):
+                existing = (
+                    db.query(GroupProxyAssignment)
+                    .filter(
+                        GroupProxyAssignment.department == department,
+                        GroupProxyAssignment.group_name == group_name,
+                    )
+                    .first()
+                )
+                if existing:
+                    continue
+                db.add(
+                    GroupProxyAssignment(
+                        department=department,
+                        group_name=group_name,
+                        proxy_host=SECA_GROUP_PROXY_DEFAULT_HOST,
+                        proxy_port=SECA_GROUP_PROXY_BASE_PORT + index,
+                        enabled=True,
+                        note="Auto-seeded group proxy assignment",
+                    )
+                )
+            db.commit()
+    except Exception as exc:
+        logger.warning("Failed to seed group proxy assignments: %s", exc)
+
+
+def mark_persisted_desktop_sessions_offline_on_startup() -> None:
+    try:
+        with Session(engine) as db:
+            rows = db.query(DesktopSession).filter(DesktopSession.online.is_(True)).all()
+            if not rows:
+                return
+            now = datetime.utcnow()
+            for row in rows:
+                row.online = False
+                row.disconnect_reason = "backend-restart"
+                row.ended_at = now
+            db.commit()
+    except Exception as exc:
+        logger.warning("Failed to reset persisted desktop sessions on startup: %s", exc)
+
+
 def _desktop_presence_details(session: Dict[str, Any], online: bool, reason: Optional[str] = None) -> str:
     user_name = session.get("user_name") or session.get("email") or f"user-{session.get('user_id')}"
     device_label = session.get("hostname") or session.get("device_id") or "unknown-device"
@@ -1035,6 +1153,7 @@ def _desktop_session_payload(session: Dict[str, Any]) -> Dict[str, Any]:
         "hostname": session.get("hostname"),
         "platform": session.get("platform"),
         "app_version": session.get("app_version"),
+        "local_ips": list(session.get("local_ips") or []),
         "proxy_host": session.get("proxy_host"),
         "proxy_port": session.get("proxy_port"),
         "started_at": session.get("started_at"),
@@ -1042,6 +1161,121 @@ def _desktop_session_payload(session: Dict[str, Any]) -> Dict[str, Any]:
         "online": bool(session.get("online", False)),
         "disconnect_reason": session.get("disconnect_reason"),
         "seconds_since_last_heartbeat": seconds_since_last_heartbeat,
+    }
+
+
+def _persist_desktop_session_state(session: Dict[str, Any]) -> None:
+    session_started_at = datetime.fromisoformat(session["started_at"]) if session.get("started_at") else datetime.utcnow()
+    session_last_heartbeat = datetime.fromisoformat(session["last_heartbeat"]) if session.get("last_heartbeat") else datetime.utcnow()
+    local_ips_json = _serialize_local_ips(session.get("local_ips"))
+    with Session(engine) as db:
+        device = db.query(DesktopDevice).filter(DesktopDevice.device_id == session["device_id"]).first()
+        if not device:
+            device = DesktopDevice(
+                device_id=session["device_id"],
+                first_seen=session_started_at,
+            )
+            db.add(device)
+
+        device.hostname = session.get("hostname")
+        device.platform = session.get("platform")
+        device.app_version = session.get("app_version")
+        device.local_ips = local_ips_json
+        device.last_user_id = session.get("user_id")
+        device.last_department = session.get("department")
+        device.last_group_name = session.get("group_name")
+        device.proxy_host = session.get("proxy_host")
+        device.proxy_port = session.get("proxy_port")
+        device.last_seen = session_last_heartbeat
+
+        session_row = db.query(DesktopSession).filter(DesktopSession.session_id == session["session_id"]).first()
+        if not session_row:
+            session_row = DesktopSession(
+                session_id=session["session_id"],
+                user_id=session["user_id"],
+                started_at=session_started_at,
+            )
+            db.add(session_row)
+
+        session_row.user_id = session["user_id"]
+        session_row.device_id = session["device_id"]
+        session_row.hostname = session.get("hostname")
+        session_row.platform = session.get("platform")
+        session_row.app_version = session.get("app_version")
+        session_row.department = session.get("department")
+        session_row.group_name = session.get("group_name")
+        session_row.proxy_host = session.get("proxy_host")
+        session_row.proxy_port = session.get("proxy_port")
+        session_row.local_ips = local_ips_json
+        session_row.online = bool(session.get("online", False))
+        session_row.disconnect_reason = session.get("disconnect_reason")
+        session_row.last_heartbeat_at = session_last_heartbeat
+        session_row.ended_at = None if session_row.online else session_last_heartbeat
+        db.commit()
+
+
+def _active_desktop_session_for_client_ip(client_ip: str) -> Optional[Dict[str, Any]]:
+    with desktop_session_lock:
+        candidates = [
+            dict(session)
+            for session in desktop_sessions.values()
+            if session.get("online") and client_ip in set(session.get("local_ips") or [])
+        ]
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda session: float(session.get("last_heartbeat_ts") or 0.0), reverse=True)
+    return candidates[0]
+
+
+def _group_proxy_assignment_for_scope(department: Optional[str], group_name: Optional[str], db: Optional[Session] = None) -> Optional[GroupProxyAssignment]:
+    dep = str(department or "").strip()
+    grp = str(group_name or "").strip()
+    if not dep or not grp:
+        return None
+
+    def _query(session: Session) -> Optional[GroupProxyAssignment]:
+        return (
+            session.query(GroupProxyAssignment)
+            .filter(
+                GroupProxyAssignment.department == dep,
+                GroupProxyAssignment.group_name == grp,
+                GroupProxyAssignment.enabled.is_(True),
+            )
+            .first()
+        )
+
+    if db is not None:
+        return _query(db)
+    with Session(engine) as local_db:
+        return _query(local_db)
+
+
+def _db_desktop_session_payload(row: DesktopSession) -> Dict[str, Any]:
+    last_heartbeat = row.last_heartbeat_at.isoformat() if row.last_heartbeat_at else None
+    last_heartbeat_ts = row.last_heartbeat_at.timestamp() if row.last_heartbeat_at else 0.0
+    return {
+        "session_id": row.session_id,
+        "user_id": row.user_id,
+        "user_name": "",
+        "email": "",
+        "department": row.department,
+        "group_name": row.group_name,
+        "role": None,
+        "is_admin": False,
+        "device_id": row.device_id,
+        "hostname": row.hostname,
+        "platform": row.platform,
+        "app_version": row.app_version,
+        "local_ips": _deserialize_local_ips(row.local_ips),
+        "proxy_host": row.proxy_host,
+        "proxy_port": row.proxy_port,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "last_heartbeat": last_heartbeat,
+        "last_heartbeat_ts": last_heartbeat_ts,
+        "online": row.online,
+        "disconnect_reason": row.disconnect_reason,
     }
 
 
@@ -1070,6 +1304,7 @@ def _touch_desktop_session(user: User, payload: DesktopSessionHeartbeat) -> Tupl
     normalized_hostname = str(payload.hostname or "").strip() or normalized_device_id
     normalized_platform = str(payload.platform or "").strip() or ""
     normalized_app_version = str(payload.app_version or "").strip() or ""
+    normalized_local_ips = _normalize_local_ip_list(payload.local_ips)
     normalized_proxy_host = str(payload.proxy_host or "").strip() or None
     normalized_proxy_port = payload.proxy_port if payload.proxy_port and payload.proxy_port > 0 else None
     created = False
@@ -1091,6 +1326,7 @@ def _touch_desktop_session(user: User, payload: DesktopSessionHeartbeat) -> Tupl
                 "hostname": normalized_hostname,
                 "platform": normalized_platform,
                 "app_version": normalized_app_version,
+                "local_ips": normalized_local_ips,
                 "proxy_host": normalized_proxy_host,
                 "proxy_port": normalized_proxy_port,
                 "started_at": now_iso,
@@ -1111,6 +1347,7 @@ def _touch_desktop_session(user: User, payload: DesktopSessionHeartbeat) -> Tupl
             session["hostname"] = normalized_hostname
             session["platform"] = normalized_platform or session.get("platform")
             session["app_version"] = normalized_app_version or session.get("app_version")
+            session["local_ips"] = normalized_local_ips or session.get("local_ips") or []
             session["proxy_host"] = normalized_proxy_host or session.get("proxy_host")
             session["proxy_port"] = normalized_proxy_port or session.get("proxy_port")
             session["last_heartbeat"] = now_iso
@@ -1118,6 +1355,7 @@ def _touch_desktop_session(user: User, payload: DesktopSessionHeartbeat) -> Tupl
             session["online"] = True
             session["disconnect_reason"] = None
 
+    _persist_desktop_session_state(session)
     if created:
         _emit_desktop_presence_audit(session, True)
     return _desktop_session_payload(session), created
@@ -1149,23 +1387,44 @@ def _stop_desktop_session(user: User, payload: DesktopSessionStop) -> Optional[D
             break
 
     if stopped_session and should_emit_offline:
+        _persist_desktop_session_state(stopped_session)
         _emit_desktop_presence_audit(stopped_session, False, reason=reason)
+    elif stopped_session:
+        _persist_desktop_session_state(stopped_session)
     return _desktop_session_payload(stopped_session) if stopped_session else None
 
 
-def _collect_desktop_sessions_for_admin(current_user: User) -> List[Dict[str, Any]]:
-    with desktop_session_lock:
-        sessions = [_desktop_session_payload(session) for session in desktop_sessions.values()]
+def _collect_persisted_desktop_sessions_for_admin(current_user: User, db: Session, limit: int = 100) -> List[Dict[str, Any]]:
+    query = db.query(DesktopSession).order_by(DesktopSession.last_heartbeat_at.desc())
 
-    scoped = [session for session in sessions if _desktop_session_scope_matches(session, current_user)]
-    scoped.sort(
-        key=lambda session: (
-            not bool(session.get("online")),
-            int(session.get("seconds_since_last_heartbeat") or 10**9),
-            str(session.get("user_name") or ""),
+    admin_department = str(current_user.department or "").strip()
+    admin_group = str(current_user.group_name or "").strip()
+    if admin_department and admin_group:
+        query = query.filter(
+            DesktopSession.department == admin_department,
+            DesktopSession.group_name == admin_group,
         )
-    )
-    return scoped
+
+    rows = query.limit(limit).all()
+    if not rows:
+        return []
+
+    user_ids = {row.user_id for row in rows}
+    users = db.query(User).filter(User.id.in_(user_ids)).all() if user_ids else []
+    user_map = {user.id: user for user in users}
+
+    payloads: List[Dict[str, Any]] = []
+    for row in rows:
+        payload = _db_desktop_session_payload(row)
+        linked_user = user_map.get(row.user_id)
+        if linked_user:
+            payload["user_name"] = _desktop_user_display_name(linked_user)
+            payload["email"] = linked_user.email
+            payload["role"] = linked_user.role
+            payload["is_admin"] = bool(linked_user.is_admin)
+        payloads.append(_desktop_session_payload(payload))
+
+    return payloads
 
 
 def _flush_gateway_audit_queue_sync() -> int:
@@ -1224,6 +1483,7 @@ async def monitor_desktop_sessions() -> None:
                 desktop_sessions.pop(session_id, None)
 
         for session in expired_sessions:
+            await asyncio.to_thread(_persist_desktop_session_state, session)
             await asyncio.to_thread(_emit_desktop_presence_audit, session, False, "heartbeat-timeout")
 
 
@@ -1311,7 +1571,38 @@ def _gateway_audit_details(event: Dict[str, Any]) -> str:
         parts.append(f"signals={'; '.join(signals[:4])}")
     if event.get("block_reason"):
         parts.append(f"block_reason={event.get('block_reason')}")
+    if event.get("user_email"):
+        parts.append(f"user={event.get('user_email')}")
+    if event.get("department") and event.get("group_name"):
+        parts.append(f"scope={event.get('department')}/{event.get('group_name')}")
     return " | ".join(parts)
+
+
+def _enrich_gateway_event_with_desktop_session(normalized: Dict[str, Any]) -> Dict[str, Any]:
+    client_ip = normalized.get("client_ip") or ""
+    if not client_ip:
+        return normalized
+
+    session = _active_desktop_session_for_client_ip(client_ip)
+    if not session:
+        return normalized
+
+    normalized["desktop_session_id"] = session.get("session_id")
+    normalized["user_id"] = session.get("user_id")
+    normalized["user_name"] = session.get("user_name")
+    normalized["user_email"] = session.get("email")
+    normalized["department"] = session.get("department")
+    normalized["group_name"] = session.get("group_name")
+    normalized["device_id"] = session.get("device_id")
+    normalized["hostname"] = session.get("hostname")
+    normalized["local_ips"] = list(session.get("local_ips") or [])
+
+    assignment = _group_proxy_assignment_for_scope(session.get("department"), session.get("group_name"))
+    if assignment:
+        normalized["assigned_proxy_host"] = assignment.proxy_host
+        normalized["assigned_proxy_port"] = assignment.proxy_port
+
+    return normalized
 
 
 def _update_gateway_runtime_state(normalized: Dict[str, Any]) -> Dict[str, Any]:
@@ -1323,6 +1614,8 @@ def _update_gateway_runtime_state(normalized: Dict[str, Any]) -> Dict[str, Any]:
     now_dt = datetime.utcnow()
     now = now_dt.isoformat()
     now_ts = now_dt.timestamp()
+
+    normalized = _enrich_gateway_event_with_desktop_session(normalized)
 
     with gateway_state_lock:
         gateway_client_last_activity[client_ip] = now_ts
@@ -1878,6 +2171,8 @@ def disable_legacy_default_proxy_rules() -> None:
 async def on_startup():
     seed_default_proxy_rules()
     disable_legacy_default_proxy_rules()
+    seed_group_proxy_assignments()
+    mark_persisted_desktop_sessions_offline_on_startup()
     if SECA_PROXY_TLS_INTERCEPT and not _proxy_tls_intercept_ready():
         logger.warning(
             "SECA_PROXY_TLS_INTERCEPT is enabled but CA files are missing or unreadable. "
@@ -3647,8 +3942,16 @@ async def gateway_api_history(
         limit: int = Query(200, ge=1, le=1000),
         current_user: User = Depends(require_admin)
 ):
-    del current_user
-    return list(gateway_history)[:limit]
+    admin_department = str(current_user.department or "").strip()
+    admin_group = str(current_user.group_name or "").strip()
+    rows = list(gateway_history)
+    if admin_department and admin_group:
+        rows = [
+            row for row in rows
+            if str(row.get("department") or "").strip() == admin_department
+            and str(row.get("group_name") or "").strip() == admin_group
+        ]
+    return rows[:limit]
 
 
 @app.get("/gateway/api/stats")
@@ -3689,6 +3992,19 @@ async def gateway_api_devices(current_user: User = Depends(require_admin)):
             device["active_connections"] = gateway_active_connections.get(ip, 0)
             last_activity = gateway_client_last_activity.get(ip, 0.0)
             device["seconds_since_last_activity"] = int(max(0.0, now_ts - last_activity)) if last_activity > 0 else None
+            session = _active_desktop_session_for_client_ip(ip)
+            if session:
+                device["desktop_session_id"] = session.get("session_id")
+                device["user_id"] = session.get("user_id")
+                device["user_name"] = session.get("user_name")
+                device["user_email"] = session.get("email")
+                device["department"] = session.get("department")
+                device["group_name"] = session.get("group_name")
+                device["hostname"] = session.get("hostname")
+                assignment = _group_proxy_assignment_for_scope(session.get("department"), session.get("group_name"))
+                if assignment:
+                    device["assigned_proxy_host"] = assignment.proxy_host
+                    device["assigned_proxy_port"] = assignment.proxy_port
             devices.append(device)
     devices.sort(key=lambda d: (not bool(d.get("connected")), -(int(d.get("total_requests", 0) or 0))), reverse=False)
     return devices
@@ -4133,7 +4449,11 @@ async def read_users_me(current_user: User = Depends(get_current_user)):
 
 
 @app.get("/desktop/session/config")
-async def get_desktop_session_config(current_user: User = Depends(get_current_user)):
+async def get_desktop_session_config(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    assignment = _group_proxy_assignment_for_scope(current_user.department, current_user.group_name, db=db)
     return {
         "heartbeat_interval_seconds": SECA_DESKTOP_HEARTBEAT_INTERVAL_SECONDS,
         "heartbeat_timeout_seconds": SECA_DESKTOP_HEARTBEAT_TIMEOUT_SECONDS,
@@ -4141,14 +4461,45 @@ async def get_desktop_session_config(current_user: User = Depends(get_current_us
         "user_id": current_user.id,
         "department": current_user.department,
         "group_name": current_user.group_name,
+        "proxy_assignment": {
+            "proxy_host": assignment.proxy_host,
+            "proxy_port": assignment.proxy_port,
+            "enabled": assignment.enabled,
+        } if assignment else None,
+    }
+
+
+@app.get("/desktop/proxy-assignment")
+async def get_current_group_proxy_assignment(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    assignment = _group_proxy_assignment_for_scope(current_user.department, current_user.group_name, db=db)
+    if not assignment:
+        return {"assignment": None}
+    return {
+        "assignment": {
+            "department": assignment.department,
+            "group_name": assignment.group_name,
+            "proxy_host": assignment.proxy_host,
+            "proxy_port": assignment.proxy_port,
+            "enabled": assignment.enabled,
+            "note": assignment.note,
+        }
     }
 
 
 @app.post("/desktop/session/heartbeat")
 async def desktop_session_heartbeat(
         payload: DesktopSessionHeartbeat,
-        current_user: User = Depends(get_current_user)
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
 ):
+    assignment = _group_proxy_assignment_for_scope(current_user.department, current_user.group_name, db=db)
+    if assignment and not payload.proxy_host:
+        payload.proxy_host = assignment.proxy_host
+    if assignment and not payload.proxy_port:
+        payload.proxy_port = assignment.proxy_port
     session, created = await asyncio.to_thread(_touch_desktop_session, current_user, payload)
     return {
         "ok": True,
@@ -4156,6 +4507,11 @@ async def desktop_session_heartbeat(
         "session": session,
         "heartbeat_interval_seconds": SECA_DESKTOP_HEARTBEAT_INTERVAL_SECONDS,
         "heartbeat_timeout_seconds": SECA_DESKTOP_HEARTBEAT_TIMEOUT_SECONDS,
+        "proxy_assignment": {
+            "proxy_host": assignment.proxy_host,
+            "proxy_port": assignment.proxy_port,
+            "enabled": assignment.enabled,
+        } if assignment else None,
     }
 
 
@@ -4172,11 +4528,34 @@ async def desktop_session_stop(
 
 
 @app.get("/monitoring/desktop/sessions")
-async def monitoring_desktop_sessions(current_user: User = Depends(require_admin)):
+async def monitoring_desktop_sessions(
+        current_user: User = Depends(require_admin),
+        db: Session = Depends(get_db)
+):
     return {
-        "sessions": await asyncio.to_thread(_collect_desktop_sessions_for_admin, current_user),
+        "sessions": _collect_persisted_desktop_sessions_for_admin(current_user, db),
         "heartbeat_interval_seconds": SECA_DESKTOP_HEARTBEAT_INTERVAL_SECONDS,
         "heartbeat_timeout_seconds": SECA_DESKTOP_HEARTBEAT_TIMEOUT_SECONDS,
+    }
+
+
+@app.get("/monitoring/group-proxy-assignment")
+async def monitoring_group_proxy_assignment(
+        current_user: User = Depends(require_admin),
+        db: Session = Depends(get_db)
+):
+    assignment = _group_proxy_assignment_for_scope(current_user.department, current_user.group_name, db=db)
+    if not assignment:
+        return {"assignment": None}
+    return {
+        "assignment": {
+            "department": assignment.department,
+            "group_name": assignment.group_name,
+            "proxy_host": assignment.proxy_host,
+            "proxy_port": assignment.proxy_port,
+            "enabled": assignment.enabled,
+            "note": assignment.note,
+        }
     }
 
 

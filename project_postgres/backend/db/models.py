@@ -79,6 +79,60 @@ class ProxyBlockRule(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class DesktopDevice(Base):
+    __tablename__ = "desktop_devices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    device_id = Column(String, unique=True, index=True, nullable=False)
+    hostname = Column(String, nullable=True)
+    platform = Column(String, nullable=True)
+    app_version = Column(String, nullable=True)
+    local_ips = Column(Text, nullable=True)
+    last_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    last_department = Column(String, nullable=True)
+    last_group_name = Column(String, nullable=True)
+    proxy_host = Column(String, nullable=True)
+    proxy_port = Column(Integer, nullable=True)
+    first_seen = Column(DateTime, default=datetime.utcnow)
+    last_seen = Column(DateTime, default=datetime.utcnow)
+
+
+class DesktopSession(Base):
+    __tablename__ = "desktop_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String, unique=True, index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    device_id = Column(String, nullable=False, index=True)
+    hostname = Column(String, nullable=True)
+    platform = Column(String, nullable=True)
+    app_version = Column(String, nullable=True)
+    department = Column(String, nullable=True)
+    group_name = Column(String, nullable=True)
+    proxy_host = Column(String, nullable=True)
+    proxy_port = Column(Integer, nullable=True)
+    local_ips = Column(Text, nullable=True)
+    online = Column(Boolean, default=True, nullable=False)
+    disconnect_reason = Column(String, nullable=True)
+    started_at = Column(DateTime, default=datetime.utcnow)
+    last_heartbeat_at = Column(DateTime, default=datetime.utcnow)
+    ended_at = Column(DateTime, nullable=True)
+
+
+class GroupProxyAssignment(Base):
+    __tablename__ = "group_proxy_assignments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    department = Column(String, index=True, nullable=False)
+    group_name = Column(String, index=True, nullable=False)
+    proxy_host = Column(String, nullable=False)
+    proxy_port = Column(Integer, nullable=False)
+    enabled = Column(Boolean, default=True, nullable=False)
+    note = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class EmailOtp(Base):
     __tablename__ = "email_otps"
 
