@@ -4,7 +4,6 @@ import {
   BarChart3,
   Clock3,
   FileWarning,
-  FileSearch,
   Fingerprint,
   Globe,
   History,
@@ -483,7 +482,7 @@ export function LoginView() {
   const signupGroups = signupDepartment ? departmentGroups[signupDepartment] : [];
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top,_rgba(34,211,238,0.18),_transparent_35%),linear-gradient(135deg,#08111f_0%,#0f172a_48%,#111827_100%)] p-4">
+    <div className="global-scroll visible-scrollbar flex h-screen min-h-screen items-start justify-center overflow-y-auto bg-[radial-gradient(circle_at_top,_rgba(34,211,238,0.18),_transparent_35%),linear-gradient(135deg,#08111f_0%,#0f172a_48%,#111827_100%)] p-3 sm:p-4 lg:items-center lg:p-6">
       <style>{`
         @keyframes fadeSlideIn {
           from {
@@ -496,7 +495,7 @@ export function LoginView() {
           }
         }
       `}</style>
-      <div className="w-full max-w-[1520px]">
+      <div className="w-full max-w-[1520px] py-1 sm:py-2 lg:py-0">
         <div
           className={`grid items-stretch gap-6 transition-[grid-template-columns] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
             isSignupFlow
@@ -504,8 +503,8 @@ export function LoginView() {
               : 'lg:grid-cols-[minmax(360px,0.95fr)_minmax(0,2.45fr)]'
           }`}
         >
-          <section className="flex min-h-[760px] flex-col rounded-3xl border border-slate-800/90 bg-slate-900/84 p-7 shadow-[0_24px_70px_rgba(8,15,30,0.45)] backdrop-blur-xl transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]">
-            <div className="mb-8 flex items-start justify-between gap-4 transition-all duration-300 ease-out">
+          <section className="visible-scrollbar flex min-h-0 max-h-[calc(100vh-1rem)] flex-col overflow-y-scroll rounded-3xl border border-slate-800/90 bg-slate-900/84 p-4 shadow-[0_24px_70px_rgba(8,15,30,0.45)] backdrop-blur-xl transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] [scrollbar-gutter:stable] sm:max-h-[calc(100vh-1.5rem)] sm:p-6 lg:min-h-[760px] lg:max-h-none lg:overflow-visible lg:p-7">
+            <div className="mb-6 flex items-start justify-between gap-4 transition-all duration-300 ease-out sm:mb-8">
               <div className="min-w-0">
                 <p className="text-[0.68rem] font-semibold uppercase tracking-[0.34em] text-cyan-300/85">SECA</p>
                 <p className="mt-3 text-[0.68rem] font-medium uppercase tracking-[0.28em] text-slate-500">
@@ -526,7 +525,7 @@ export function LoginView() {
               )}
             </div>
 
-            <div className="mb-6 flex gap-2 transition-all duration-300 ease-out">
+            <div className="mb-5 flex gap-2 transition-all duration-300 ease-out sm:mb-6">
               <button
                 type="button"
                 onClick={() => switchStep('login')}
@@ -552,18 +551,18 @@ export function LoginView() {
             </div>
 
             {isSignupFlow && (
-              <div className="mb-6 rounded-2xl border border-slate-800 bg-slate-950/35 px-4 py-4 animate-[fadeSlideIn_320ms_ease-out]">
-                <div className="mb-4 h-1.5 overflow-hidden rounded-full bg-slate-800">
+              <div className="mb-5 rounded-2xl border border-slate-800 bg-slate-950/35 px-3 py-3 animate-[fadeSlideIn_320ms_ease-out] sm:mb-6 sm:px-4 sm:py-4">
+                <div className="mb-3 h-1.5 overflow-hidden rounded-full bg-slate-800 sm:mb-4">
                   <div
                     className="h-full rounded-full bg-gradient-to-r from-cyan-400 to-blue-500 transition-all duration-500"
                     style={{ width: `${((signupStepIndex + 1) / signupStepLabels.length) * 100}%` }}
                   />
                 </div>
-                <div className="grid gap-3 sm:grid-cols-3">
+                <div className="grid gap-2.5 sm:grid-cols-3 sm:gap-3">
                   {signupStepLabels.map((label, index) => (
                     <div
                       key={label}
-                      className={`rounded-2xl border px-3 py-3 transition ${
+                      className={`rounded-2xl border px-3 py-2.5 transition sm:py-3 ${
                         signupStepIndex === index
                           ? 'border-cyan-400/40 bg-cyan-500/10'
                           : signupStepIndex > index
@@ -592,7 +591,7 @@ export function LoginView() {
               </div>
             )}
 
-            <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col gap-4">
+              <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col gap-4 pr-1 sm:pr-2">
               {step === 'login' && (
                 <div className="animate-[fadeSlideIn_320ms_ease-out] space-y-4">
                   <div>
@@ -631,13 +630,13 @@ export function LoginView() {
               )}
 
               {isSignupFlow && (
-                <div className="overflow-hidden animate-[fadeSlideIn_320ms_ease-out]">
+                <div className="min-h-0 overflow-hidden animate-[fadeSlideIn_320ms_ease-out]">
                   <div
                     className="flex transition-transform duration-500 ease-out"
                     style={{ transform: `translateX(-${signupStepIndex * 100}%)` }}
                   >
                     <div className="w-full shrink-0 space-y-4 pr-1">
-                      <div className="grid gap-4 sm:grid-cols-2">
+                        <div className="grid gap-3 sm:grid-cols-2 sm:gap-4">
                         <div>
                           <label className="mb-2 block text-xs font-medium uppercase tracking-[0.18em] text-slate-500">First name</label>
                           <input
@@ -677,7 +676,7 @@ export function LoginView() {
                       </div>
                       <div>
                         <label className="mb-2 block text-xs font-medium uppercase tracking-[0.18em] text-slate-500">Sex</label>
-                        <div className="grid grid-cols-2 gap-3">
+                        <div className="grid grid-cols-2 gap-2.5 sm:gap-3">
                           {sexOptions.map((option) => (
                             <button
                               key={option.value}
@@ -731,7 +730,7 @@ export function LoginView() {
                       </div>
                       <div>
                         <label className="mb-2 block text-xs font-medium uppercase tracking-[0.18em] text-slate-500">Group</label>
-                        <div className="max-h-[176px] space-y-2 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-950/35 p-2 pr-1.5">
+                        <div className="max-h-[140px] space-y-2 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-950/35 p-2 pr-1.5 sm:max-h-[176px]">
                           {!signupDepartment ? (
                             <div className="rounded-xl border border-dashed border-slate-800 bg-slate-950/40 px-4 py-5 text-sm text-slate-500">
                               Select a department first to unlock its groups.
@@ -758,7 +757,7 @@ export function LoginView() {
                     </div>
 
                     <div className="w-full shrink-0 space-y-4 pr-1">
-                      <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="grid gap-3 sm:grid-cols-2 sm:gap-4">
                         <div>
                           <label className="mb-2 block text-xs font-medium uppercase tracking-[0.18em] text-slate-500">Create password</label>
                           <div className="relative">
@@ -915,7 +914,7 @@ export function LoginView() {
               </button>
             </form>
 
-            <div className="mt-auto flex items-center justify-between gap-3 pt-6 text-sm">
+            <div className="mt-4 flex flex-col items-start gap-3 pt-4 text-sm sm:mt-6 sm:flex-row sm:items-center sm:justify-between sm:pt-6">
               <button
                 type="button"
                 onClick={() => switchStep(isSignupFlow ? 'login' : step === 'reset-request' || step === 'reset-confirm' ? 'login' : 'reset-request')}

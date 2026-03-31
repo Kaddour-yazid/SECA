@@ -188,6 +188,8 @@ html, body, #root {
   height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: #0ea5e9 rgba(15, 23, 42, 0.35);
 }
 
 /* Left‑side scroll container */
@@ -204,24 +206,36 @@ html, body, #root {
   direction: ltr;
 }
 
+.visible-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #0ea5e9 rgba(15, 23, 42, 0.35);
+}
+
 /* Nice Cyber Scrollbar for both directions */
 .global-scroll::-webkit-scrollbar,
-.scroll-left::-webkit-scrollbar {
+.scroll-left::-webkit-scrollbar,
+.visible-scrollbar::-webkit-scrollbar {
   width: 10px;
+  height: 10px;
 }
 
 .global-scroll::-webkit-scrollbar-track,
-.scroll-left::-webkit-scrollbar-track {
-  background: transparent;
+.scroll-left::-webkit-scrollbar-track,
+.visible-scrollbar::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.35);
+  border-radius: 999px;
 }
 
 .global-scroll::-webkit-scrollbar-thumb,
-.scroll-left::-webkit-scrollbar-thumb {
+.scroll-left::-webkit-scrollbar-thumb,
+.visible-scrollbar::-webkit-scrollbar-thumb {
   background: #0ea5e9;
-  border-radius: 8px;
+  border-radius: 999px;
+  border: 2px solid rgba(15, 23, 42, 0.18);
 }
 
 .global-scroll::-webkit-scrollbar-thumb:hover,
-.scroll-left::-webkit-scrollbar-thumb:hover {
+.scroll-left::-webkit-scrollbar-thumb:hover,
+.visible-scrollbar::-webkit-scrollbar-thumb:hover {
   background: #0284c7;
 }
