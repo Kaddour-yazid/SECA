@@ -335,9 +335,9 @@ export function AccessControlView() {
   };
 
   return (
-    <div className="flex-1 bg-slate-900 global-scroll">
-      <div className="p-8 max-w-6xl mx-auto">
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-8">
+    <div className="flex h-full flex-col overflow-hidden bg-slate-900">
+      <div className="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col p-8">
+        <div className="mb-8 flex shrink-0 flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-3xl font-bold text-white mb-2">Website Access Control</h2>
             <p className="text-slate-400">Manage blocked domains for all devices using your proxy.</p>
@@ -351,7 +351,7 @@ export function AccessControlView() {
           </button>
         </div>
 
-        <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-5 mb-6">
+        <div className="mb-6 shrink-0 rounded-xl border border-slate-700 bg-slate-800/50 p-5">
           <label className="block text-slate-300 text-sm mb-2">Add domain or URL</label>
           <div className="flex flex-col md:flex-row gap-3">
             <div className="relative flex-1">
@@ -421,13 +421,13 @@ export function AccessControlView() {
         </div>
 
         {error && (
-          <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 mb-6 text-red-300">
+          <div className="mb-6 shrink-0 rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-red-300">
             {error}
           </div>
         )}
 
-        <div className="bg-slate-800/50 border border-slate-700 rounded-xl overflow-hidden">
-          <div className="px-5 py-4 border-b border-slate-700 flex items-center gap-2 text-slate-200">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-700 bg-slate-800/50">
+          <div className="flex shrink-0 items-center gap-2 border-b border-slate-700 px-5 py-4 text-slate-200">
             <ShieldBan className="w-5 h-5 text-cyan-400" />
             Active Block Rules ({sortedRules.length})
           </div>
@@ -437,7 +437,7 @@ export function AccessControlView() {
           ) : sortedRules.length === 0 ? (
             <div className="p-6 text-slate-400">No blocked domains configured yet.</div>
           ) : (
-            <div className="divide-y divide-slate-700">
+            <div className="min-h-0 flex-1 overflow-y-auto divide-y divide-slate-700 pr-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-700 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar]:w-2">
               {sortedRules.map((rule) => (
                 <div key={rule.id} className="p-4 flex flex-col md:flex-row md:items-center gap-3 md:justify-between">
                   <div>

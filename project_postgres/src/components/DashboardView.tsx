@@ -335,7 +335,7 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
   const selectedSummary = useMemo(() => buildDetailSummary(selectedScan, translateText), [selectedScan, translateText]);
 
   return (
-    <div className="flex-1 bg-slate-900 global-scroll">
+    <div className="flex h-full flex-col overflow-hidden bg-slate-900">
       <style>{`
         @keyframes secaBackdropIn {
           from { opacity: 0; }
@@ -348,8 +348,8 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
         .seca-backdrop-in { animation: secaBackdropIn 180ms ease-out; }
         .seca-modal-in { animation: secaModalIn 220ms ease-out; }
       `}</style>
-      <div className="p-8">
-        <div className="flex items-start justify-between mb-8 gap-4">
+      <div className="flex min-h-0 flex-1 flex-col p-8">
+        <div className="mb-8 flex shrink-0 items-start justify-between gap-4">
           <div>
             <h2 className="text-3xl font-bold text-white mb-2">{translateText('Dashboard')}</h2>
             <p className="text-slate-400">{translateText('Overview of your security scans')}</p>
@@ -365,7 +365,7 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
         </div>
 
         {/* Stats Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+        <div className="mb-8 grid shrink-0 grid-cols-1 gap-6 md:grid-cols-4">
           <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-6">
             <div className="flex items-center justify-between mb-2">
               <h3 className="text-slate-400 text-sm font-medium">{translateText('Total Scans')}</h3>
@@ -400,8 +400,8 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
         </div>
 
         {/* Recent Scans */}
-        <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-6">
-          <h3 className="text-xl font-bold text-white mb-4">{translateText('Recent Scans')}</h3>
+        <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-slate-700 bg-slate-800/50 p-6">
+          <h3 className="mb-4 shrink-0 text-xl font-bold text-white">{translateText('Recent Scans')}</h3>
 
           {loading && (
             <div className="text-center py-8">
@@ -421,7 +421,8 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
           )}
 
           {!loading && !error && scans.length > 0 && (
-            <ul className="space-y-3">
+            <div className="min-h-0 flex-1 overflow-y-auto pr-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-700 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar]:w-2">
+              <ul className="space-y-3">
               {scans.slice(0, 10).map((scan) => {
                 const scanType = normalizeScanType(scan.scan_type, translateText);
                 return (
@@ -462,7 +463,8 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
                   </li>
                 );
               })}
-            </ul>
+              </ul>
+            </div>
           )}
         </div>
       </div>

@@ -1,4 +1,4 @@
-ï»¿import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   BarChart3,
@@ -18,7 +18,10 @@ import {
   ShieldCheck,
   Shield,
   AlertTriangle,
+  Building2,
   Workflow,
+  Github,
+  GraduationCap,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -169,7 +172,7 @@ function AuditPreview() {
             <div className={`mt-1 h-2.5 w-2.5 rounded-full ${index === 1 ? 'bg-amber-300' : 'bg-emerald-300'}`} />
             <div className="min-w-0">
               <p className="text-sm font-semibold text-white">{title}</p>
-              <p className="mt-1 text-xs text-slate-500">{time} Â· {meta}</p>
+              <p className="mt-1 text-xs text-slate-500">{time} · {meta}</p>
             </div>
           </div>
         ))}
@@ -236,23 +239,23 @@ const featureSlides: FeatureSlide[] = [
 const departmentGroups = {
   RXS: [
     'Infrastructure (Sauvegarde & Stockage)',
-    'Service SystÃ¨me (Messagerie, IdentitÃ© & AccÃ¨s)',
-    'Service Interconnexion (Routage, Commutation & SÃ©curitÃ© PÃ©rimÃ©trique)',
-    'Service Support (MatÃ©riel & DÃ©ploiement Logiciel)',
+    'Service Système (Messagerie, Identité & Accès)',
+    'Service Interconnexion (Routage, Commutation & Sécurité Périmétrique)',
+    'Service Support (Matériel & Déploiement Logiciel)',
     'Service Data Center',
   ],
   SLM: [
     'Groupe GED',
     'Groupe Maintenance',
     'Groupe DBA',
-    'Groupe DÃ©veloppement',
-    'Groupe QualitÃ©',
-    'Groupe DÃ©cisionnel & Veille Technologique',
+    'Groupe Développement',
+    'Groupe Qualité',
+    'Groupe Décisionnel & Veille Technologique',
   ],
   SSI: [
-    'PÃ´le SOC & SÃ©curitÃ© des SystÃ¨mes',
-    'PÃ´le SÃ©curitÃ© Industrielle (OT)',
-    'PÃ´le SÃ©curitÃ© Applicative & Gouvernance',
+    'Pôle SOC & Sécurité des Systèmes',
+    'Pôle Sécurité Industrielle (OT)',
+    'Pôle Sécurité Applicative & Gouvernance',
   ],
 } as const;
 
@@ -1026,24 +1029,27 @@ export function LoginView() {
               href="https://github.com/Kaddour-yazid/SECA"
               target="_blank"
               rel="noreferrer"
-              className="transition hover:text-slate-300"
+              className="inline-flex items-center gap-2 transition hover:text-slate-300"
             >
+              <Github className="h-3.5 w-3.5 text-slate-400" />
               GitHub Repository
             </a>
             <a
-              href="https://www.univ-usto.dz/"
+              href="https://www.univ-usto.dz/en/"
               target="_blank"
               rel="noreferrer"
-              className="transition hover:text-slate-300"
+              className="inline-flex items-center gap-2 transition hover:text-slate-300"
             >
+              <GraduationCap className="h-3.5 w-3.5 text-slate-400" />
               USTO-MB
             </a>
             <a
-              href="https://sonatrach.com/"
+              href="https://sonatrach.com/fr/"
               target="_blank"
               rel="noreferrer"
-              className="transition hover:text-slate-300"
+              className="inline-flex items-center gap-2 transition hover:text-slate-300"
             >
+              <Building2 className="h-3.5 w-3.5 text-slate-400" />
               Sonatrach
             </a>
           </div>
@@ -1052,3 +1058,6 @@ export function LoginView() {
     </div>
   );
 }
+
+
+

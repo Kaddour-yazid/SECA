@@ -528,8 +528,8 @@ export function AuditLogsView() {
 
   if (showDevicesPage) {
     return (
-      <div className="flex-1 bg-slate-900 global-scroll p-8 space-y-6">
-        <div className="flex items-center justify-between gap-4">
+      <div className="flex h-full flex-col overflow-hidden bg-slate-900 p-8">
+        <div className="mb-6 flex shrink-0 items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <button onClick={() => setShowDevicesPage(false)} className="px-3 py-2 rounded-lg border border-slate-600 text-slate-200 hover:bg-slate-800 flex items-center gap-2">
               <ArrowLeft className="w-4 h-4" />
@@ -546,8 +546,8 @@ export function AuditLogsView() {
           </button>
         </div>
 
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-          <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4 max-h-[75vh] overflow-y-auto space-y-2">
+        <div className="grid min-h-0 flex-1 grid-cols-1 gap-6 xl:grid-cols-3">
+          <div className="max-h-full overflow-y-auto rounded-xl border border-slate-700 bg-slate-800/50 p-4 space-y-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-700 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar]:w-2">
             {devices.length === 0 ? (
               <div className="rounded-lg border border-dashed border-slate-700 bg-slate-900/50 p-5 text-center">
                 <p className="text-slate-200 font-medium">No connected devices</p>
@@ -574,7 +574,7 @@ export function AuditLogsView() {
             )}
           </div>
 
-          <div className="xl:col-span-2 bg-slate-800/50 border border-slate-700 rounded-xl p-4">
+          <div className="xl:col-span-2 flex min-h-0 flex-col rounded-xl border border-slate-700 bg-slate-800/50 p-4">
             {devices.length === 0 ? (
               <div className="h-full min-h-[260px] flex items-center justify-center text-center">
                 <div>
@@ -610,9 +610,9 @@ export function AuditLogsView() {
                     <p className="text-lg font-semibold text-rose-300">{selectedDevice.blocked_requests}</p>
                   </div>
                 </div>
-                <div className="overflow-x-auto">
+                <div className="min-h-0 flex-1 overflow-auto [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-700 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar]:w-2">
                   <table className="w-full">
-                    <thead className="bg-slate-900/50">
+                    <thead className="sticky top-0 z-10 bg-slate-900">
                       <tr>
                         <th className="px-4 py-2 text-left text-xs text-slate-400 uppercase">Timestamp</th>
                         <th className="px-4 py-2 text-left text-xs text-slate-400 uppercase">Action</th>
@@ -654,8 +654,8 @@ export function AuditLogsView() {
   }
 
   return (
-    <div className="flex-1 bg-slate-900 global-scroll p-8 space-y-6">
-      <div className="flex items-center justify-between gap-4">
+    <div className="flex h-full flex-col overflow-hidden bg-slate-900 p-8">
+      <div className="mb-6 flex shrink-0 items-center justify-between gap-4">
         <div>
           <h2 className="text-3xl font-bold text-white">Audit Logs</h2>
           <p className="text-slate-400">Main audit view (devices moved to dedicated page).</p>
@@ -666,7 +666,7 @@ export function AuditLogsView() {
         </button>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+      <div className="mb-6 grid shrink-0 grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4">
           <div className="flex items-center gap-2 text-slate-400 text-sm mb-2"><Server className="w-4 h-4 text-cyan-400" />Proxy Status</div>
           <p className={`text-xl font-semibold ${health?.running ? "text-emerald-300" : "text-red-300"}`}>{health?.running ? "Running" : "Stopped"}</p>
@@ -692,9 +692,9 @@ export function AuditLogsView() {
         </div>
       </div>
 
-      {gatewayError && <p className="text-amber-300 text-sm">{gatewayError}</p>}
+      {gatewayError && <p className="mb-6 shrink-0 text-sm text-amber-300">{gatewayError}</p>}
 
-      <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4 space-y-4">
+      <div className="mb-6 shrink-0 rounded-xl border border-slate-700 bg-slate-800/50 p-4 space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
@@ -713,15 +713,15 @@ export function AuditLogsView() {
         </div>
       </div>
 
-      <div className="bg-slate-800/50 border border-slate-700 rounded-lg overflow-hidden">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-slate-700 bg-slate-800/50">
         {loading ? (
           <p className="text-slate-400 p-6">Loading logs...</p>
         ) : error ? (
           <p className="text-red-400 p-6">{error}</p>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="min-h-0 flex-1 overflow-auto [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-700 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar]:w-2">
             <table className="w-full">
-              <thead className="bg-slate-900/50">
+              <thead className="sticky top-0 z-10 bg-slate-900">
                 <tr>
                   <th className="px-4 py-2 text-left text-xs text-slate-400 uppercase">Timestamp</th>
                   <th className="px-4 py-2 text-left text-xs text-slate-400 uppercase">Action</th>
