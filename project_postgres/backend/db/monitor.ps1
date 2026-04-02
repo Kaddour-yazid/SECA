@@ -92,6 +92,8 @@ function Open-TargetFile {
         error = ""
         extension = $ext
         category = $fileCategory
+        process_id = 0
+        process_name = ""
     }
 
     $notepadPath = Join-Path $env:WINDIR "System32\notepad.exe"
@@ -122,89 +124,113 @@ function Open-TargetFile {
     try {
         if ($fileCategory -eq "text") {
             if ($sumatraPath) {
-                Start-Process -FilePath $sumatraPath -ArgumentList @("`"$TargetPath`"") -ErrorAction Stop
+                $proc = Start-Process -FilePath $sumatraPath -ArgumentList @("`"$TargetPath`"") -PassThru -ErrorAction Stop
                 $result.action = "sumatra-text"
                 $result.success = $true
+                $result.process_id = if ($proc) { [int]$proc.Id } else { 0 }
+                $result.process_name = if ($proc) { "$($proc.ProcessName)" } else { "" }
                 return $result
             }
             if (Test-Path $notepadPath) {
-                Start-Process -FilePath $notepadPath -ArgumentList @($TargetPath) -ErrorAction Stop
+                $proc = Start-Process -FilePath $notepadPath -ArgumentList @($TargetPath) -PassThru -ErrorAction Stop
                 $result.action = "notepad"
                 $result.success = $true
+                $result.process_id = if ($proc) { [int]$proc.Id } else { 0 }
+                $result.process_name = if ($proc) { "$($proc.ProcessName)" } else { "" }
                 return $result
             }
         }
 
         if ($fileCategory -eq "pdf") {
             if ($sumatraPath) {
-                Start-Process -FilePath $sumatraPath -ArgumentList @("`"$TargetPath`"") -ErrorAction Stop
+                $proc = Start-Process -FilePath $sumatraPath -ArgumentList @("`"$TargetPath`"") -PassThru -ErrorAction Stop
                 $result.action = "sumatra-pdf"
                 $result.success = $true
+                $result.process_id = if ($proc) { [int]$proc.Id } else { 0 }
+                $result.process_name = if ($proc) { "$($proc.ProcessName)" } else { "" }
                 return $result
             }
-            Start-Process -FilePath $edgePath -ArgumentList @("--inprivate", "--disable-extensions", "--no-first-run", "--new-window", "`"$TargetPath`"") -ErrorAction Stop
+            $proc = Start-Process -FilePath $edgePath -ArgumentList @("--inprivate", "--disable-extensions", "--no-first-run", "--new-window", "`"$TargetPath`"") -PassThru -ErrorAction Stop
             $result.action = "msedge-pdf"
             $result.success = $true
+            $result.process_id = if ($proc) { [int]$proc.Id } else { 0 }
+            $result.process_name = if ($proc) { "$($proc.ProcessName)" } else { "" }
             return $result
         }
 
         if ($fileCategory -eq "executable") {
-            Start-Process -FilePath $TargetPath -ErrorAction Stop
+            $proc = Start-Process -FilePath $TargetPath -WorkingDirectory ([System.IO.Path]::GetDirectoryName($TargetPath)) -PassThru -ErrorAction Stop
             $result.action = "execute"
             $result.success = $true
+            $result.process_id = if ($proc) { [int]$proc.Id } else { 0 }
+            $result.process_name = if ($proc) { "$($proc.ProcessName)" } else { "" }
             return $result
         }
 
         if ($fileCategory -eq "document") {
             if ($libreOfficePath) {
-                Start-Process -FilePath $libreOfficePath -ArgumentList @("`"$TargetPath`"") -ErrorAction Stop
+                $proc = Start-Process -FilePath $libreOfficePath -ArgumentList @("`"$TargetPath`"") -PassThru -ErrorAction Stop
                 $result.action = "libreoffice"
                 $result.success = $true
+                $result.process_id = if ($proc) { [int]$proc.Id } else { 0 }
+                $result.process_name = if ($proc) { "$($proc.ProcessName)" } else { "" }
                 return $result
             }
             if ($sumatraPath) {
-                Start-Process -FilePath $sumatraPath -ArgumentList @("`"$TargetPath`"") -ErrorAction Stop
+                $proc = Start-Process -FilePath $sumatraPath -ArgumentList @("`"$TargetPath`"") -PassThru -ErrorAction Stop
                 $result.action = "sumatra-document"
                 $result.success = $true
+                $result.process_id = if ($proc) { [int]$proc.Id } else { 0 }
+                $result.process_name = if ($proc) { "$($proc.ProcessName)" } else { "" }
                 return $result
             }
         }
 
         if ($fileCategory -eq "archive" -and $sevenZipPath) {
-            Start-Process -FilePath $sevenZipPath -ArgumentList @("`"$TargetPath`"") -ErrorAction Stop
+            $proc = Start-Process -FilePath $sevenZipPath -ArgumentList @("`"$TargetPath`"") -PassThru -ErrorAction Stop
             $result.action = "7zip"
             $result.success = $true
+            $result.process_id = if ($proc) { [int]$proc.Id } else { 0 }
+            $result.process_name = if ($proc) { "$($proc.ProcessName)" } else { "" }
             return $result
         }
 
         if ($fileCategory -eq "media") {
             if ($vlcPath) {
-                Start-Process -FilePath $vlcPath -ArgumentList @("`"$TargetPath`"") -ErrorAction Stop
+                $proc = Start-Process -FilePath $vlcPath -ArgumentList @("`"$TargetPath`"") -PassThru -ErrorAction Stop
                 $result.action = "vlc"
                 $result.success = $true
+                $result.process_id = if ($proc) { [int]$proc.Id } else { 0 }
+                $result.process_name = if ($proc) { "$($proc.ProcessName)" } else { "" }
                 return $result
             }
             if (@(".png", ".jpg", ".jpeg", ".gif", ".bmp") -contains $ext -and (Test-Path $paintPath)) {
-                Start-Process -FilePath $paintPath -ArgumentList @("`"$TargetPath`"") -ErrorAction Stop
+                $proc = Start-Process -FilePath $paintPath -ArgumentList @("`"$TargetPath`"") -PassThru -ErrorAction Stop
                 $result.action = "mspaint"
                 $result.success = $true
+                $result.process_id = if ($proc) { [int]$proc.Id } else { 0 }
+                $result.process_name = if ($proc) { "$($proc.ProcessName)" } else { "" }
                 return $result
             }
         }
 
-        Start-Process -FilePath $cmdPath -ArgumentList @("/c", "start", "", "`"$TargetPath`"") -ErrorAction Stop
+        $proc = Start-Process -FilePath $cmdPath -ArgumentList @("/c", "start", "", "`"$TargetPath`"") -PassThru -ErrorAction Stop
         $result.action = "shell-open"
         $result.success = $true
+        $result.process_id = if ($proc) { [int]$proc.Id } else { 0 }
+        $result.process_name = if ($proc) { "$($proc.ProcessName)" } else { "" }
         return $result
     } catch {
         $result.error = "$_"
     }
 
     try {
-        Start-Process -FilePath $explorerPath -ArgumentList "/select,`"$TargetPath`"" -ErrorAction Stop
+        $proc = Start-Process -FilePath $explorerPath -ArgumentList "/select,`"$TargetPath`"" -PassThru -ErrorAction Stop
         $result.action = "explorer-select"
         $result.success = $true
         $result.error = ""
+        $result.process_id = if ($proc) { [int]$proc.Id } else { 0 }
+        $result.process_name = if ($proc) { "$($proc.ProcessName)" } else { "" }
         return $result
     } catch {
         $result.error = "$_"
@@ -221,6 +247,161 @@ function Open-TargetFile {
     }
 
     return $result
+}
+
+function Get-ProcessSample {
+    try {
+        return @(Get-Process | Select-Object Id, ProcessName, CPU)
+    } catch {
+        Log "ERROR capturing process sample: $_"
+        return @()
+    }
+}
+
+function Get-NetworkSample {
+    try {
+        return @(
+            Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue |
+                Select-Object @{N='protocol';E={'TCP'}}, RemoteAddress, RemotePort
+        )
+    } catch {
+        Log "ERROR capturing network sample: $_"
+        return @()
+    }
+}
+
+function Add-UniqueProcessSample {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Samples,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Seen,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.Generic.List[object]]$Collected
+    )
+
+    foreach ($sample in $Samples) {
+        if ($null -eq $sample) { continue }
+        $procId = 0
+        try { $procId = [int]$sample.Id } catch {}
+        $name = ""
+        if ($sample.PSObject.Properties.Name -contains "ProcessName") { $name = "$($sample.ProcessName)" }
+        $key = "$procId|$name"
+        if ([string]::IsNullOrWhiteSpace($name) -or $Seen.ContainsKey($key)) { continue }
+        $Seen[$key] = $true
+        $Collected.Add([pscustomobject]@{
+            Id = $procId
+            ProcessName = $name
+            CPU = $sample.CPU
+        })
+    }
+}
+
+function Add-UniqueNetworkSample {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Samples,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Seen,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.Generic.List[object]]$Collected
+    )
+
+    foreach ($sample in $Samples) {
+        if ($null -eq $sample) { continue }
+        $protocol = if ($sample.PSObject.Properties.Name -contains "protocol") { "$($sample.protocol)" } else { "TCP" }
+        $remoteAddress = if ($sample.PSObject.Properties.Name -contains "RemoteAddress") { "$($sample.RemoteAddress)" } else { "" }
+        $remotePort = 0
+        try { $remotePort = [int]$sample.RemotePort } catch {}
+        $key = "$protocol|$remoteAddress|$remotePort"
+        if ([string]::IsNullOrWhiteSpace($remoteAddress) -or $Seen.ContainsKey($key)) { continue }
+        $Seen[$key] = $true
+        $Collected.Add([pscustomobject]@{
+            protocol = $protocol
+            RemoteAddress = $remoteAddress
+            RemotePort = $remotePort
+        })
+    }
+}
+
+function New-FileSnapshot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Paths
+    )
+
+    $results = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($root in $Paths) {
+        if ([string]::IsNullOrWhiteSpace($root) -or -not (Test-Path $root)) {
+            continue
+        }
+        try {
+            Get-ChildItem -Path $root -File -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                $results.Add([pscustomobject]@{
+                    FullName = $_.FullName
+                    Length = $_.Length
+                    LastWriteTimeUtc = $_.LastWriteTimeUtc.ToString("o")
+                })
+            }
+        } catch {
+            Log "ERROR capturing file snapshot for $root : $_"
+        }
+    }
+    return $results
+}
+
+function Compare-FileSnapshots {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Before,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$After
+    )
+
+    $beforeIndex = @{}
+    foreach ($item in $Before) {
+        if ($null -eq $item) { continue }
+        $path = "$($item.FullName)"
+        if ([string]::IsNullOrWhiteSpace($path)) { continue }
+        $beforeIndex[$path] = $item
+    }
+
+    $changes = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($item in $After) {
+        if ($null -eq $item) { continue }
+        $path = "$($item.FullName)"
+        if ([string]::IsNullOrWhiteSpace($path)) { continue }
+
+        $action = $null
+        if (-not $beforeIndex.ContainsKey($path)) {
+            $action = "created"
+        } else {
+            $beforeItem = $beforeIndex[$path]
+            $beforeLength = 0
+            $afterLength = 0
+            try { $beforeLength = [int64]$beforeItem.Length } catch {}
+            try { $afterLength = [int64]$item.Length } catch {}
+            $beforeTime = "$($beforeItem.LastWriteTimeUtc)"
+            $afterTime = "$($item.LastWriteTimeUtc)"
+            if ($beforeLength -ne $afterLength -or $beforeTime -ne $afterTime) {
+                $action = "modified"
+            }
+        }
+
+        if ($action) {
+            $changes.Add([pscustomobject]@{
+                FullName = $path
+                action = $action
+            })
+        }
+    }
+    return $changes
 }
 
 $deadline = (Get-Date).AddSeconds($StartupTimeoutSec)
@@ -324,6 +505,36 @@ while ($true) {
             $openError = ""
             $fileExtension = ""
             $fileCategory = ""
+            $launchProcessId = 0
+            $launchProcessName = ""
+            $baselineProcessSeen = @{}
+            $baselineNetworkSeen = @{}
+            $processSeen = @{}
+            $networkSeen = @{}
+            $processSamples = New-Object 'System.Collections.Generic.List[object]'
+            $networkSamples = New-Object 'System.Collections.Generic.List[object]'
+            $startupUser = Join-Path $env:APPDATA "Microsoft\\Windows\\Start Menu\\Programs\\Startup"
+            $startupCommon = Join-Path $env:ProgramData "Microsoft\\Windows\\Start Menu\\Programs\\Startup"
+            $fileWatchRoots = @($ToAnalyze, $env:TEMP, $startupUser, $startupCommon)
+            $baselineFiles = @(New-FileSnapshot -Paths $fileWatchRoots)
+
+            foreach ($sample in (Get-ProcessSample)) {
+                $samplePid = 0
+                try { $samplePid = [int]$sample.Id } catch {}
+                $sampleName = "$($sample.ProcessName)"
+                if (-not [string]::IsNullOrWhiteSpace($sampleName)) {
+                    $baselineProcessSeen["$samplePid|$sampleName"] = $true
+                }
+            }
+            foreach ($sample in (Get-NetworkSample)) {
+                $sampleProtocol = if ($sample.PSObject.Properties.Name -contains "protocol") { "$($sample.protocol)" } else { "TCP" }
+                $sampleAddress = "$($sample.RemoteAddress)"
+                $samplePort = 0
+                try { $samplePort = [int]$sample.RemotePort } catch {}
+                if (-not [string]::IsNullOrWhiteSpace($sampleAddress)) {
+                    $baselineNetworkSeen["$sampleProtocol|$sampleAddress|$samplePort"] = $true
+                }
+            }
 
             if ($scanMode -eq "url") {
                 if ([string]::IsNullOrWhiteSpace($targetUrl) -or -not ($targetUrl -match '^https?://')) {
@@ -359,6 +570,17 @@ while ($true) {
                     $openError = "$($openResult.error)"
                     $fileExtension = "$($openResult.extension)"
                     $fileCategory = "$($openResult.category)"
+                    $launchProcessId = if ($openResult.PSObject.Properties.Name -contains "process_id") { [int]$openResult.process_id } else { 0 }
+                    $launchProcessName = if ($openResult.PSObject.Properties.Name -contains "process_name") { "$($openResult.process_name)" } else { "" }
+                    if ($launchProcessId -gt 0 -and -not [string]::IsNullOrWhiteSpace($launchProcessName)) {
+                        $launchKey = "$launchProcessId|$launchProcessName"
+                        $processSeen[$launchKey] = $true
+                        $processSamples.Add([pscustomobject]@{
+                            Id = $launchProcessId
+                            ProcessName = $launchProcessName
+                            CPU = 0
+                        })
+                    }
                     if ($openSuccess) {
                         Log "File launch succeeded via $openAction category=$fileCategory ext=$fileExtension path=$targetPath"
                     } else {
@@ -370,16 +592,48 @@ while ($true) {
                 }
             }
 
-            Start-Sleep -Seconds $duration
+            $pollSeconds = 2
+            $remaining = $duration
+            while ($remaining -gt 0) {
+                $sleepSeconds = [Math]::Min($pollSeconds, $remaining)
+                Start-Sleep -Seconds $sleepSeconds
+                $remaining -= $sleepSeconds
 
-            (Get-Process | Select-Object Id, ProcessName, CPU) |
+                foreach ($sample in (Get-ProcessSample)) {
+                    $samplePid = 0
+                    try { $samplePid = [int]$sample.Id } catch {}
+                    $sampleName = "$($sample.ProcessName)"
+                    $sampleKey = "$samplePid|$sampleName"
+                    if (-not [string]::IsNullOrWhiteSpace($sampleName) -and -not $baselineProcessSeen.ContainsKey($sampleKey)) {
+                        Add-UniqueProcessSample -Samples @($sample) -Seen $processSeen -Collected $processSamples
+                    }
+                }
+
+                foreach ($sample in (Get-NetworkSample)) {
+                    $sampleProtocol = if ($sample.PSObject.Properties.Name -contains "protocol") { "$($sample.protocol)" } else { "TCP" }
+                    $sampleAddress = "$($sample.RemoteAddress)"
+                    $samplePort = 0
+                    try { $samplePort = [int]$sample.RemotePort } catch {}
+                    $sampleKey = "$sampleProtocol|$sampleAddress|$samplePort"
+                    if (-not [string]::IsNullOrWhiteSpace($sampleAddress) -and -not $baselineNetworkSeen.ContainsKey($sampleKey)) {
+                        Add-UniqueNetworkSample -Samples @($sample) -Seen $networkSeen -Collected $networkSamples
+                    }
+                }
+            }
+
+            $processSamples |
                 ConvertTo-Json -Depth 3 |
                 Out-File (Join-Path $sessionOut "processes_$session.json") -Encoding UTF8
 
-            (Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue |
-                Select-Object @{N='protocol';E={'TCP'}}, RemoteAddress, RemotePort) |
+            $networkSamples |
                 ConvertTo-Json -Depth 3 |
                 Out-File (Join-Path $sessionOut "network_$session.json") -Encoding UTF8
+
+            $afterFiles = @(New-FileSnapshot -Paths $fileWatchRoots)
+            $fileChanges = @(Compare-FileSnapshots -Before $baselineFiles -After $afterFiles)
+            $fileChanges |
+                ConvertTo-Json -Depth 3 |
+                Out-File (Join-Path $sessionOut "files_$session.json") -Encoding UTF8
 
             @{
                 session = $session
@@ -392,6 +646,8 @@ while ($true) {
                 open_error = $openError
                 file_extension = $fileExtension
                 file_category = $fileCategory
+                launch_process_id = $launchProcessId
+                launch_process_name = $launchProcessName
                 shutdown_after_done = $shutdownAfterDone
             } | ConvertTo-Json | Out-File -FilePath (Join-Path $sessionOut "done_$session.json") -Encoding UTF8
 

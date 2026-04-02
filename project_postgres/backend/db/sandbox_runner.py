@@ -343,7 +343,8 @@ def run_dynamic_scan(
         }
 
     if mode == "file":
-        target_path = TO_ANALYZE / safe_name
+        target_name = f"{session}_{safe_name}"
+        target_path = TO_ANALYZE / target_name
         with open(target_path, "wb") as handle:
             handle.write(file_bytes)
         report("Writing file to sandbox share...", 10)
@@ -358,7 +359,7 @@ def run_dynamic_scan(
 
     trigger_path = create_trigger(
         session_id=session,
-        filename=safe_name,
+        filename=target_path.name if mode == "file" else safe_name,
         duration=duration,
         shutdown_after_done=shutdown_after_done,
         scan_mode=mode,

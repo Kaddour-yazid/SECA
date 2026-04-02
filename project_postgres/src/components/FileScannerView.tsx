@@ -645,7 +645,7 @@ export function FileScannerView() {
 
   // â”€â”€â”€ Render â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   return (
-    <div className="flex-1 bg-slate-900 flex flex-col h-full overflow-hidden">
+    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-slate-900">
       <style>{`
         .file-scroll::-webkit-scrollbar{width:14px}
         .file-scroll::-webkit-scrollbar-track{background:#1e293b}
@@ -654,13 +654,13 @@ export function FileScannerView() {
         .file-scroll{scrollbar-width:thin;scrollbar-color:#475569 #1e293b}
       `}</style>
 
-      <div className="p-8 pb-4 flex-shrink-0">
+      <div className="flex-shrink-0 p-4 pb-4 sm:p-6 sm:pb-4 xl:p-8 xl:pb-4">
         <h2 className="text-3xl font-bold text-white mb-1">{translateText('File Scanner')}</h2>
         <p className="text-slate-400 text-sm">{translateText('4-layer static analysis + Windows Sandbox dynamic execution')}</p>
       </div>
 
-      <div className="flex-1 overflow-y-auto min-h-0 px-8 pb-10 file-scroll">
-        <div className="max-w-4xl mx-auto space-y-6">
+      <div className="file-scroll min-h-0 flex-1 overflow-y-auto px-4 pb-8 sm:px-6 sm:pb-10 xl:px-8">
+        <div className="mx-auto max-w-5xl space-y-6">
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             <div className="lg:col-span-2 bg-slate-800/50 border border-slate-700 rounded-xl p-4">
@@ -711,7 +711,7 @@ export function FileScannerView() {
           </div>
 
           {/* Upload */}
-          <div className="bg-slate-800/50 border-2 border-dashed border-slate-600 rounded-xl p-12 text-center hover:border-cyan-500 transition">
+          <div className="bg-slate-800/50 border-2 border-dashed border-slate-600 rounded-xl p-6 text-center transition hover:border-cyan-500 sm:p-10 xl:p-12">
             <input type="file" onChange={handleFileUpload} className="hidden" id="file-upload" disabled={scanning} />
             <label htmlFor="file-upload" className="cursor-pointer block">
               <Upload className="w-14 h-14 text-slate-400 mx-auto mb-4" />
@@ -725,7 +725,7 @@ export function FileScannerView() {
           {/* Static progress */}
           {scanning && (
             <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-8">
-              <div className="grid grid-cols-4 gap-3 mb-6">
+              <div className="mb-6 grid grid-cols-2 gap-3 xl:grid-cols-4">
                 {layerNames.map((name, i) => (
                   <div key={i} className={`rounded-lg p-3 border text-center text-xs font-medium transition ${currentLayer > i ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300' : currentLayer === i+1 ? 'bg-cyan-500/10 border-cyan-500 text-white animate-pulse' : 'bg-slate-900/50 border-slate-600 text-slate-500'}`}>
                     {currentLayer > i ? '✓ ' : ''}{translateText(name)}

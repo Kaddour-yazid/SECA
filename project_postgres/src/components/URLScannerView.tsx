@@ -526,7 +526,7 @@ export function URLScannerView() {
   }, [result, previousResult]);
 
   return (
-    <div className="flex-1 bg-slate-900 overflow-hidden flex flex-col h-full">
+    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-slate-900">
       <style>{`
         .global-scroll::-webkit-scrollbar { width: 14px; }
         .global-scroll::-webkit-scrollbar-track { background: #1e293b; }
@@ -535,7 +535,7 @@ export function URLScannerView() {
         .global-scroll { scrollbar-width: thin; scrollbar-color: #475569 #1e293b; }
       `}</style>
 
-      <div className="p-8 pb-4 flex-shrink-0">
+      <div className="flex-shrink-0 p-4 pb-4 sm:p-6 sm:pb-4 xl:p-8 xl:pb-4">
         <div className="flex items-center justify-between gap-4 mb-4">
           <div>
             <h2 className="text-3xl font-bold text-white mb-2">
@@ -548,7 +548,7 @@ export function URLScannerView() {
             </p>
           </div>
         </div>
-        <div className="inline-flex rounded-xl border border-slate-700 bg-slate-800/60 p-1">
+        <div className="inline-flex flex-wrap rounded-xl border border-slate-700 bg-slate-800/60 p-1">
           <button
             type="button"
             onClick={() => setActiveMode('url')}
@@ -576,11 +576,11 @@ export function URLScannerView() {
         </div>
       </div>
 
-      <div className="overflow-y-auto px-8 pb-8 global-scroll" style={{ height: 'calc(100vh - 180px)' }}>
+      <div className="global-scroll min-h-0 flex-1 overflow-y-auto px-4 pb-8 sm:px-6 xl:px-8">
         {activeMode === 'email' ? (
           <EmailScannerPanel />
         ) : (
-        <div className="max-w-4xl mx-auto space-y-6">
+        <div className="mx-auto max-w-5xl space-y-6">
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             <div className="lg:col-span-2 bg-slate-800/50 border border-slate-700 rounded-xl p-4">
               <div className="flex items-center gap-2 mb-3 text-cyan-300">
@@ -641,7 +641,7 @@ export function URLScannerView() {
             </div>
           </div>
 
-          <form onSubmit={handleScan} className="flex gap-4 mb-6">
+          <form onSubmit={handleScan} className="mb-6 flex flex-col gap-4 lg:flex-row">
             <div className="flex-1 relative">
               <Globe className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
               <input
@@ -657,7 +657,7 @@ export function URLScannerView() {
             <button
               type="submit"
               disabled={scanning || !url}
-              className="px-8 py-4 bg-gradient-to-r from-cyan-500 to-blue-600 text-white font-semibold rounded-lg flex items-center gap-2 hover:from-cyan-600 hover:to-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+              className="flex w-full items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 px-8 py-4 font-semibold text-white transition hover:from-cyan-600 hover:to-blue-700 disabled:cursor-not-allowed disabled:opacity-50 lg:w-auto"
             >
               <Search className="w-5 h-5" />
               {translateText('Search URL')}
@@ -666,7 +666,7 @@ export function URLScannerView() {
 
           {scanning && (
             <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-6 mb-6">
-              <div className="grid grid-cols-4 gap-4 mb-4">
+              <div className="mb-4 grid grid-cols-2 gap-4 xl:grid-cols-4">
                 {layerNames.map((name, idx) => {
                   const Icon = layerIcons[idx];
                   const active = currentLayer === idx + 1;

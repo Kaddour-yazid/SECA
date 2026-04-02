@@ -318,8 +318,8 @@ export function GatewayStartView() {
 
   return (
     <div className="gateway-start global-scroll flex-1 bg-slate-900">
-      <div className="space-y-6 p-8">
-        <div className="flex items-start justify-between gap-4">
+      <div className="space-y-6 p-4 sm:p-6 xl:p-8">
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
           <div>
             <h2 className="mb-2 text-3xl font-bold text-white">{translateText('Monitoring')}</h2>
             <p className="text-slate-400">

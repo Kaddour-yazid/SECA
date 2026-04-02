@@ -5198,18 +5198,28 @@ def _compute_verdict(
     is_url_mode = mode == "url"
     ext = get_file_extension(target_filename or "")
     is_document_open = action in {"msedge-pdf", "notepad", "invoke-item"} or ext in DYNAMIC_DOCUMENT_EXTENSIONS
+    executable_like_actions = {"execute", "shell-open", "test"}
+    executable_like_exts = {".exe", ".dll", ".com", ".scr", ".pif", ".msi", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".wsf", ".hta"}
 
     # Suspicious file writes and registry activity.
     susp_files = [f for f in files if f.get("suspicious")]
+    local_file_changes = [f for f in files if str(f.get("path") or "").strip()]
     susp_reg = [r for r in registry if r.get("suspicious")]
     if susp_files:
         score += 20
         findings.append(f"{len(susp_files)} suspicious file system change(s)")
+    elif local_file_changes and not is_url_mode:
+        if action in executable_like_actions or ext in executable_like_exts:
+            score += 12
+            findings.append(f"{len(local_file_changes)} local file change(s) observed during executable run")
+        else:
+            findings.append(f"{len(local_file_changes)} local file change(s) observed")
     if susp_reg:
         score += 30
         findings.append(f"{len(susp_reg)} suspicious registry write(s) - possible persistence")
 
     high_risk_procs = [p for p in processes if p.get("riskLevel") == "high" or p.get("suspicious")]
+    observed_userland_processes = [p for p in processes if str(p.get("name") or "").strip()]
     contextual_shell = [
         p
         for p in processes
@@ -5225,6 +5235,22 @@ def _compute_verdict(
             f"{len(high_risk_procs)} high-risk process(es) observed: "
             + ", ".join(p["name"] for p in high_risk_procs[:8])
         )
+
+    if (
+        not is_url_mode
+        and open_success is True
+        and (action in executable_like_actions or ext in executable_like_exts)
+    ):
+        if observed_userland_processes:
+            score += 14
+            findings.append(
+                f"{len(observed_userland_processes)} runtime process(es) captured during sample execution"
+            )
+        else:
+            score += 8
+            findings.append(
+                "Sample launch succeeded but only minimal runtime telemetry was captured"
+            )
 
     if contextual_shell:
         if high_risk_procs or susp_files or susp_reg or non_web_net:
@@ -5445,8 +5471,7 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
         done_raw = read_json_file(os.path.join(out_dir, f"done_{session}.json"))
         done_info = done_raw[0] if done_raw and isinstance(done_raw[0], dict) else {}
 
-        # Current monitor writes process+network snapshots only.
-        files_raw = []
+        files_raw = read_json_file(os.path.join(out_dir, f"files_{session}.json"))
         registry_raw = []
 
         update("Analyzing collected behaviour...", 90)
@@ -5460,6 +5485,8 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
         open_error = done_info.get("open_error")
         file_extension = str(done_info.get("file_extension") or "").strip().lower()
         file_category = str(done_info.get("file_category") or "").strip().lower()
+        launch_process_id = done_info.get("launch_process_id")
+        launch_process_name = str(done_info.get("launch_process_name") or "").strip()
         verdict, threat_score, summary = _compute_verdict(
             processes,
             network,
@@ -5496,12 +5523,21 @@ def _run_sandbox_blocking(job_id: str, file_content: bytes, filename: str):
         if open_action:
             launch_state = "success" if open_success is True else "failed" if open_success is False else "unknown"
             summary.insert(0, f"Launch action: {open_action} ({launch_state})")
+        if launch_process_name:
+            pid_label = ""
+            try:
+                launch_pid_int = int(launch_process_id or 0)
+                if launch_pid_int > 0:
+                    pid_label = f" pid={launch_pid_int}"
+            except (TypeError, ValueError):
+                pid_label = ""
+            summary.insert(1, f"Launched process: {launch_process_name}{pid_label}")
         if file_category:
             ext_label = file_extension or get_file_extension(filename)
             if ext_label:
-                summary.insert(1, f"Sandbox opened file as {file_category} ({ext_label})")
+                summary.insert(2, f"Sandbox opened file as {file_category} ({ext_label})")
             else:
-                summary.insert(1, f"Sandbox opened file as {file_category}")
+                summary.insert(2, f"Sandbox opened file as {file_category}")
         if open_error:
             summary.append(f"Launch error: {str(open_error)[:220]}")
         duration = int(time.time() - start_time)

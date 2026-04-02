@@ -202,18 +202,18 @@ export function HashCheckerView() {
 
   return (
     <div className="flex-1 bg-slate-900 global-scroll">
-      <div className="p-8">
+      <div className="p-4 sm:p-6 xl:p-8">
         <h2 className="text-3xl font-bold text-white mb-2">Hash Checker</h2>
         <p className="text-slate-400 mb-8">Check file hashes against malware databases</p>
 
         <div className="max-w-4xl mx-auto">
           {/* Search Form */}
           <form onSubmit={handleScan} className="space-y-4 mb-6">
-            <div className="flex gap-4">
+            <div className="flex flex-col gap-4 lg:flex-row">
               <select
                 value={hashType}
                 onChange={(e) => setHashType(e.target.value as 'MD5' | 'SHA1' | 'SHA256')}
-                className="px-4 py-4 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-cyan-500 transition"
+                className="w-full px-4 py-4 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-cyan-500 transition lg:w-auto"
                 disabled={scanning}
               >
                 <option value="MD5">MD5</option>
@@ -278,7 +278,7 @@ export function HashCheckerView() {
                   <p className="text-slate-500">Hash Value</p>
                   <p className="text-white font-medium font-mono break-all">{result.details.hash}</p>
                 </div>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div>
                     <p className="text-slate-500">Hash Type</p>
                     <p className="text-white font-medium">{result.details.hashType}</p>

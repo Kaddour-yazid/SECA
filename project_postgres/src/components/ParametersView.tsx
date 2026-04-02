@@ -44,7 +44,7 @@ export function ParametersView() {
   ];
 
   return (
-    <div className="flex-1 bg-slate-900 global-scroll p-8 space-y-6">
+    <div className="flex-1 bg-slate-900 global-scroll p-4 sm:p-6 xl:p-8 space-y-6">
       <div>
         <h2 className="text-3xl font-bold text-white">{translateText('Parameters')}</h2>
         <p className="text-slate-400 mt-2">{translateText('Manage your language, appearance, account, and session from one place.')}</p>
