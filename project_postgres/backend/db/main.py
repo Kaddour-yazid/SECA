@@ -1413,7 +1413,7 @@ def _collect_persisted_desktop_sessions_for_admin(current_user: User, db: Sessio
     users = db.query(User).filter(User.id.in_(user_ids)).all() if user_ids else []
     user_map = {user.id: user for user in users}
 
-    payloads: List[Dict[str, Any]] = []
+    latest_by_scope_key: Dict[Tuple[int, str], Dict[str, Any]] = {}
     for row in rows:
         payload = _db_desktop_session_payload(row)
         linked_user = user_map.get(row.user_id)
@@ -1422,9 +1422,41 @@ def _collect_persisted_desktop_sessions_for_admin(current_user: User, db: Sessio
             payload["email"] = linked_user.email
             payload["role"] = linked_user.role
             payload["is_admin"] = bool(linked_user.is_admin)
-        payloads.append(_desktop_session_payload(payload))
+        normalized = _desktop_session_payload(payload)
+        if bool(normalized.get("is_admin")):
+            continue
 
-    return payloads
+        scope_key = (
+            int(normalized.get("user_id") or 0),
+            str(normalized.get("device_id") or normalized.get("hostname") or normalized.get("session_id") or ""),
+        )
+        existing = latest_by_scope_key.get(scope_key)
+        if existing is None:
+            latest_by_scope_key[scope_key] = normalized
+            continue
+
+        existing_online = bool(existing.get("online"))
+        candidate_online = bool(normalized.get("online"))
+        if candidate_online and not existing_online:
+            latest_by_scope_key[scope_key] = normalized
+            continue
+        if existing_online and not candidate_online:
+            continue
+
+        existing_ts = float(existing.get("last_heartbeat_ts") or 0.0)
+        candidate_ts = float(normalized.get("last_heartbeat_ts") or 0.0)
+        if candidate_ts >= existing_ts:
+            latest_by_scope_key[scope_key] = normalized
+
+    payloads = list(latest_by_scope_key.values())
+    payloads.sort(
+        key=lambda item: (
+            not bool(item.get("online")),
+            -float(item.get("last_heartbeat_ts") or 0.0),
+            str(item.get("user_name") or ""),
+        )
+    )
+    return payloads[:limit]
 
 
 def _flush_gateway_audit_queue_sync() -> int:

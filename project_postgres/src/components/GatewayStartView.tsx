@@ -258,6 +258,14 @@ export function GatewayStartView() {
     [scanRows, employeeIds],
   );
 
+  const sortedGroupScans = useMemo(
+    () =>
+      [...groupScans].sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+      ),
+    [groupScans],
+  );
+
   const scanCountByUser = useMemo(() => {
     const counts = new Map<number, number>();
     for (const row of groupScans) {
@@ -290,6 +298,29 @@ export function GatewayStartView() {
     return next;
   }, [desktopSessions]);
 
+  const visibleDesktopSessions = useMemo(
+    () =>
+      [...desktopSessions].sort((a, b) => {
+        if (a.online !== b.online) {
+          return a.online ? -1 : 1;
+        }
+        const aTs = a.last_heartbeat ? new Date(a.last_heartbeat).getTime() : 0;
+        const bTs = b.last_heartbeat ? new Date(b.last_heartbeat).getTime() : 0;
+        return bTs - aTs;
+      }),
+    [desktopSessions],
+  );
+
+  const scopedGatewayHistory = useMemo(
+    () =>
+      [...gatewayHistory].sort((a, b) => {
+        const aTs = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+        const bTs = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+        return bTs - aTs;
+      }),
+    [gatewayHistory],
+  );
+
   const onlineEmployees = useMemo(
     () => realEmployees.filter((entry) => latestSessionByUser.get(entry.id)?.online).length,
     [latestSessionByUser, realEmployees],
@@ -297,18 +328,18 @@ export function GatewayStartView() {
 
   const suspiciousCount = useMemo(
     () =>
-      groupScans.filter(
+      sortedGroupScans.filter(
         (row) => row.status === 'suspicious' || row.status === 'malicious',
       ).length,
-    [groupScans],
+    [sortedGroupScans],
   );
 
   const latestActivity = useMemo(() => {
-    const latest = groupScans[0]?.created_at || null;
+    const latest = sortedGroupScans[0]?.created_at || null;
     return formatDateTime(latest);
-  }, [groupScans]);
+  }, [sortedGroupScans]);
 
-  const recentScans = useMemo(() => groupScans.slice(0, 5), [groupScans]);
+  const recentScans = useMemo(() => sortedGroupScans.slice(0, 5), [sortedGroupScans]);
 
   const tabs: { id: MonitoringTab; label: string; icon: typeof Activity }[] = [
     { id: 'overview', label: translateText('Overview'), icon: Activity },
@@ -639,9 +670,9 @@ export function GatewayStartView() {
 
               <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
                 <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Recent Attached Gateway Usage</p>
-                {gatewayHistory.length ? (
+                {scopedGatewayHistory.length ? (
                   <div className="mt-3 space-y-3">
-                    {gatewayHistory.slice(0, 4).map((event, index) => (
+                    {scopedGatewayHistory.slice(0, 4).map((event, index) => (
                       <div key={`${event.timestamp || 't'}-${index}`} className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
@@ -675,7 +706,7 @@ export function GatewayStartView() {
             </div>
 
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              {desktopSessions.length ? desktopSessions.map((session) => (
+              {visibleDesktopSessions.length ? visibleDesktopSessions.map((session) => (
                 <div key={session.session_id} className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>

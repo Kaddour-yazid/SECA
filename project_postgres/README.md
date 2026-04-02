@@ -54,3 +54,20 @@ Notes:
 - The desktop app starts the backend on `127.0.0.1:8000` if it is not already running.
 - It reuses the backend folder and `.env` configuration shipped with the build.
 - Your PostgreSQL configuration remains unchanged.
+
+Desktop remote-backend mode for a second machine:
+
+- Copy `desktop-config.example.json` to `desktop-config.json`
+- Set:
+
+```json
+{
+  "apiBaseUrl": "http://HOST_MACHINE_IP:8000"
+}
+```
+
+- Place `desktop-config.json` next to the desktop app or inside `project_postgres/`
+- In this mode the desktop client will:
+  - connect to the remote backend instead of `127.0.0.1`
+  - keep the desktop heartbeat running automatically after app launch/login
+  - avoid starting a local backend on the client machine

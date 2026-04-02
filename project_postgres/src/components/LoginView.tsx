@@ -172,7 +172,7 @@ function AuditPreview() {
             <div className={`mt-1 h-2.5 w-2.5 rounded-full ${index === 1 ? 'bg-amber-300' : 'bg-emerald-300'}`} />
             <div className="min-w-0">
               <p className="text-sm font-semibold text-white">{title}</p>
-              <p className="mt-1 text-xs text-slate-500">{time} · {meta}</p>
+              <p className="mt-1 text-xs text-slate-500">{time} ? {meta}</p>
             </div>
           </div>
         ))}
@@ -239,23 +239,23 @@ const featureSlides: FeatureSlide[] = [
 const departmentGroups = {
   RXS: [
     'Infrastructure (Sauvegarde & Stockage)',
-    'Service Système (Messagerie, Identité & Accès)',
-    'Service Interconnexion (Routage, Commutation & Sécurité Périmétrique)',
-    'Service Support (Matériel & Déploiement Logiciel)',
+    'Service Syst?me (Messagerie, Identit? & Acc?s)',
+    'Service Interconnexion (Routage, Commutation & S?curit? P?rim?trique)',
+    'Service Support (Mat?riel & D?ploiement Logiciel)',
     'Service Data Center',
   ],
   SLM: [
     'Groupe GED',
     'Groupe Maintenance',
     'Groupe DBA',
-    'Groupe Développement',
-    'Groupe Qualité',
-    'Groupe Décisionnel & Veille Technologique',
+    'Groupe D?veloppement',
+    'Groupe Qualit?',
+    'Groupe D?cisionnel & Veille Technologique',
   ],
   SSI: [
-    'Pôle SOC & Sécurité des Systèmes',
-    'Pôle Sécurité Industrielle (OT)',
-    'Pôle Sécurité Applicative & Gouvernance',
+    'P?le SOC & S?curit? des Syst?mes',
+    'P?le S?curit? Industrielle (OT)',
+    'P?le S?curit? Applicative & Gouvernance',
   ],
 } as const;
 

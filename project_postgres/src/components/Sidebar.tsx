@@ -71,8 +71,8 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
     ? `pointer-events-none absolute ${isCollapsed ? 'left-2 right-2' : 'left-4 right-4'} rounded-lg bg-gradient-to-r from-sky-300 to-cyan-300 shadow-[0_6px_20px_rgba(56,189,248,0.25)] transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]`
     : `pointer-events-none absolute ${isCollapsed ? 'left-2 right-2' : 'left-4 right-4'} rounded-lg bg-cyan-500 shadow-lg transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]`;
   const settingsButtonClass = isLight
-    ? `inline-flex h-10 ${isCollapsed ? 'w-10' : 'min-w-[56px] px-4'} items-center justify-center rounded-xl border border-[#d9e6f2] bg-white text-slate-700 hover:border-sky-300 hover:text-sky-700 transition-all duration-300`
-    : `inline-flex h-10 ${isCollapsed ? 'w-10' : 'min-w-[56px] px-4'} items-center justify-center rounded-xl border border-slate-700 bg-slate-900/70 text-slate-200 hover:border-cyan-500/40 hover:text-cyan-200 transition-all duration-300`;
+    ? `inline-flex h-10 ${isCollapsed ? 'w-10' : 'min-w-[200px] px-4'} items-center justify-center rounded-xl border border-[#d9e6f2] bg-white text-slate-700 hover:border-sky-300 hover:text-sky-700 transition-all duration-300`
+    : `inline-flex h-10 ${isCollapsed ? 'w-10' : 'min-w-[200px] px-4'} items-center justify-center rounded-xl border border-slate-700 bg-slate-900/70 text-slate-200 hover:border-cyan-500/40 hover:text-cyan-200 transition-all duration-300`;
   const dividerClass = isLight ? 'bg-slate-300/80' : 'bg-white/10';
   const sectionLabelClass = isLight ? 'text-slate-500' : 'text-slate-500';
 
@@ -219,11 +219,16 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
           <button
             type="button"
             onClick={() => onViewChange('settings')}
-            className={`${settingsButtonClass} ${activeView === 'settings' ? (isLight ? 'border-sky-400 text-sky-700' : 'border-cyan-400 text-cyan-200') : ''}`}
+            className={`${settingsButtonClass} ${activeView === 'settings' ? (isLight ? 'border-sky-400 text-sky-700' : 'border-cyan-400 text-cyan-200') : ''} ${isCollapsed ? '' : 'gap-2.5'}`}
             aria-label={translateText('Parameters')}
             title={translateText('Parameters')}
           >
             <Settings className="h-5 w-5" />
+            {!isCollapsed && (
+              <span className="text-sm font-medium">
+                {translateText('Parameters')}
+              </span>
+            )}
           </button>
         </div>
       </div>

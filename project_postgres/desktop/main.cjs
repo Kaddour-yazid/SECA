@@ -2,13 +2,49 @@ const { app, BrowserWindow, dialog, shell } = require('electron');
 const { randomUUID } = require('crypto');
 const fs = require('fs');
 const http = require('http');
+const https = require('https');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const API_HOST = '127.0.0.1';
-const API_PORT = 8000;
+function uniqueExistingPaths(paths) {
+  return [...new Set(paths)].filter((candidate) => candidate && fs.existsSync(candidate));
+}
+
+function loadDesktopConfig() {
+  const candidates = uniqueExistingPaths([
+    path.resolve(__dirname, '..', 'desktop-config.json'),
+    path.join(process.cwd(), 'desktop-config.json'),
+    path.join(path.dirname(process.execPath), 'desktop-config.json'),
+    path.join(process.resourcesPath, 'desktop-config.json'),
+  ]);
+
+  for (const configPath of candidates) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      if (parsed && typeof parsed === 'object') {
+        return parsed;
+      }
+    } catch {
+      // Ignore malformed config files and continue to fallback env/defaults.
+    }
+  }
+
+  return {};
+}
+
+const desktopConfig = loadDesktopConfig();
+const rawApiBase =
+  (process.env.SECA_DESKTOP_API_BASE_URL || desktopConfig.apiBaseUrl || 'http://127.0.0.1:8000').trim();
+const normalizedApiBase = rawApiBase.replace(/\/+$/, '');
+const apiUrl = new URL(normalizedApiBase);
+const API_BASE_URL = normalizedApiBase;
+const API_HOST = apiUrl.hostname || '127.0.0.1';
+const API_PORT = Number(apiUrl.port || (apiUrl.protocol === 'https:' ? 443 : 80));
+const API_PROTOCOL = apiUrl.protocol || 'http:';
 const API_READY_PATH = '/docs';
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+const API_IS_LOCAL = LOOPBACK_HOSTS.has(API_HOST);
 const DESKTOP_HEARTBEAT_DEFAULT_INTERVAL_MS = 15000;
 const DESKTOP_HEARTBEAT_STOP_TIMEOUT_MS = 3000;
 
@@ -23,10 +59,6 @@ let desktopSessionId = null;
 let lastAuthToken = '';
 let desktopDeviceIdentity = null;
 let assignedProxyConfig = null;
-
-function uniqueExistingPaths(paths) {
-  return [...new Set(paths)].filter((candidate) => candidate && fs.existsSync(candidate));
-}
 
 function resolveFrontendEntry() {
   const appRoot = app.isPackaged ? app.getAppPath() : path.resolve(__dirname, '..');
@@ -63,8 +95,10 @@ function resolvePythonCommand(backendDir) {
 
 function isBackendReachable() {
   return new Promise((resolve) => {
-    const req = http.get(
+    const client = API_PROTOCOL === 'https:' ? https : http;
+    const req = client.get(
       {
+        protocol: API_PROTOCOL,
         host: API_HOST,
         port: API_PORT,
         path: API_READY_PATH,
@@ -227,12 +261,14 @@ function requestJson({ method = 'GET', pathName, token, body, timeout = 5000 }) 
       headers['Content-Type'] = 'application/json';
       headers['Content-Length'] = Buffer.byteLength(payload);
     }
-
-    const req = http.request(
+    const targetUrl = new URL(pathName, `${API_BASE_URL}/`);
+    const client = targetUrl.protocol === 'https:' ? https : http;
+    const req = client.request(
       {
-        host: API_HOST,
-        port: API_PORT,
-        path: pathName,
+        protocol: targetUrl.protocol,
+        hostname: targetUrl.hostname,
+        port: targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80),
+        path: `${targetUrl.pathname}${targetUrl.search}`,
         method,
         timeout,
         headers,
@@ -422,6 +458,26 @@ function createWindow() {
     },
   });
 
+  if (!API_IS_LOCAL) {
+    mainWindow.webContents.session.webRequest.onBeforeRequest(
+      {
+        urls: [
+          'http://127.0.0.1:8000/*',
+          'http://localhost:8000/*',
+        ],
+      },
+      (details, callback) => {
+        try {
+          const requested = new URL(details.url);
+          const redirected = new URL(`${requested.pathname}${requested.search}`, `${API_BASE_URL}/`);
+          callback({ redirectURL: redirected.toString() });
+        } catch {
+          callback({});
+        }
+      },
+    );
+  }
+
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
     return { action: 'deny' };
@@ -440,7 +496,7 @@ async function bootstrap() {
     throw new Error('Frontend build not found. Run "npm run build" before launching the desktop app.');
   }
 
-  if (!(await isBackendReachable())) {
+  if (API_IS_LOCAL && !(await isBackendReachable())) {
     startBackend();
   }
 
@@ -448,7 +504,7 @@ async function bootstrap() {
   if (!ready) {
     dialog.showErrorBox(
       'SECA Backend Unavailable',
-      'The desktop app could not reach the backend on http://127.0.0.1:8000.\n\nCheck PostgreSQL and the backend configuration, then try again.',
+      `The desktop app could not reach the backend on ${API_BASE_URL}.\n\nCheck PostgreSQL, backend access, and desktop API configuration, then try again.`,
     );
   }
 
