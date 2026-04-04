@@ -426,6 +426,10 @@ export function AuditLogsView() {
   }, [logs, actionFilter, verdictFilter, dateFilter, searchTerm]);
 
   const uniqueActions = useMemo(() => Array.from(new Set(logs.map((l) => l.action))), [logs]);
+  const activeProxyDevices = useMemo(
+    () => devices.filter((device) => Boolean(device.activity_online)).length,
+    [devices]
+  );
   const selectedDevice = useMemo(() => devices.find((d) => d.client_ip === selectedDeviceIp) || null, [devices, selectedDeviceIp]);
   const parsedDetails = useMemo(() => (detailsLog ? parseAuditDetails(detailsLog.details) : { fields: [], notes: [] }), [detailsLog]);
   const scoreField = useMemo(
@@ -674,9 +678,9 @@ export function AuditLogsView() {
         </div>
 
         <button onClick={() => setShowDevicesPage(true)} className="bg-slate-800/50 border border-slate-700 rounded-xl p-4 text-left hover:border-cyan-500/40 transition">
-          <div className="flex items-center gap-2 text-slate-400 text-sm mb-2"><Laptop className="w-4 h-4 text-cyan-400" />Connected Devices</div>
-          <p className="text-xl font-semibold text-slate-100">{health?.connected_devices ?? 0}</p>
-          <p className="text-xs text-cyan-300 mt-1">Click to open devices page</p>
+          <div className="flex items-center gap-2 text-slate-400 text-sm mb-2"><Laptop className="w-4 h-4 text-cyan-400" />Active Proxy Devices</div>
+          <p className="text-xl font-semibold text-slate-100">{activeProxyDevices}</p>
+          <p className="text-xs text-cyan-300 mt-1">Devices with recent proxy activity</p>
         </button>
 
         <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4">

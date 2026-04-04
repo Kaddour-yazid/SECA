@@ -5,7 +5,7 @@ const http = require('http');
 const https = require('https');
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 function uniqueExistingPaths(paths) {
   return [...new Set(paths)].filter((candidate) => candidate && fs.existsSync(candidate));
@@ -59,6 +59,209 @@ let desktopSessionId = null;
 let lastAuthToken = '';
 let desktopDeviceIdentity = null;
 let assignedProxyConfig = null;
+
+function getManagedProxyStatePath() {
+  return path.join(app.getPath('userData'), 'managed-proxy-state.json');
+}
+
+function readManagedProxyState() {
+  try {
+    const statePath = getManagedProxyStatePath();
+    if (!fs.existsSync(statePath)) {
+      return null;
+    }
+    return JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function writeManagedProxyState(data) {
+  try {
+    const statePath = getManagedProxyStatePath();
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, JSON.stringify(data, null, 2), 'utf8');
+  } catch {
+    // Best-effort persistence only.
+  }
+}
+
+function clearManagedProxyState() {
+  try {
+    const statePath = getManagedProxyStatePath();
+    if (fs.existsSync(statePath)) {
+      fs.unlinkSync(statePath);
+    }
+  } catch {
+    // Ignore cleanup failures.
+  }
+}
+
+function parseProxyTarget(rawValue) {
+  const raw = String(rawValue || '').trim();
+  if (!raw) {
+    return { host: null, port: null, raw };
+  }
+
+  let candidate = raw;
+  if (raw.includes('=')) {
+    const segments = raw.split(';').map((segment) => segment.trim()).filter(Boolean);
+    const preferred =
+      segments.find((segment) => segment.toLowerCase().startsWith('https=')) ||
+      segments.find((segment) => segment.toLowerCase().startsWith('http=')) ||
+      segments[0];
+    candidate = preferred.includes('=') ? preferred.split('=').slice(1).join('=').trim() : preferred;
+  }
+
+  candidate = candidate.replace(/^https?:\/\//i, '').trim();
+  const hostPortMatch = candidate.match(/^([^:;]+)(?::(\d+))?/);
+  if (!hostPortMatch) {
+    return { host: null, port: null, raw };
+  }
+
+  const host = (hostPortMatch[1] || '').trim() || null;
+  const parsedPort = hostPortMatch[2] ? Number(hostPortMatch[2]) : null;
+  return {
+    host,
+    port: Number.isFinite(parsedPort) ? parsedPort : null,
+    raw,
+  };
+}
+
+function getWindowsProxyState() {
+  if (process.platform !== 'win32') {
+    return {
+      supported: false,
+      enabled: false,
+      host: null,
+      port: null,
+      raw: null,
+      status: 'unsupported',
+    };
+  }
+
+  const script = [
+    '$key = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"',
+    '$item = Get-ItemProperty -Path $key',
+    '$result = @{',
+    '  ProxyEnable = [bool]($item.ProxyEnable)',
+    '  ProxyServer = [string]($item.ProxyServer)',
+    '}',
+    '$result | ConvertTo-Json -Compress',
+  ].join('; ');
+
+  try {
+    const powershell = process.env.ComSpec && process.platform === 'win32' ? 'powershell.exe' : 'powershell';
+    const probe = spawnSync(powershell, ['-NoProfile', '-Command', script], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 4000,
+    });
+
+    if (probe.status !== 0) {
+      return {
+        supported: true,
+        enabled: false,
+        host: null,
+        port: null,
+        raw: null,
+        status: 'error',
+      };
+    }
+
+    const parsed = JSON.parse((probe.stdout || '').trim() || '{}');
+    const enabled = Boolean(parsed.ProxyEnable);
+    const target = parseProxyTarget(parsed.ProxyServer);
+    return {
+      supported: true,
+      enabled: enabled && Boolean(target.host),
+      host: enabled ? target.host : null,
+      port: enabled ? target.port : null,
+      raw: target.raw || null,
+      status: enabled && target.host ? 'enabled' : 'disabled',
+    };
+  } catch {
+    return {
+      supported: true,
+      enabled: false,
+      host: null,
+      port: null,
+      raw: null,
+      status: 'error',
+    };
+  }
+}
+
+function setWindowsProxyState(state) {
+  if (process.platform !== 'win32') {
+    return false;
+  }
+
+  const enabled = Boolean(state && state.enabled);
+  const rawProxyServer = enabled
+    ? String(state.raw || `${state.host || ''}${state.port ? `:${state.port}` : ''}`).trim()
+    : String((state && state.raw) || '').trim();
+  const escapedProxyServer = rawProxyServer.replace(/'/g, "''");
+  const script = [
+    '$key = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"',
+    `$proxyEnable = ${enabled ? 1 : 0}`,
+    `$proxyServer = '${escapedProxyServer}'`,
+    'Set-ItemProperty -Path $key -Name ProxyEnable -Value $proxyEnable',
+    'Set-ItemProperty -Path $key -Name ProxyServer -Value $proxyServer',
+  ].join('; ');
+
+  try {
+    const powershell = process.env.ComSpec && process.platform === 'win32' ? 'powershell.exe' : 'powershell';
+    const probe = spawnSync(powershell, ['-NoProfile', '-Command', script], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 5000,
+    });
+    return probe.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+function restoreManagedProxyIfNeeded() {
+  const stored = readManagedProxyState();
+  if (!stored || !stored.original) {
+    return false;
+  }
+
+  const restored = setWindowsProxyState(stored.original);
+  if (restored) {
+    clearManagedProxyState();
+  }
+  return restored;
+}
+
+function ensureAdminProxyApplied(assignment) {
+  if (!assignment || !assignment.enabled || !assignment.proxy_host || !assignment.proxy_port) {
+    restoreManagedProxyIfNeeded();
+    return false;
+  }
+
+  const stored = readManagedProxyState();
+  if (!stored || !stored.original) {
+    const current = getWindowsProxyState();
+    writeManagedProxyState({
+      original: {
+        enabled: Boolean(current.enabled),
+        host: current.host || null,
+        port: current.port || null,
+        raw: current.raw || '',
+      },
+    });
+  }
+
+  return setWindowsProxyState({
+    enabled: true,
+    host: assignment.proxy_host,
+    port: assignment.proxy_port,
+    raw: `${assignment.proxy_host}:${assignment.proxy_port}`,
+  });
+}
 
 function resolveFrontendEntry() {
   const appRoot = app.isPackaged ? app.getAppPath() : path.resolve(__dirname, '..');
@@ -332,6 +535,7 @@ async function readRendererToken() {
 
 async function sendDesktopHeartbeat(token) {
   const device = getDesktopDeviceIdentity();
+  const proxyState = getWindowsProxyState();
   const response = await requestJson({
     method: 'POST',
     pathName: '/desktop/session/heartbeat',
@@ -343,8 +547,8 @@ async function sendDesktopHeartbeat(token) {
       app_version: app.getVersion(),
       platform: process.platform,
       local_ips: getLocalIPv4Addresses(),
-      proxy_host: assignedProxyConfig && assignedProxyConfig.enabled ? assignedProxyConfig.proxy_host : null,
-      proxy_port: assignedProxyConfig && assignedProxyConfig.enabled ? assignedProxyConfig.proxy_port : null,
+      proxy_host: proxyState.enabled ? proxyState.host : null,
+      proxy_port: proxyState.enabled ? proxyState.port : null,
     },
   });
 
@@ -399,6 +603,8 @@ async function runDesktopHeartbeatTick() {
       if (lastAuthToken && desktopSessionId) {
         await stopDesktopSession('token-cleared', lastAuthToken);
       }
+      restoreManagedProxyIfNeeded();
+      assignedProxyConfig = null;
       lastAuthToken = '';
       return;
     }
@@ -408,6 +614,37 @@ async function runDesktopHeartbeatTick() {
     }
 
     lastAuthToken = token;
+    let currentUser = null;
+    try {
+      currentUser = await requestJson({
+        method: 'GET',
+        pathName: '/me',
+        token,
+      });
+    } catch {
+      currentUser = null;
+    }
+
+    if (currentUser && currentUser.is_admin) {
+      try {
+        const config = await requestJson({
+          method: 'GET',
+          pathName: '/desktop/session/config',
+          token,
+        });
+        assignedProxyConfig = config && config.proxy_assignment ? config.proxy_assignment : null;
+        if (config && Number.isFinite(config.heartbeat_interval_seconds)) {
+          desktopHeartbeatIntervalMs = Math.max(5000, Number(config.heartbeat_interval_seconds) * 1000);
+        }
+        ensureAdminProxyApplied(assignedProxyConfig);
+      } catch {
+        assignedProxyConfig = null;
+      }
+    } else {
+      assignedProxyConfig = null;
+      restoreManagedProxyIfNeeded();
+    }
+
     await sendDesktopHeartbeat(token);
   } catch (error) {
     process.stderr.write(`[SECA desktop] Heartbeat error: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -514,6 +751,7 @@ async function bootstrap() {
 
 app.whenReady().then(async () => {
   try {
+    restoreManagedProxyIfNeeded();
     await bootstrap();
   } catch (error) {
     dialog.showErrorBox(
@@ -528,6 +766,7 @@ app.on('before-quit', () => {
   isQuitting = true;
   stopDesktopHeartbeatLoop();
   void stopDesktopSession('app-exit');
+  restoreManagedProxyIfNeeded();
   stopBackend();
 });
 

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Query, BackgroundTasks, Header
+from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Query, BackgroundTasks, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import OAuth2PasswordBearer
@@ -466,6 +466,11 @@ class DesktopSessionHeartbeat(BaseModel):
     local_ips: Optional[List[str]] = None
     proxy_host: Optional[str] = None
     proxy_port: Optional[int] = None
+
+
+def _is_web_session_payload(payload: DesktopSessionHeartbeat) -> bool:
+    app_version = str(payload.app_version or "").strip().lower()
+    return app_version.startswith("web")
 
 
 class DesktopSessionStop(BaseModel):
@@ -974,11 +979,12 @@ def _mark_proxy_client_activity(client_ip: str, update_last_seen: bool = False) 
 
 
 def _is_client_online_locked(client_ip: str, now_ts: Optional[float] = None) -> bool:
-    del now_ts
-    # Presence is based on currently open proxy sockets. This keeps AFK
-    # clients online while they stay connected, and marks them offline
-    # as soon as the last proxy connection closes.
-    return gateway_active_connections.get(client_ip, 0) > 0
+    if now_ts is None:
+        now_ts = time.time()
+    # Treat a proxy client as online only while it still has fresh proxy
+    # activity. This prevents stale sockets from keeping a device "connected"
+    # long after the proxy was disabled on the client machine.
+    return _is_client_activity_online_locked(client_ip, now_ts)
 
 
 def _is_client_activity_online_locked(client_ip: str, now_ts: Optional[float] = None) -> bool:
@@ -1184,6 +1190,48 @@ def _desktop_session_payload(session: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _desktop_proxy_state_label(session: Dict[str, Any], assignment: Optional[GroupProxyAssignment]) -> str:
+    if not bool(session.get("online", False)):
+        return "offline"
+    if str(session.get("app_version") or "").strip().lower().startswith("web"):
+        return "browser-unavailable"
+    if not assignment:
+        return "unassigned"
+
+    actual_host = str(session.get("proxy_host") or "").strip().lower()
+    actual_port = int(session.get("proxy_port") or 0) if session.get("proxy_port") else 0
+    assigned_host = str(assignment.proxy_host or "").strip().lower()
+    assigned_port = int(assignment.proxy_port or 0) if assignment.proxy_port else 0
+
+    if not actual_host or actual_port <= 0:
+        return "disabled"
+    if actual_host == assigned_host and actual_port == assigned_port:
+        return "ok"
+    return "mismatch"
+
+
+def _desktop_proxy_status_details(
+        session: Dict[str, Any],
+        previous_state: str,
+        current_state: str,
+        assignment: Optional[GroupProxyAssignment]
+) -> str:
+    device_label = session.get("hostname") or session.get("device_id") or "unknown-device"
+    user_name = session.get("user_name") or session.get("email") or f"user-{session.get('user_id')}"
+    expected = (
+        f"{assignment.proxy_host}:{assignment.proxy_port}"
+        if assignment and assignment.proxy_host and assignment.proxy_port
+        else "none"
+    )
+    actual_host = str(session.get("proxy_host") or "").strip()
+    actual_port = int(session.get("proxy_port") or 0) if session.get("proxy_port") else 0
+    actual = f"{actual_host}:{actual_port}" if actual_host and actual_port > 0 else "disabled-or-missing"
+    return (
+        f"{user_name} on {device_label} changed proxy state "
+        f"from {previous_state} to {current_state}. expected={expected} actual={actual}"
+    )
+
+
 def _persist_desktop_session_state(session: Dict[str, Any]) -> None:
     session_started_at = datetime.fromisoformat(session["started_at"]) if session.get("started_at") else datetime.utcnow()
     session_last_heartbeat = datetime.fromisoformat(session["last_heartbeat"]) if session.get("last_heartbeat") else datetime.utcnow()
@@ -1316,21 +1364,33 @@ def _find_existing_desktop_session(user: User, device_id: str, session_id: Optio
     return session_for_device
 
 
-def _touch_desktop_session(user: User, payload: DesktopSessionHeartbeat) -> Tuple[Dict[str, Any], bool]:
+def _touch_desktop_session(user: User, payload: DesktopSessionHeartbeat, client_host: Optional[str] = None) -> Tuple[Dict[str, Any], bool]:
     now_dt = datetime.utcnow()
     now_iso = now_dt.isoformat()
     now_ts = now_dt.timestamp()
     normalized_device_id = str(payload.device_id or "").strip() or f"user-{user.id}"
-    normalized_hostname = str(payload.hostname or "").strip() or normalized_device_id
-    normalized_platform = str(payload.platform or "").strip() or ""
     normalized_app_version = str(payload.app_version or "").strip() or ""
+    normalized_client_host = str(client_host or "").strip()
+    normalized_hostname = str(payload.hostname or "").strip()
+    if not normalized_hostname:
+        if normalized_app_version.lower().startswith("web"):
+            normalized_hostname = f"Web client ({normalized_client_host})" if normalized_client_host else "Web client"
+        else:
+            normalized_hostname = normalized_device_id
+    normalized_platform = str(payload.platform or "").strip() or ""
     normalized_local_ips = _normalize_local_ip_list(payload.local_ips)
+    if not normalized_local_ips and normalized_client_host:
+        normalized_local_ips = [normalized_client_host]
     normalized_proxy_host = str(payload.proxy_host or "").strip() or None
     normalized_proxy_port = payload.proxy_port if payload.proxy_port and payload.proxy_port > 0 else None
     created = False
+    assignment = _group_proxy_assignment_for_scope(user.department, user.group_name)
+    previous_proxy_state: Optional[str] = None
 
     with desktop_session_lock:
         session = _find_existing_desktop_session(user, normalized_device_id, payload.session_id)
+        if session:
+            previous_proxy_state = _desktop_proxy_state_label(session, assignment)
         if not session:
             created = True
             session = {
@@ -1375,9 +1435,19 @@ def _touch_desktop_session(user: User, payload: DesktopSessionHeartbeat) -> Tupl
             session["online"] = True
             session["disconnect_reason"] = None
 
+    current_proxy_state = _desktop_proxy_state_label(session, assignment)
     _persist_desktop_session_state(session)
     if created:
         _emit_desktop_presence_audit(session, True)
+    elif (
+        previous_proxy_state
+        and previous_proxy_state != current_proxy_state
+        and current_proxy_state != "browser-unavailable"
+    ):
+        _emit_system_audit_log(
+            "Desktop Proxy State Changed",
+            _desktop_proxy_status_details(session, previous_proxy_state, current_proxy_state, assignment),
+        )
     return _desktop_session_payload(session), created
 
 
@@ -1443,6 +1513,11 @@ def _collect_persisted_desktop_sessions_for_admin(current_user: User, db: Sessio
             payload["role"] = linked_user.role
             payload["is_admin"] = bool(linked_user.is_admin)
         normalized = _desktop_session_payload(payload)
+        assignment = _group_proxy_assignment_for_scope(normalized.get("department"), normalized.get("group_name"), db=db)
+        if assignment:
+            normalized["assigned_proxy_host"] = assignment.proxy_host
+            normalized["assigned_proxy_port"] = assignment.proxy_port
+        normalized["proxy_state"] = _desktop_proxy_state_label(normalized, assignment)
         if bool(normalized.get("is_admin")):
             continue
 
@@ -2273,7 +2348,10 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
     ],
+    allow_origin_regex=r"^https?://((localhost|127\.0\.0\.1)|(\d{1,3}\.){3}\d{1,3})(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -5248,7 +5326,9 @@ async def get_desktop_session_config(
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
-    assignment = _group_proxy_assignment_for_scope(current_user.department, current_user.group_name, db=db)
+    assignment = None
+    if bool(current_user.is_admin):
+        assignment = _group_proxy_assignment_for_scope(current_user.department, current_user.group_name, db=db)
     return {
         "heartbeat_interval_seconds": SECA_DESKTOP_HEARTBEAT_INTERVAL_SECONDS,
         "heartbeat_timeout_seconds": SECA_DESKTOP_HEARTBEAT_TIMEOUT_SECONDS,
@@ -5269,6 +5349,8 @@ async def get_current_group_proxy_assignment(
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
+    if not bool(current_user.is_admin):
+        return {"assignment": None}
     assignment = _group_proxy_assignment_for_scope(current_user.department, current_user.group_name, db=db)
     if not assignment:
         return {"assignment": None}
@@ -5287,15 +5369,15 @@ async def get_current_group_proxy_assignment(
 @app.post("/desktop/session/heartbeat")
 async def desktop_session_heartbeat(
         payload: DesktopSessionHeartbeat,
+        request: Request,
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
-    assignment = _group_proxy_assignment_for_scope(current_user.department, current_user.group_name, db=db)
-    if assignment and not payload.proxy_host:
-        payload.proxy_host = assignment.proxy_host
-    if assignment and not payload.proxy_port:
-        payload.proxy_port = assignment.proxy_port
-    session, created = await asyncio.to_thread(_touch_desktop_session, current_user, payload)
+    assignment = None
+    if bool(current_user.is_admin):
+        assignment = _group_proxy_assignment_for_scope(current_user.department, current_user.group_name, db=db)
+    client_host = request.client.host if request.client else None
+    session, created = await asyncio.to_thread(_touch_desktop_session, current_user, payload, client_host)
     return {
         "ok": True,
         "created": created,

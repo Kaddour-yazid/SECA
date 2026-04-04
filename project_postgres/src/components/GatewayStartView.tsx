@@ -51,6 +51,9 @@ type DesktopSessionRow = {
   app_version?: string | null;
   proxy_host?: string | null;
   proxy_port?: number | null;
+  assigned_proxy_host?: string | null;
+  assigned_proxy_port?: number | null;
+  proxy_state?: string | null;
   started_at?: string | null;
   last_heartbeat?: string | null;
   online: boolean;
@@ -113,6 +116,95 @@ const formatDateTime = (value: string | null) => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return 'No activity yet';
   return date.toLocaleString();
+};
+
+const formatProxyEndpoint = (host?: string | null, port?: number | null) => {
+  const normalizedHost = (host || '').trim();
+  if (!normalizedHost) return 'Not detected';
+  return port ? `${normalizedHost}:${port}` : normalizedHost;
+};
+
+const proxyStateMeta = (state?: string | null) => {
+  switch (state) {
+    case 'ok':
+      return {
+        label: 'Proxy OK',
+        className: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
+      };
+    case 'disabled':
+      return {
+        label: 'Proxy Disabled',
+        className: 'border-red-500/30 bg-red-500/10 text-red-300',
+      };
+    case 'mismatch':
+      return {
+        label: 'Proxy Mismatch',
+        className: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+      };
+    case 'browser-unavailable':
+      return {
+        label: 'Browser Mode',
+        className: 'border-sky-500/30 bg-sky-500/10 text-sky-300',
+      };
+    case 'offline':
+      return {
+        label: 'Offline',
+        className: 'border-slate-700 bg-slate-800/70 text-slate-300',
+      };
+    default:
+      return {
+        label: 'No Assignment',
+        className: 'border-slate-700 bg-slate-800/70 text-slate-300',
+      };
+  }
+};
+
+const isProxyConnected = (session?: DesktopSessionRow) =>
+  Boolean(session?.online && session?.proxy_state === 'ok');
+
+const connectionSummary = (session?: DesktopSessionRow) => {
+  if (!session) {
+    return {
+      label: 'No session yet',
+      tone: 'text-slate-500',
+      badge: 'Registered',
+      badgeClass: 'border-slate-700 bg-slate-800/70 text-slate-300',
+    };
+  }
+
+  if (!session.online) {
+    return {
+      label: `Last heartbeat ${formatDateTime(session.last_heartbeat || null)}`,
+      tone: 'text-slate-500',
+      badge: 'Offline',
+      badgeClass: 'border-slate-700 bg-slate-800/70 text-slate-300',
+    };
+  }
+
+  if (session.proxy_state === 'ok') {
+    return {
+      label: `Proxy connected from ${session.hostname || session.device_id || 'desktop'}`,
+      tone: 'text-emerald-300',
+      badge: 'Proxy Connected',
+      badgeClass: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
+    };
+  }
+
+  if (session.proxy_state === 'browser-unavailable') {
+    return {
+      label: 'Browser session active, proxy state unavailable',
+      tone: 'text-sky-300',
+      badge: 'Browser Session',
+      badgeClass: 'border-sky-500/30 bg-sky-500/10 text-sky-300',
+    };
+  }
+
+  return {
+    label: 'Session active, but proxy is disabled or mismatched',
+    tone: 'text-amber-300',
+    badge: 'Proxy Off',
+    badgeClass: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+  };
 };
 
 export function GatewayStartView() {
@@ -321,8 +413,8 @@ export function GatewayStartView() {
     [gatewayHistory],
   );
 
-  const onlineEmployees = useMemo(
-    () => realEmployees.filter((entry) => latestSessionByUser.get(entry.id)?.online).length,
+  const proxyConnectedEmployees = useMemo(
+    () => realEmployees.filter((entry) => isProxyConnected(latestSessionByUser.get(entry.id))).length,
     [latestSessionByUser, realEmployees],
   );
 
@@ -397,10 +489,10 @@ export function GatewayStartView() {
           </div>
           <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4">
             <div className="mb-2 flex items-center justify-between">
-              <p className="text-sm text-slate-400">Online Employees</p>
+              <p className="text-sm text-slate-400">Proxy Connected Employees</p>
               <Activity className="h-5 w-5 text-emerald-400" />
             </div>
-            <p className="text-3xl font-bold text-white">{onlineEmployees}</p>
+            <p className="text-3xl font-bold text-white">{proxyConnectedEmployees}</p>
           </div>
           <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4">
             <div className="mb-2 flex items-center justify-between">
@@ -467,6 +559,7 @@ export function GatewayStartView() {
                 <div className="space-y-3">
                   {employeeSlots.map((entry) => {
                     const latestSession = entry.id ? latestSessionByUser.get(entry.id) : undefined;
+                    const status = connectionSummary(latestSession);
                     return (
                       <div
                         key={entry.key}
@@ -483,10 +576,8 @@ export function GatewayStartView() {
                               {entry.email || 'Waiting for first employee login'}
                             </p>
                             {latestSession ? (
-                              <p className="mt-2 text-xs text-slate-500">
-                                {latestSession.online
-                                  ? `Connected from ${latestSession.hostname || latestSession.device_id || 'desktop'}`
-                                  : `Last heartbeat ${formatDateTime(latestSession.last_heartbeat || null)}`}
+                              <p className={`mt-2 text-xs ${status.tone}`}>
+                                {status.label}
                               </p>
                             ) : null}
                           </div>
@@ -494,16 +585,12 @@ export function GatewayStartView() {
                             className={`rounded-full border px-3 py-1 text-xs font-semibold ${
                               entry.state !== 'registered'
                                 ? 'border-slate-700 bg-slate-800/70 text-slate-400'
-                                : latestSession?.online
-                                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-                                  : 'border-slate-700 bg-slate-800/70 text-slate-300'
+                                : status.badgeClass
                             }`}
                           >
                             {entry.state !== 'registered'
                               ? 'Placeholder'
-                              : latestSession?.online
-                                ? 'Online'
-                                : 'Registered'}
+                              : status.badge}
                           </span>
                         </div>
                       </div>
@@ -561,6 +648,7 @@ export function GatewayStartView() {
               {employeeSlots.map((entry) => {
                 const scanCount = entry.id ? scanCountByUser.get(entry.id) || 0 : 0;
                 const latestSession = entry.id ? latestSessionByUser.get(entry.id) : undefined;
+                const status = connectionSummary(latestSession);
                 return (
                   <div
                     key={entry.key}
@@ -585,16 +673,12 @@ export function GatewayStartView() {
                           className={`rounded-full border px-3 py-1 text-xs font-semibold ${
                             entry.state !== 'registered'
                               ? 'border-slate-700 bg-slate-800/70 text-slate-400'
-                              : latestSession?.online
-                                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-                                : 'border-slate-700 bg-slate-800/70 text-slate-300'
+                              : status.badgeClass
                           }`}
                         >
                           {entry.state !== 'registered'
                             ? 'Placeholder'
-                            : latestSession?.online
-                              ? 'Online'
-                              : 'Offline'}
+                            : status.badge}
                         </span>
                       </div>
                     </div>
@@ -619,13 +703,21 @@ export function GatewayStartView() {
                       <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
                         <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Device</p>
                         <p className="mt-2 text-sm font-medium text-slate-200">
-                          {latestSession?.hostname || 'No desktop session'}
+                          {latestSession?.hostname || 'No active session'}
                         </p>
                       </div>
                       <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
                         <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Last heartbeat</p>
                         <p className="mt-2 text-sm font-medium text-slate-200">
                           {latestSession ? formatDateTime(latestSession.last_heartbeat || null) : 'No session yet'}
+                        </p>
+                      </div>
+                      <div className="col-span-2 rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Connection Status</p>
+                        <p className={`mt-2 text-sm font-medium ${status.tone}`}>
+                          {entry.state !== 'registered'
+                            ? 'This employee slot is still empty.'
+                            : status.label}
                         </p>
                       </div>
                     </div>
@@ -640,12 +732,13 @@ export function GatewayStartView() {
           <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
             <div className="mb-5 flex items-center gap-2">
               <Briefcase className="h-5 w-5 text-cyan-300" />
-              <h3 className="text-xl font-bold text-white">Desktop Session Presence</h3>
+              <h3 className="text-xl font-bold text-white">Client Session Presence</h3>
             </div>
 
             <div className="mb-5 rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4 text-sm leading-6 text-slate-300">
-              Presence is now based on explicit desktop heartbeats sent by the executable. A worker
-              stays online while the app is still connected, even if no proxy traffic is flowing.
+              Presence is based on explicit app and browser heartbeats, while proxy compliance is
+              tracked separately. A worker can be online but still show Proxy Disabled or Proxy
+              Mismatch if the enterprise proxy is no longer active.
             </div>
 
             <div className="mb-5 grid grid-cols-1 gap-4 lg:grid-cols-[0.9fr_1.1fr]">
@@ -699,7 +792,7 @@ export function GatewayStartView() {
                   </div>
                 ) : (
                   <p className="mt-3 text-sm text-slate-400">
-                    No attached gateway events yet. Once workers use the proxy, events will appear here under the active desktop session.
+                    No attached gateway events yet. Once workers use the proxy, events will appear here under the active session.
                   </p>
                 )}
               </div>
@@ -708,20 +801,29 @@ export function GatewayStartView() {
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               {visibleDesktopSessions.length ? visibleDesktopSessions.map((session) => (
                 <div key={session.session_id} className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                  {(() => {
+                    const proxyBadge = proxyStateMeta(session.proxy_state);
+                    return (
+                      <>
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <p className="text-sm font-semibold text-white">{session.user_name}</p>
                       <p className="mt-1 text-xs text-slate-400">{session.email}</p>
                     </div>
-                    <span
-                      className={`rounded-full border px-3 py-1 text-xs font-semibold ${
-                        session.online
-                          ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-                          : 'border-slate-700 bg-slate-800/70 text-slate-300'
-                      }`}
-                    >
-                      {session.online ? 'Online' : 'Offline'}
-                    </span>
+                    <div className="flex flex-col items-end gap-2">
+                      <span
+                        className={`rounded-full border px-3 py-1 text-xs font-semibold ${
+                          session.online
+                            ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                            : 'border-slate-700 bg-slate-800/70 text-slate-300'
+                        }`}
+                      >
+                        {session.online ? 'Online' : 'Offline'}
+                      </span>
+                      <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${proxyBadge.className}`}>
+                        {proxyBadge.label}
+                      </span>
+                    </div>
                   </div>
 
                   <div className="mt-4 grid grid-cols-2 gap-3">
@@ -749,12 +851,29 @@ export function GatewayStartView() {
                         {session.disconnect_reason || 'Active'}
                       </p>
                     </div>
+                    <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                      <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Expected Proxy</p>
+                      <p className="mt-2 text-sm font-medium text-slate-200">
+                        {formatProxyEndpoint(session.assigned_proxy_host, session.assigned_proxy_port)}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                      <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Detected Proxy</p>
+                      <p className="mt-2 text-sm font-medium text-slate-200">
+                        {session.proxy_state === 'browser-unavailable'
+                          ? 'Unavailable in browser mode'
+                          : formatProxyEndpoint(session.proxy_host, session.proxy_port)}
+                      </p>
+                    </div>
                   </div>
+                      </>
+                    );
+                  })()}
                 </div>
               )) : (
                 <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/35 p-5 text-sm text-slate-400">
-                  No desktop sessions detected yet for the current group. Once workers open the
-                  executable and authenticate, their presence will appear here automatically.
+                  No sessions detected yet for the current group. Once workers open the desktop app
+                  or browser interface and authenticate, their presence will appear here automatically.
                 </div>
               )}
             </div>
