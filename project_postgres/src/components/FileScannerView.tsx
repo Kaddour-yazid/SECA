@@ -23,9 +23,21 @@ type ScanResult = {
     fileName: string; fileSize: number; fileType: string;
     layers: {
       layer1_info: { fileName: string; fileSize: number; fileType: string; entropy: number; extension: string; riskCategory: RiskCategory };
-      layer2_hashes: { md5: string; sha1: string; sha256: string; databaseMatch: boolean; detections: number; engines: number; malwareFamily?: string };
+      layer2_hashes: {
+        md5: string; sha1: string; sha256: string; databaseMatch: boolean; detections: number; engines: number; malwareFamily?: string;
+        sources?: string[]; evidence?: string[]; knownGoodMatch?: boolean; knownGoodName?: string | null; knownGoodProduct?: string | null; firstSeen?: string | null;
+      };
       layer3_threats: { threats: Threat[]; totalScore: number };
-      layer4_code: { suspiciousStrings: string[]; packerDetected: string | null; obfuscated: boolean; imports: string[]; anomalies: string[] };
+      layer4_code: {
+        suspiciousStrings: string[]; packerDetected: string | null; obfuscated: boolean; imports: string[]; anomalies: string[];
+        signature?: {
+          checked?: boolean; available?: boolean; isSigned?: boolean; status?: string | null; statusMessage?: string | null;
+          subject?: string | null; issuer?: string | null; thumbprint?: string | null; notBefore?: string | null; notAfter?: string | null; error?: string | null;
+        };
+        clamav?: {
+          checked?: boolean; available?: boolean; engine?: string | null; found?: boolean; signature?: string | null; rawResult?: string | null; error?: string | null;
+        };
+      };
     };
   };
 };
@@ -828,7 +840,35 @@ export function FileScannerView() {
                 </div>
                 <div className={`rounded-lg p-3 border ${result.details.layers.layer2_hashes.databaseMatch?'bg-red-500/10 border-red-500/30':'bg-green-500/10 border-green-500/30'}`}>
                   <p className="font-medium mb-1">{translateText(result.details.layers.layer2_hashes.databaseMatch ? 'Hash found in malware database' : 'Not found in malware database')}</p>
-                  {result.details.layers.layer2_hashes.databaseMatch && <div className="text-sm text-red-300 space-y-1"><p>{translateText('Detections')}: {result.details.layers.layer2_hashes.detections} / {result.details.layers.layer2_hashes.engines} engines</p><p>{translateText('Malware Family:')} {result.details.layers.layer2_hashes.malwareFamily}</p></div>}
+                  {result.details.layers.layer2_hashes.databaseMatch && (
+                    <div className="space-y-1 text-sm text-red-300">
+                      <p>{translateText('Detections')}: {result.details.layers.layer2_hashes.detections} / {result.details.layers.layer2_hashes.engines} sources</p>
+                      <p>{translateText('Malware Family:')} {result.details.layers.layer2_hashes.malwareFamily}</p>
+                      {result.details.layers.layer2_hashes.firstSeen && (
+                        <p>{translateText('First seen')}: {result.details.layers.layer2_hashes.firstSeen}</p>
+                      )}
+                    </div>
+                  )}
+                  {!result.details.layers.layer2_hashes.databaseMatch && result.details.layers.layer2_hashes.knownGoodMatch && (
+                    <div className="space-y-1 text-sm text-cyan-200">
+                      <p>{translateText('Known software reference found')}</p>
+                      {result.details.layers.layer2_hashes.knownGoodName && (
+                        <p>{translateText('File')}: {result.details.layers.layer2_hashes.knownGoodName}</p>
+                      )}
+                      {result.details.layers.layer2_hashes.knownGoodProduct && (
+                        <p>{translateText('Product')}: {result.details.layers.layer2_hashes.knownGoodProduct}</p>
+                      )}
+                    </div>
+                  )}
+                  {result.details.layers.layer2_hashes.sources && result.details.layers.layer2_hashes.sources.length > 0 && (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {result.details.layers.layer2_hashes.sources.map((source, index) => (
+                        <span key={`${source}-${index}`} className="rounded-full border border-slate-600 bg-slate-900/50 px-2 py-1 text-xs text-slate-300">
+                          {source}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -864,6 +904,50 @@ export function FileScannerView() {
                 {result.details.layers.layer4_code.obfuscated && <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3"><p className="text-yellow-400 text-sm">{translateText('Code appears obfuscated')}</p></div>}
                 {result.details.layers.layer4_code.imports.length > 0 && <div className="bg-slate-900/50 border border-slate-600 rounded-lg p-3"><p className="text-slate-300 font-medium text-sm mb-2">{translateText('Imported DLLs')}</p><div className="flex flex-wrap gap-2">{result.details.layers.layer4_code.imports.map((imp,i)=><span key={i} className={`px-2 py-1 rounded text-xs font-mono border ${['wininet.dll','urlmon.dll','wsock32.dll'].includes(imp)?'bg-yellow-500/10 border-yellow-500/30 text-yellow-300':'bg-slate-800 border-slate-600 text-slate-300'}`}>{imp}</span>)}</div></div>}
                 {result.details.layers.layer4_code.anomalies.length > 0 && <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3"><p className="text-yellow-400 font-medium text-sm mb-2">{translateText('Structural Anomalies')}</p><ul className="space-y-1">{result.details.layers.layer4_code.anomalies.map((a,i)=><li key={i} className="text-white text-sm">â€¢ {a}</li>)}</ul></div>}
+                {result.details.layers.layer4_code.clamav?.checked && (
+                  <div className={`rounded-lg border p-3 ${
+                    result.details.layers.layer4_code.clamav.found
+                      ? 'border-red-500/30 bg-red-500/10'
+                      : 'border-emerald-500/30 bg-emerald-500/10'
+                  }`}>
+                    <p className="mb-2 text-sm font-medium text-white">{translateText('ClamAV')}</p>
+                    <div className="space-y-1 text-sm">
+                      <p className={`${result.details.layers.layer4_code.clamav.found ? 'text-red-300' : 'text-emerald-300'}`}>
+                        {result.details.layers.layer4_code.clamav.found
+                          ? `${translateText('Signature match')}: ${result.details.layers.layer4_code.clamav.signature}`
+                          : translateText('No ClamAV signature match')}
+                      </p>
+                      {result.details.layers.layer4_code.clamav.engine && (
+                        <p className="text-slate-300">{translateText('Engine')}: {result.details.layers.layer4_code.clamav.engine}</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {result.details.layers.layer4_code.signature?.checked && (
+                  <div className={`rounded-lg border p-3 ${
+                    result.details.layers.layer4_code.signature.status === 'Valid'
+                      ? 'border-cyan-500/30 bg-cyan-500/10'
+                      : result.details.layers.layer4_code.signature.status === 'NotSigned'
+                      ? 'border-slate-600 bg-slate-900/50'
+                      : 'border-yellow-500/30 bg-yellow-500/10'
+                  }`}>
+                    <p className="mb-2 text-sm font-medium text-white">{translateText('Windows Signature')}</p>
+                    <div className="space-y-1 text-sm">
+                      <p className="text-slate-300">
+                        {translateText('Status')}: <span className="font-semibold">{result.details.layers.layer4_code.signature.status || 'Unknown'}</span>
+                      </p>
+                      {result.details.layers.layer4_code.signature.subject && (
+                        <p className="text-slate-300">{translateText('Signer')}: {result.details.layers.layer4_code.signature.subject}</p>
+                      )}
+                      {result.details.layers.layer4_code.signature.issuer && (
+                        <p className="text-slate-300">{translateText('Issuer')}: {result.details.layers.layer4_code.signature.issuer}</p>
+                      )}
+                      {result.details.layers.layer4_code.signature.statusMessage && (
+                        <p className="text-slate-400">{result.details.layers.layer4_code.signature.statusMessage}</p>
+                      )}
+                    </div>
+                  </div>
+                )}
                 {!result.details.layers.layer4_code.suspiciousStrings.length&&!result.details.layers.layer4_code.packerDetected&&!result.details.layers.layer4_code.obfuscated&&!result.details.layers.layer4_code.anomalies.length&&<div className="bg-green-500/10 border border-green-500/30 rounded-lg p-4"><p className="text-green-400">✓ {translateText('No suspicious code patterns')}</p>{!['executable','script'].includes(result.details.layers.layer1_info.riskCategory)&&<p className="text-green-600 text-sm mt-1">{translateText('Code analysis N/A for')} {translateText(result.details.layers.layer1_info.riskCategory)} {translateText('files')}</p>}</div>}
               </div>
             </div>

@@ -1,5 +1,14 @@
 import { useState } from 'react';
-import { Hash, AlertCircle, CheckCircle, AlertTriangle, Loader2, Search, Database } from 'lucide-react';
+import {
+  Hash,
+  AlertCircle,
+  CheckCircle,
+  AlertTriangle,
+  Loader2,
+  Search,
+  Database,
+  ShieldCheck,
+} from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { apiUrl } from '../config/api';
 
@@ -13,7 +22,12 @@ type ScanResultType = {
     detections: number;
     engines: number;
     malwareFamily: string;
-    firstSeen: string;
+    firstSeen?: string | null;
+    sources?: string[];
+    evidence?: string[];
+    knownGoodMatch?: boolean;
+    knownGoodName?: string | null;
+    knownGoodProduct?: string | null;
   };
 };
 
@@ -48,50 +62,29 @@ export function HashCheckerView() {
 
     try {
       if (!validateHash(hash, hashType)) {
-        throw new Error(`Invalid ${hashType} hash format. Expected ${hashType === 'MD5' ? 32 : hashType === 'SHA1' ? 40 : 64} hexadecimal characters.`);
+        throw new Error(
+          `Invalid ${hashType} hash format. Expected ${
+            hashType === 'MD5' ? 32 : hashType === 'SHA1' ? 40 : 64
+          } hexadecimal characters.`,
+        );
       }
-
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-
-      const isMalicious = Math.random() > 0.7;
-      const detections = isMalicious ? Math.floor(Math.random() * 50) + 10 : 0;
-
-      const mockResult: ScanResultType = {
-        status: isMalicious ? 'malicious' : Math.random() > 0.5 ? 'suspicious' : 'clean',
-        threatScore: isMalicious ? Math.floor(Math.random() * 40) + 60 : Math.floor(Math.random() * 30),
-        details: {
-          hash,
-          hashType,
-          found: isMalicious || Math.random() > 0.5,
-          detections,
-          engines: 70,
-          malwareFamily: isMalicious ? ['Trojan.Generic', 'Ransomware.WannaCry', 'Backdoor.Agent'][Math.floor(Math.random() * 3)] : 'None',
-          firstSeen: new Date(Date.now() - Math.random() * 365 * 24 * 60 * 60 * 1000).toISOString(),
-        },
-      };
-
-      setResult(mockResult);
-      setScanning(false);
 
       const formData = new URLSearchParams();
       formData.append('scan_type', 'hash');
-      formData.append('target', hash);
-      formData.append('status', mockResult.status);
-      formData.append('threat_score', mockResult.threatScore.toString());
-      formData.append('details', JSON.stringify(mockResult.details));
+      formData.append('target', hash.toLowerCase());
 
       const response = await fetch(apiUrl('/hash-scan'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
-          'Authorization': `Bearer ${token}`
+          Authorization: `Bearer ${token}`,
         },
         body: formData,
       });
 
       if (!response.ok) {
         const errorText = await response.text();
-        let errorMessage = 'Failed to save scan result';
+        let errorMessage = 'Hash lookup failed';
         try {
           const errorData = JSON.parse(errorText);
           errorMessage = errorData.detail || errorMessage;
@@ -101,12 +94,17 @@ export function HashCheckerView() {
         throw new Error(errorMessage);
       }
 
-      console.log('Hash scan result saved successfully');
+      const payload = await response.json();
+      setResult({
+        status: payload.status,
+        threatScore: Number(payload.threat_score ?? 0),
+        details: payload.details,
+      });
     } catch (err) {
-      console.error('Error during hash scan:', err);
       setError(err instanceof Error ? err.message : 'An error occurred during scanning');
-      setScanning(false);
       setResult(null);
+    } finally {
+      setScanning(false);
     }
   };
 
@@ -114,11 +112,11 @@ export function HashCheckerView() {
     if (!result) return null;
     switch (result.status) {
       case 'clean':
-        return <CheckCircle className="w-16 h-16 text-green-400" />;
+        return <CheckCircle className="h-16 w-16 text-green-400" />;
       case 'malicious':
-        return <AlertCircle className="w-16 h-16 text-red-400" />;
+        return <AlertCircle className="h-16 w-16 text-red-400" />;
       case 'suspicious':
-        return <AlertTriangle className="w-16 h-16 text-yellow-400" />;
+        return <AlertTriangle className="h-16 w-16 text-yellow-400" />;
     }
   };
 
@@ -134,100 +132,124 @@ export function HashCheckerView() {
     }
   };
 
-  // Determine which message to show
   const renderDetailedResult = () => {
     if (!result) return null;
 
-    // If malicious and has a malware family (not None)
     if (result.status === 'malicious' && result.details.malwareFamily !== 'None') {
       return (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
-          <h4 className="text-red-400 font-semibold mb-2 flex items-center gap-2">
-            <AlertCircle className="w-5 h-5" />
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-4">
+          <h4 className="mb-2 flex items-center gap-2 font-semibold text-red-400">
+            <AlertCircle className="h-5 w-5" />
             Malware Detected
           </h4>
           <div className="space-y-2">
             <div>
-              <p className="text-slate-400 text-sm">Malware Family</p>
-              <p className="text-white font-medium">{result.details.malwareFamily}</p>
+              <p className="text-sm text-slate-400">Malware Family</p>
+              <p className="font-medium text-white">{result.details.malwareFamily}</p>
             </div>
-            <div>
-              <p className="text-slate-400 text-sm">First Seen</p>
-              <p className="text-white font-medium">
-                {new Date(result.details.firstSeen).toLocaleDateString('en-US', {
-                  year: 'numeric',
-                  month: 'long',
-                  day: 'numeric',
-                })}
-              </p>
-            </div>
+            {result.details.firstSeen && (
+              <div>
+                <p className="text-sm text-slate-400">First Seen</p>
+                <p className="font-medium text-white">
+                  {new Date(result.details.firstSeen).toLocaleDateString('en-US', {
+                    year: 'numeric',
+                    month: 'long',
+                    day: 'numeric',
+                  })}
+                </p>
+              </div>
+            )}
+            {result.details.sources && result.details.sources.length > 0 && (
+              <div>
+                <p className="text-sm text-slate-400">Sources</p>
+                <p className="font-medium text-white">{result.details.sources.join(', ')}</p>
+              </div>
+            )}
           </div>
         </div>
       );
     }
 
-    // If suspicious (with or without detections)
-    if (result.status === 'suspicious') {
+    if (result.details.knownGoodMatch) {
       return (
-        <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-4">
-          <h4 className="text-yellow-400 font-semibold mb-2 flex items-center gap-2">
-            <AlertTriangle className="w-5 h-5" />
-            Suspicious Indicators
+        <div className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 p-4">
+          <h4 className="mb-2 flex items-center gap-2 font-semibold text-cyan-300">
+            <ShieldCheck className="h-5 w-5" />
+            Known Software Reference
           </h4>
-          <p className="text-slate-300 text-sm">
-            This hash has suspicious characteristics but no confirmed malware. Further analysis recommended.
-          </p>
-          {result.details.detections > 0 && (
-            <p className="text-slate-300 text-sm mt-2">
-              {result.details.detections} out of {result.details.engines} engines flagged this file.
+          <div className="space-y-2 text-sm text-slate-300">
+            <p>
+              This hash matched a known file in CIRCL hashlookup.
             </p>
-          )}
+            {result.details.knownGoodName && (
+              <p>
+                <span className="text-slate-400">File:</span> {result.details.knownGoodName}
+              </p>
+            )}
+            {result.details.knownGoodProduct && (
+              <p>
+                <span className="text-slate-400">Product:</span> {result.details.knownGoodProduct}
+              </p>
+            )}
+          </div>
         </div>
       );
     }
 
-    // Otherwise clean or no threats found
+    if (result.status === 'suspicious') {
+      return (
+        <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 p-4">
+          <h4 className="mb-2 flex items-center gap-2 font-semibold text-yellow-400">
+            <AlertTriangle className="h-5 w-5" />
+            Suspicious Indicators
+          </h4>
+          <p className="text-sm text-slate-300">
+            This hash has suspicious characteristics but no confirmed malware family yet.
+          </p>
+        </div>
+      );
+    }
+
     return (
-      <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-4">
-        <h4 className="text-green-400 font-semibold mb-2 flex items-center gap-2">
-          <Database className="w-5 h-5" />
+      <div className="rounded-lg border border-green-500/30 bg-green-500/10 p-4">
+        <h4 className="mb-2 flex items-center gap-2 font-semibold text-green-400">
+          <Database className="h-5 w-5" />
           No Threats Found
         </h4>
-        <p className="text-slate-300 text-sm">
-          This hash was not found in any known malware databases. The file appears to be clean.
+        <p className="text-sm text-slate-300">
+          This hash was not found in the configured malicious hash feeds.
         </p>
       </div>
     );
   };
 
   return (
-    <div className="flex-1 bg-slate-900 global-scroll">
+    <div className="global-scroll flex-1 bg-slate-900">
       <div className="p-4 sm:p-6 xl:p-8">
-        <h2 className="text-3xl font-bold text-white mb-2">Hash Checker</h2>
-        <p className="text-slate-400 mb-8">Check file hashes against malware databases</p>
+        <h2 className="mb-2 text-3xl font-bold text-white">Hash Checker</h2>
+        <p className="mb-8 text-slate-400">Check file hashes against real reputation sources</p>
 
-        <div className="max-w-4xl mx-auto">
-          {/* Search Form */}
-          <form onSubmit={handleScan} className="space-y-4 mb-6">
+        <div className="mx-auto max-w-4xl">
+          <form onSubmit={handleScan} className="mb-6 space-y-4">
             <div className="flex flex-col gap-4 lg:flex-row">
               <select
                 value={hashType}
                 onChange={(e) => setHashType(e.target.value as 'MD5' | 'SHA1' | 'SHA256')}
-                className="w-full px-4 py-4 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-cyan-500 transition lg:w-auto"
+                className="w-full rounded-lg border border-slate-600 bg-slate-900/50 px-4 py-4 text-white transition focus:outline-none focus:ring-2 focus:ring-cyan-500 lg:w-auto"
                 disabled={scanning}
               >
                 <option value="MD5">MD5</option>
                 <option value="SHA1">SHA-1</option>
                 <option value="SHA256">SHA-256</option>
               </select>
-              <div className="flex-1 relative">
-                <Hash className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
+              <div className="relative flex-1">
+                <Hash className="absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
                 <input
                   type="text"
                   value={hash}
                   onChange={(e) => setHash(e.target.value.toLowerCase().trim())}
-                  placeholder={`Enter ${hashType} hash (e.g., ${hashType === 'MD5' ? 'a1b2c3d4...' : hashType === 'SHA1' ? 'abc123def456...' : 'abcdef1234567890...'})`}
-                  className="w-full pl-12 pr-4 py-4 bg-slate-900/50 border border-slate-600 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 transition font-mono text-sm"
+                  placeholder={`Enter ${hashType} hash`}
+                  className="w-full rounded-lg border border-slate-600 bg-slate-900/50 py-4 pl-12 pr-4 font-mono text-sm text-white placeholder-slate-500 transition focus:outline-none focus:ring-2 focus:ring-cyan-500"
                   required
                   disabled={scanning}
                 />
@@ -236,71 +258,93 @@ export function HashCheckerView() {
             <button
               type="submit"
               disabled={scanning || !hash}
-              className="w-full px-8 py-4 bg-gradient-to-r from-cyan-500 to-blue-600 text-white font-semibold rounded-lg flex items-center justify-center gap-2 hover:from-cyan-600 hover:to-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+              className="flex w-full items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 px-8 py-4 font-semibold text-white transition hover:from-cyan-600 hover:to-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <Search className="w-5 h-5" /> Check Hash
+              <Search className="h-5 w-5" /> Check Hash
             </button>
           </form>
 
-          {/* Error Message */}
           {error && (
-            <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 mb-6">
+            <div className="mb-6 rounded-lg border border-red-500/30 bg-red-500/10 p-4">
               <div className="flex items-center gap-2 text-red-400">
-                <AlertCircle className="w-5 h-5" />
+                <AlertCircle className="h-5 w-5" />
                 <p className="font-medium">{error}</p>
               </div>
             </div>
           )}
 
-          {/* Scanning Animation */}
           {scanning && (
-            <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-8 text-center mb-6">
-              <Loader2 className="w-12 h-12 text-cyan-400 animate-spin mx-auto mb-4" />
-              <h3 className="text-xl font-semibold text-white mb-2">Checking Hash...</h3>
-              <p className="text-slate-400">Searching malware databases and threat feeds</p>
+            <div className="mb-6 rounded-xl border border-slate-700 bg-slate-800/50 p-8 text-center">
+              <Loader2 className="mx-auto mb-4 h-12 w-12 animate-spin text-cyan-400" />
+              <h3 className="mb-2 text-xl font-semibold text-white">Checking Hash...</h3>
+              <p className="text-slate-400">Querying local history, MalwareBazaar, and external hash lookup feeds</p>
             </div>
           )}
 
-          {/* Results */}
           {result && !scanning && (
-            <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-8 space-y-6">
+            <div className="space-y-6 rounded-xl border border-slate-700 bg-slate-800/50 p-8">
               <div className="text-center">
-                <div className="flex justify-center mb-4">{getStatusIcon()}</div>
-                <h3 className="text-2xl font-bold text-white mb-2">Scan Complete</h3>
-                <span className={`inline-block px-4 py-2 rounded-full text-sm font-semibold border ${getStatusColor()}`}>
+                <div className="mb-4 flex justify-center">{getStatusIcon()}</div>
+                <h3 className="mb-2 text-2xl font-bold text-white">Scan Complete</h3>
+                <span className={`inline-block rounded-full border px-4 py-2 text-sm font-semibold ${getStatusColor()}`}>
                   {result.status.toUpperCase()}
                 </span>
               </div>
 
-              {/* Hash Details */}
-              <div className="bg-slate-900/50 border border-slate-700 rounded-lg p-4 space-y-4 text-sm">
+              <div className="space-y-4 rounded-lg border border-slate-700 bg-slate-900/50 p-4 text-sm">
                 <div>
                   <p className="text-slate-500">Hash Value</p>
-                  <p className="text-white font-medium font-mono break-all">{result.details.hash}</p>
+                  <p className="break-all font-mono font-medium text-white">{result.details.hash}</p>
                 </div>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div>
                     <p className="text-slate-500">Hash Type</p>
-                    <p className="text-white font-medium">{result.details.hashType}</p>
+                    <p className="font-medium text-white">{result.details.hashType}</p>
                   </div>
                   <div>
-                    <p className="text-slate-500">Found in Database</p>
-                    <p className="text-white font-medium">{result.details.found ? 'Yes' : 'No'}</p>
+                    <p className="text-slate-500">Malicious Match</p>
+                    <p className="font-medium text-white">{result.details.found ? 'Yes' : 'No'}</p>
                   </div>
                   <div>
-                    <p className="text-slate-500">Detections / Engines</p>
-                    <p className="text-white font-medium">
+                    <p className="text-slate-500">Detections / Sources</p>
+                    <p className="font-medium text-white">
                       {result.details.detections}/{result.details.engines}
                     </p>
                   </div>
                   <div>
                     <p className="text-slate-500">Threat Score</p>
-                    <p className="text-white font-medium">{result.threatScore}/100</p>
+                    <p className="font-medium text-white">{result.threatScore}/100</p>
                   </div>
                 </div>
+                {result.details.sources && result.details.sources.length > 0 && (
+                  <div>
+                    <p className="mb-2 text-slate-500">Evidence Sources</p>
+                    <div className="flex flex-wrap gap-2">
+                      {result.details.sources.map((source) => (
+                        <span
+                          key={source}
+                          className="rounded-full border border-slate-600 bg-slate-800 px-2 py-1 text-xs text-slate-300"
+                        >
+                          {source}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {result.details.evidence && result.details.evidence.length > 0 && (
+                  <div>
+                    <p className="mb-2 text-slate-500">Evidence</p>
+                    <ul className="space-y-2 text-slate-300">
+                      {result.details.evidence.map((item, index) => (
+                        <li key={`${item}-${index}`} className="rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-2">
+                          {item}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
 
-              {/* Dynamic Result Message */}
               {renderDetailedResult()}
             </div>
           )}

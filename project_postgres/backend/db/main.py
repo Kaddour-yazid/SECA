@@ -23,11 +23,13 @@ import os
 import socket
 import shutil
 import subprocess
+import tempfile
 import time
 import logging
 import threading
+import urllib.error
 import urllib.request
-from urllib.parse import quote, urlparse, urlsplit
+from urllib.parse import quote, urlencode, urlparse, urlsplit
 from datetime import datetime, timedelta
 from html import unescape
 import unicodedata
@@ -43,6 +45,7 @@ from models import (
     DesktopDevice,
     DesktopSession,
     GroupProxyAssignment,
+    ExternalReputationCache,
 )
 import schemas
 from auth import (
@@ -219,6 +222,23 @@ SECA_DESKTOP_SESSION_RETENTION_SECONDS = _read_int_env(
 )
 SECA_GROUP_PROXY_DEFAULT_HOST = os.environ.get("SECA_GROUP_PROXY_DEFAULT_HOST", SECA_PROXY_LISTEN_HOST).strip() or SECA_PROXY_LISTEN_HOST
 SECA_GROUP_PROXY_BASE_PORT = _read_int_env("SECA_GROUP_PROXY_BASE_PORT", 3201, minimum=1025, maximum=65000)
+SECA_MALWAREBAZAAR_ENABLED = _read_bool_env("SECA_MALWAREBAZAAR_ENABLED", True)
+SECA_MALWAREBAZAAR_API_URL = os.environ.get("SECA_MALWAREBAZAAR_API_URL", "https://mb-api.abuse.ch/api/v1/").strip() or "https://mb-api.abuse.ch/api/v1/"
+SECA_MALWAREBAZAAR_API_KEY = os.environ.get("SECA_MALWAREBAZAAR_API_KEY", "").strip()
+SECA_MALWAREBAZAAR_TIMEOUT_SECONDS = _read_float_env("SECA_MALWAREBAZAAR_TIMEOUT_SECONDS", 4.0, minimum=1.0, maximum=15.0)
+SECA_HASHLOOKUP_ENABLED = _read_bool_env("SECA_HASHLOOKUP_ENABLED", True)
+SECA_HASHLOOKUP_API_URL = os.environ.get("SECA_HASHLOOKUP_API_URL", "https://hashlookup.circl.lu").strip().rstrip("/") or "https://hashlookup.circl.lu"
+SECA_HASHLOOKUP_TIMEOUT_SECONDS = _read_float_env("SECA_HASHLOOKUP_TIMEOUT_SECONDS", 3.0, minimum=0.5, maximum=10.0)
+SECA_YARA_RULES_DIR = os.environ.get("SECA_YARA_RULES_DIR", "").strip()
+SECA_AUTHENTICODE_ENABLED = _read_bool_env("SECA_AUTHENTICODE_ENABLED", os.name == "nt")
+SECA_AUTHENTICODE_TIMEOUT_SECONDS = _read_float_env("SECA_AUTHENTICODE_TIMEOUT_SECONDS", 8.0, minimum=2.0, maximum=30.0)
+SECA_CLAMAV_ENABLED = _read_bool_env("SECA_CLAMAV_ENABLED", False)
+SECA_CLAMAV_MODE = os.environ.get("SECA_CLAMAV_MODE", "auto").strip().lower() or "auto"
+SECA_CLAMAV_TIMEOUT_SECONDS = _read_float_env("SECA_CLAMAV_TIMEOUT_SECONDS", 20.0, minimum=2.0, maximum=120.0)
+SECA_CLAMAV_DETECT_PUA = _read_bool_env("SECA_CLAMAV_DETECT_PUA", False)
+SECA_CLAMSCAN_PATH = os.environ.get("SECA_CLAMSCAN_PATH", "clamscan").strip() or "clamscan"
+SECA_CLAMD_HOST = os.environ.get("SECA_CLAMD_HOST", "127.0.0.1").strip() or "127.0.0.1"
+SECA_CLAMD_PORT = _read_int_env("SECA_CLAMD_PORT", 3310, minimum=1, maximum=65535)
 proxy_server = None
 proxy_blocklist_cache: List[str] = []
 proxy_blocklist_last_fetch = 0.0
@@ -3243,22 +3263,46 @@ SUSPICIOUS_API_IMPORTS = {
 }
 _HASH_FEED_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "entries": {}}
 _YARA_CACHE: Dict[str, Any] = {"key": None, "rules": None, "source": "disabled", "error": None}
+YARA_EXT_VAR_EXCLUDED_FILES = {
+    "generic_anomalies.yar",
+    "general_cloaking.yar",
+    "gen_webshells_ext_vars.yar",
+    "thor_inverse_matches.yar",
+    "yara_mixed_ext_vars.yar",
+    "configured_vulns_ext_vars.yar",
+    "gen_fake_amsi_dll.yar",
+    "expl_citrix_netscaler_adc_exploitation_cve_2023_3519.yar",
+    "yara-rules_vuln_drivers_strict_renamed.yar",
+}
+YARA_EXTERNAL_VARIABLE_DEFAULTS = {
+    "filepath": "",
+    "filename": "",
+    "extension": "",
+    "filetype": "",
+    "owner": "",
+    "owner_domain": "",
+    "tags": "",
+    "md5": "",
+    "imphash": "",
+    "magic": "",
+    "internal_filename": "",
+}
 
 
 def _classify_file_category(filename: str, content_type: Optional[str]) -> Tuple[str, int]:
     ext = os.path.splitext(filename or "")[1].lower()
     mime = (content_type or "").lower()
     if ext in STATIC_EXECUTABLE_EXTENSIONS or "x-msdownload" in mime or "executable" in mime:
-        return "executable", 35
+        return "executable", 12
     if ext in STATIC_SCRIPT_EXTENSIONS or "javascript" in mime or "x-sh" in mime:
-        return "script", 24
+        return "script", 10
     if ext in STATIC_ARCHIVE_EXTENSIONS or "zip" in mime or "compressed" in mime:
-        return "archive", 12
+        return "archive", 4
     if ext in STATIC_DOCUMENT_EXTENSIONS or "pdf" in mime or "document" in mime or "spreadsheet" in mime:
-        return "document", 6
+        return "document", 3
     if ext in STATIC_MEDIA_EXTENSIONS or mime.startswith("image/") or mime.startswith("audio/") or mime.startswith("video/"):
-        return "media", 2
-    return "unknown", 14
+        return "media", 1
+    return "unknown", 6
 
 
 def _sample_bytes(data: bytes, max_size: int) -> bytes:
@@ -3336,13 +3380,520 @@ def _load_local_hash_feed() -> Dict[str, str]:
     return entries
 
 
+def _get_cached_reputation(db: Session, provider: str, lookup_key: str) -> Optional[Dict[str, Any]]:
+    now = datetime.utcnow()
+    row = (
+        db.query(ExternalReputationCache)
+        .filter(
+            ExternalReputationCache.provider == provider,
+            ExternalReputationCache.lookup_key == lookup_key,
+            ExternalReputationCache.expires_at > now,
+        )
+        .order_by(ExternalReputationCache.updated_at.desc())
+        .first()
+    )
+    if not row:
+        return None
+    payload = None
+    if row.payload:
+        try:
+            payload = json.loads(row.payload)
+        except Exception:
+            payload = None
+    return {
+        "status": row.status,
+        "payload": payload,
+    }
+
+
+def _set_cached_reputation(
+    db: Session,
+    provider: str,
+    lookup_key: str,
+    status: str,
+    payload: Optional[Dict[str, Any]],
+    ttl_seconds: int,
+) -> None:
+    expires_at = datetime.utcnow() + timedelta(seconds=max(60, ttl_seconds))
+    row = (
+        db.query(ExternalReputationCache)
+        .filter(
+            ExternalReputationCache.provider == provider,
+            ExternalReputationCache.lookup_key == lookup_key,
+        )
+        .first()
+    )
+    encoded_payload = json.dumps(payload) if payload is not None else None
+    if row is None:
+        row = ExternalReputationCache(
+            provider=provider,
+            lookup_key=lookup_key,
+            status=status,
+            payload=encoded_payload,
+            expires_at=expires_at,
+        )
+        db.add(row)
+    else:
+        row.status = status
+        row.payload = encoded_payload
+        row.expires_at = expires_at
+    try:
+        db.flush()
+    except Exception:
+        db.rollback()
+
+
+def _lookup_malwarebazaar_cached(db: Session, hash_value: str) -> Optional[Dict[str, Any]]:
+    normalized = (hash_value or "").strip().lower()
+    cache_key = normalized
+    cached = _get_cached_reputation(db, "malwarebazaar", cache_key)
+    if cached:
+        if cached["status"] == "hit":
+            return cached["payload"] or {"found": True}
+        if cached["status"] == "miss":
+            return {"found": False}
+        return None
+
+    result = _lookup_malwarebazaar(normalized)
+    ttl = 86400 if result and result.get("found") else 21600
+    if result is not None:
+        _set_cached_reputation(db, "malwarebazaar", cache_key, "hit" if result.get("found") else "miss", result, ttl)
+    return result
+
+
+def _lookup_circl_hashlookup_cached(db: Session, hash_value: str, hash_type: str) -> Optional[Dict[str, Any]]:
+    normalized = (hash_value or "").strip().lower()
+    cache_key = f"{hash_type}:{normalized}"
+    cached = _get_cached_reputation(db, "circl-hashlookup", cache_key)
+    if cached:
+        if cached["status"] == "hit":
+            return cached["payload"] or {"found": True}
+        if cached["status"] == "miss":
+            return {"found": False}
+        return None
+
+    result = _lookup_circl_hashlookup(normalized, hash_type)
+    ttl = 604800 if result and result.get("found") else 86400
+    if result is not None:
+        _set_cached_reputation(db, "circl-hashlookup", cache_key, "hit" if result.get("found") else "miss", result, ttl)
+    return result
+
+
+def _collect_yara_rule_files(rule_dir: str) -> List[str]:
+    collected: List[str] = []
+    if not rule_dir or not os.path.isdir(rule_dir):
+        return collected
+    for root, _, files in os.walk(rule_dir):
+        for filename in files:
+            lower_name = filename.lower()
+            if not (lower_name.endswith(".yar") or lower_name.endswith(".yara")):
+                continue
+            if lower_name in YARA_EXT_VAR_EXCLUDED_FILES:
+                continue
+            collected.append(os.path.join(root, filename))
+    return sorted(set(collected))
+
+
+def _http_json_request(
+    url: str,
+    *,
+    method: str = "GET",
+    payload: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: float = 4.0,
+) -> Optional[Any]:
+    body = None
+    request_headers = dict(headers or {})
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        request_headers.setdefault("Content-Type", "application/json")
+    req = urllib.request.Request(url, data=body, method=method.upper(), headers=request_headers)
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        raw = response.read().decode("utf-8", "ignore").strip()
+    return json.loads(raw) if raw else None
+
+
+def _normalize_hash_type(hash_value: str) -> Optional[str]:
+    normalized = (hash_value or "").strip().lower()
+    if re.fullmatch(r"[a-f0-9]{32}", normalized):
+        return "md5"
+    if re.fullmatch(r"[a-f0-9]{40}", normalized):
+        return "sha1"
+    if re.fullmatch(r"[a-f0-9]{64}", normalized):
+        return "sha256"
+    return None
+
+
+def _lookup_malwarebazaar(hash_value: str) -> Optional[Dict[str, Any]]:
+    if not SECA_MALWAREBAZAAR_ENABLED:
+        return None
+    if not SECA_MALWAREBAZAAR_API_KEY:
+        return None
+    normalized = (hash_value or "").strip().lower()
+    if _normalize_hash_type(normalized) is None:
+        return None
+
+    payload = urlencode({
+        "query": "get_info",
+        "hash": normalized,
+    }).encode("utf-8")
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "SECA/1.0",
+    }
+    if SECA_MALWAREBAZAAR_API_KEY:
+        headers["Auth-Key"] = SECA_MALWAREBAZAAR_API_KEY
+
+    try:
+        req = urllib.request.Request(
+            SECA_MALWAREBAZAAR_API_URL,
+            data=payload,
+            method="POST",
+            headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=SECA_MALWAREBAZAAR_TIMEOUT_SECONDS) as response:
+            raw = response.read().decode("utf-8", "ignore").strip()
+        parsed = json.loads(raw) if raw else {}
+    except Exception as exc:
+        logger.warning("MalwareBazaar lookup failed for %s: %s", normalized[:16], exc)
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+
+    query_status = str(parsed.get("query_status") or "").lower()
+    data = parsed.get("data")
+    if query_status in {"hash_not_found", "no_results", "illegal_hash"}:
+        return {"found": False, "queryStatus": query_status}
+    if not isinstance(data, list) or not data:
+        return {"found": False, "queryStatus": query_status or "empty"}
+
+    item = next((entry for entry in data if isinstance(entry, dict)), None)
+    if item is None:
+        return {"found": False, "queryStatus": query_status or "empty"}
+
+    signature = str(item.get("signature") or "").strip() or None
+    file_name = str(item.get("file_name") or "").strip() or None
+    tags = [str(tag).strip() for tag in (item.get("tags") or []) if str(tag).strip()]
+    return {
+        "found": True,
+        "queryStatus": query_status or "ok",
+        "sha256": str(item.get("sha256_hash") or item.get("sha256") or "").strip().lower() or None,
+        "sha1": str(item.get("sha1_hash") or item.get("sha1") or "").strip().lower() or None,
+        "md5": str(item.get("md5_hash") or item.get("md5") or "").strip().lower() or None,
+        "signature": signature,
+        "firstSeen": str(item.get("first_seen") or "").strip() or None,
+        "fileName": file_name,
+        "fileType": str(item.get("file_type") or item.get("file_type_mime") or "").strip() or None,
+        "deliveryMethod": str(item.get("delivery_method") or "").strip() or None,
+        "tags": tags,
+    }
+
+
+def _lookup_circl_hashlookup(hash_value: str, hash_type: str) -> Optional[Dict[str, Any]]:
+    if not SECA_HASHLOOKUP_ENABLED:
+        return None
+    normalized = (hash_value or "").strip().lower()
+    if hash_type not in {"md5", "sha1", "sha256"}:
+        return None
+    try:
+        payload = _http_json_request(
+            f"{SECA_HASHLOOKUP_API_URL}/lookup/{hash_type}/{normalized}",
+            headers={"Accept": "application/json", "User-Agent": "SECA/1.0"},
+            timeout=SECA_HASHLOOKUP_TIMEOUT_SECONDS,
+        )
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return {"found": False}
+        logger.warning("CIRCL hashlookup failed for %s (%s): %s", normalized[:16], hash_type, exc)
+        return None
+    except Exception as exc:
+        logger.warning("CIRCL hashlookup failed for %s (%s): %s", normalized[:16], hash_type, exc)
+        return None
+
+    if not isinstance(payload, dict):
+        return {"found": False}
+    product = payload.get("ProductCode") if isinstance(payload.get("ProductCode"), dict) else {}
+    op_system = payload.get("OpSystemCode") if isinstance(payload.get("OpSystemCode"), dict) else {}
+    return {
+        "found": True,
+        "db": str(payload.get("db") or "").strip() or None,
+        "fileName": str(payload.get("FileName") or "").strip() or None,
+        "fileSize": str(payload.get("FileSize") or "").strip() or None,
+        "md5": str(payload.get("MD5") or "").strip().lower() or None,
+        "sha1": str(payload.get("SHA-1") or "").strip().lower() or None,
+        "productName": str(product.get("ProductName") or "").strip() or None,
+        "productVersion": str(product.get("ProductVersion") or "").strip() or None,
+        "applicationType": str(product.get("ApplicationType") or "").strip() or None,
+        "osName": str(op_system.get("OpSystemName") or "").strip() or None,
+    }
+
+
+def _verify_windows_authenticode(file_bytes: bytes, filename: str) -> Dict[str, Any]:
+    result = {
+        "checked": False,
+        "available": False,
+        "isSigned": False,
+        "status": None,
+        "statusMessage": None,
+        "subject": None,
+        "issuer": None,
+        "thumbprint": None,
+        "notBefore": None,
+        "notAfter": None,
+        "isOSBinary": False,
+        "error": None,
+    }
+    if not SECA_AUTHENTICODE_ENABLED or os.name != "nt":
+        return result
+
+    ext = os.path.splitext(filename or "")[1].lower()
+    if ext not in {".exe", ".dll", ".sys", ".scr", ".com", ".cpl", ".ocx", ".msi"} and not file_bytes.startswith(b"MZ"):
+        return result
+
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext or ".bin") as handle:
+            handle.write(file_bytes)
+            temp_path = handle.name
+
+        escaped_path = temp_path.replace("'", "''")
+        ps_script = (
+            f"$sig = Get-AuthenticodeSignature -LiteralPath '{escaped_path}'; "
+            "$cert = $sig.SignerCertificate; "
+            "[pscustomobject]@{"
+            "Status = [string]$sig.Status; "
+            "StatusMessage = [string]$sig.StatusMessage; "
+            "IsOSBinary = [bool]$sig.IsOSBinary; "
+            "SignerCertificate = if ($cert) { [pscustomobject]@{ "
+            "Subject = [string]$cert.Subject; "
+            "Issuer = [string]$cert.Issuer; "
+            "Thumbprint = [string]$cert.Thumbprint; "
+            "NotBefore = if ($cert.NotBefore) { $cert.NotBefore.ToString('o') } else { '' }; "
+            "NotAfter = if ($cert.NotAfter) { $cert.NotAfter.ToString('o') } else { '' } "
+            "} } else { $null } "
+            "} | ConvertTo-Json -Compress -Depth 4"
+        )
+        completed = subprocess.run(
+            ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+            capture_output=True,
+            text=True,
+            timeout=SECA_AUTHENTICODE_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if completed.returncode != 0:
+            result["error"] = (completed.stderr or completed.stdout or "PowerShell signature check failed").strip()[:240]
+            return result
+
+        raw = (completed.stdout or "").strip()
+        if not raw:
+            result["error"] = "Empty Authenticode response"
+            return result
+
+        parsed = json.loads(raw)
+        cert = parsed.get("SignerCertificate") if isinstance(parsed, dict) else None
+        result.update({
+            "checked": True,
+            "available": True,
+            "status": str(parsed.get("Status") or "").strip() or None,
+            "statusMessage": str(parsed.get("StatusMessage") or "").strip() or None,
+            "isOSBinary": bool(parsed.get("IsOSBinary")),
+        })
+        if isinstance(cert, dict):
+            result.update({
+                "isSigned": True,
+                "subject": str(cert.get("Subject") or "").strip() or None,
+                "issuer": str(cert.get("Issuer") or "").strip() or None,
+                "thumbprint": str(cert.get("Thumbprint") or "").strip() or None,
+                "notBefore": str(cert.get("NotBefore") or "").strip() or None,
+                "notAfter": str(cert.get("NotAfter") or "").strip() or None,
+            })
+        return result
+    except Exception as exc:
+        result["error"] = str(exc)[:240]
+        return result
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+def _clamav_scan_via_clamscan(file_bytes: bytes, filename: str) -> Dict[str, Any]:
+    ext = os.path.splitext(filename or "")[1]
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext or ".bin") as handle:
+            handle.write(file_bytes)
+            temp_path = handle.name
+
+        command = [SECA_CLAMSCAN_PATH, "--stdout", "--no-summary"]
+        if SECA_CLAMAV_DETECT_PUA:
+            command.append("--detect-pua=yes")
+        command.append(temp_path)
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=SECA_CLAMAV_TIMEOUT_SECONDS,
+            check=False,
+        )
+        output = "\n".join(part for part in [completed.stdout, completed.stderr] if part).strip()
+        if completed.returncode == 0:
+            return {
+                "checked": True,
+                "available": True,
+                "engine": "clamscan",
+                "found": False,
+                "signature": None,
+                "rawResult": output or "OK",
+                "error": None,
+            }
+        if completed.returncode == 1:
+            match = re.search(r":\s*(.+?)\s+FOUND", output)
+            signature = match.group(1).strip() if match else "FOUND"
+            return {
+                "checked": True,
+                "available": True,
+                "engine": "clamscan",
+                "found": True,
+                "signature": signature,
+                "rawResult": output,
+                "error": None,
+            }
+        return {
+            "checked": False,
+            "available": False,
+            "engine": "clamscan",
+            "found": False,
+            "signature": None,
+            "rawResult": output,
+            "error": output[:240] if output else f"clamscan failed with code {completed.returncode}",
+        }
+    except FileNotFoundError:
+        return {
+            "checked": False,
+            "available": False,
+            "engine": "clamscan",
+            "found": False,
+            "signature": None,
+            "rawResult": None,
+            "error": f"clamscan not found at {SECA_CLAMSCAN_PATH}",
+        }
+    except Exception as exc:
+        return {
+            "checked": False,
+            "available": False,
+            "engine": "clamscan",
+            "found": False,
+            "signature": None,
+            "rawResult": None,
+            "error": str(exc)[:240],
+        }
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+def _clamav_scan_via_clamd(file_bytes: bytes) -> Dict[str, Any]:
+    try:
+        with socket.create_connection((SECA_CLAMD_HOST, SECA_CLAMD_PORT), timeout=SECA_CLAMAV_TIMEOUT_SECONDS) as sock:
+            sock.settimeout(SECA_CLAMAV_TIMEOUT_SECONDS)
+            sock.sendall(b"zINSTREAM\0")
+            chunk_size = 16384
+            for index in range(0, len(file_bytes), chunk_size):
+                chunk = file_bytes[index:index + chunk_size]
+                sock.sendall(len(chunk).to_bytes(4, byteorder="big"))
+                sock.sendall(chunk)
+            sock.sendall((0).to_bytes(4, byteorder="big"))
+            response = sock.recv(4096).decode("utf-8", "ignore").strip()
+        if response.endswith("OK"):
+            return {
+                "checked": True,
+                "available": True,
+                "engine": "clamd",
+                "found": False,
+                "signature": None,
+                "rawResult": response,
+                "error": None,
+            }
+        match = re.search(r":\s*(.+?)\s+FOUND", response)
+        if match:
+            return {
+                "checked": True,
+                "available": True,
+                "engine": "clamd",
+                "found": True,
+                "signature": match.group(1).strip(),
+                "rawResult": response,
+                "error": None,
+            }
+        return {
+            "checked": False,
+            "available": False,
+            "engine": "clamd",
+            "found": False,
+            "signature": None,
+            "rawResult": response,
+            "error": response[:240] if response else "clamd returned no response",
+        }
+    except Exception as exc:
+        return {
+            "checked": False,
+            "available": False,
+            "engine": "clamd",
+            "found": False,
+            "signature": None,
+            "rawResult": None,
+            "error": str(exc)[:240],
+        }
+
+
+def _run_clamav_scan(file_bytes: bytes, filename: str) -> Dict[str, Any]:
+    result = {
+        "checked": False,
+        "available": False,
+        "engine": None,
+        "found": False,
+        "signature": None,
+        "rawResult": None,
+        "error": None,
+    }
+    if not SECA_CLAMAV_ENABLED:
+        return result
+
+    modes = [SECA_CLAMAV_MODE]
+    if SECA_CLAMAV_MODE == "auto":
+        modes = ["clamd", "clamscan"]
+
+    last_error = None
+    for mode in modes:
+        if mode == "clamd":
+            current = _clamav_scan_via_clamd(file_bytes)
+        elif mode == "clamscan":
+            current = _clamav_scan_via_clamscan(file_bytes, filename)
+        else:
+            continue
+        if current.get("checked") or current.get("available"):
+            return current
+        last_error = current.get("error")
+
+    result["error"] = last_error or "No ClamAV engine available"
+    return result
+
+
 def _hash_reputation_lookup(db: Session, md5_hex: str, sha1_hex: str, sha256_hex_value: str) -> Dict[str, Any]:
     detections = 0
     engines = 0
     malware_family = None
     evidence: List[str] = []
     sources: List[str] = []
-    checked_hashes = [md5_hex.lower(), sha1_hex.lower(), sha256_hex_value.lower()]
+    provider_details: Dict[str, Any] = {}
+    checked_hashes = [hash_value.lower() for hash_value in [md5_hex, sha1_hex, sha256_hex_value] if hash_value]
 
     local_feed = _load_local_hash_feed()
     local_match = None
@@ -3357,45 +3908,79 @@ def _hash_reputation_lookup(db: Session, md5_hex: str, sha1_hex: str, sha256_hex
         sources.append("local-hash-feed")
         evidence.append(f"Hash matched local feed ({local_match[:12]}...)")
 
-    historical_hits = (
-        db.query(Scan)
-        .filter(
-            Scan.scan_type == "hash",
-            Scan.target.in_(checked_hashes),
-            Scan.status.in_(["malicious", "suspicious"]),
+    historical_hits = 0
+    if checked_hashes:
+        historical_hits = (
+            db.query(Scan)
+            .filter(
+                Scan.scan_type == "hash",
+                Scan.target.in_(checked_hashes),
+                Scan.status.in_(["malicious", "suspicious"]),
+            )
+            .count()
         )
-        .count()
-    )
     if historical_hits:
         detections += min(25, historical_hits)
         engines += min(10, max(1, historical_hits))
         sources.append("historical-hash-scans")
         evidence.append(f"Hash seen in {historical_hits} previous hash scan(s)")
 
-    file_scan_hits = (
-        db.query(Scan)
-        .filter(
-            Scan.scan_type == "file",
-            Scan.status.in_(["malicious", "suspicious"]),
-            or_(
-                Scan.details.ilike(f"%{sha256_hex_value}%"),
-                Scan.details.ilike(f"%{sha1_hex}%"),
-                Scan.details.ilike(f"%{md5_hex}%"),
-            ),
+    file_scan_hits = 0
+    file_hash_clauses = [Scan.details.ilike(f"%{hash_value}%") for hash_value in checked_hashes]
+    if file_hash_clauses:
+        file_scan_hits = (
+            db.query(Scan)
+            .filter(
+                Scan.scan_type == "file",
+                Scan.status.in_(["malicious", "suspicious"]),
+                or_(*file_hash_clauses),
+            )
+            .count()
         )
-        .count()
-    )
     if file_scan_hits:
         detections += min(15, file_scan_hits)
         engines += min(8, max(1, file_scan_hits // 2 + 1))
         sources.append("historical-file-scans")
         evidence.append(f"Hash fingerprint seen in {file_scan_hits} previous file scan(s)")
 
-    if db.query(ThreatUrl).filter(ThreatUrl.url_hash == sha256_hex_value.lower()).first():
+    if sha256_hex_value and db.query(ThreatUrl).filter(ThreatUrl.url_hash == sha256_hex_value.lower()).first():
         detections += 1
         engines += 1
         sources.append("threat-feed-collision")
         evidence.append("SHA-256 collides with an existing threat-feed hash entry")
+
+    malware_bazaar_hit = None
+    for candidate in checked_hashes:
+        malware_bazaar_hit = _lookup_malwarebazaar_cached(db, candidate)
+        if malware_bazaar_hit and malware_bazaar_hit.get("found"):
+            break
+    if malware_bazaar_hit and malware_bazaar_hit.get("found"):
+        provider_details["malwareBazaar"] = malware_bazaar_hit
+        detections += 1
+        engines += 1
+        sources.append("malwarebazaar")
+        malware_family = malware_family or malware_bazaar_hit.get("signature") or malware_family
+        family_label = malware_bazaar_hit.get("signature") or "unknown family"
+        first_seen = malware_bazaar_hit.get("firstSeen")
+        evidence_line = f"MalwareBazaar matched hash as {family_label}"
+        if first_seen:
+            evidence_line += f" (first seen {first_seen})"
+        evidence.append(evidence_line)
+
+    circl_hit = None
+    for candidate in checked_hashes:
+        hash_type = _normalize_hash_type(candidate)
+        if not hash_type:
+            continue
+        lookup = _lookup_circl_hashlookup_cached(db, candidate, hash_type)
+        if lookup and lookup.get("found"):
+            circl_hit = lookup
+            break
+    if circl_hit and circl_hit.get("found"):
+        provider_details["circlHashlookup"] = circl_hit
+        sources.append("circl-hashlookup")
+        file_name = circl_hit.get("fileName") or "known software file"
+        evidence.append(f"CIRCL hashlookup matched known file {file_name}")
 
     database_match = detections > 0
     if database_match and malware_family is None:
@@ -3407,6 +3992,11 @@ def _hash_reputation_lookup(db: Session, md5_hex: str, sha1_hex: str, sha256_hex
         "malwareFamily": malware_family,
         "sources": sorted(set(sources)),
         "evidence": evidence,
+        "knownGoodMatch": bool(circl_hit and circl_hit.get("found")),
+        "knownGoodName": circl_hit.get("fileName") if circl_hit else None,
+        "knownGoodProduct": circl_hit.get("productName") if circl_hit else None,
+        "providerDetails": provider_details,
+        "firstSeen": malware_bazaar_hit.get("firstSeen") if malware_bazaar_hit and malware_bazaar_hit.get("found") else None,
     }
 
 
@@ -3452,18 +4042,45 @@ def _get_compiled_yara_rules() -> Tuple[Optional[Any], str, Optional[str]]:
     if custom_path and os.path.exists(custom_path):
         cache_key = f"path:{custom_path}:{os.path.getmtime(custom_path)}"
         source_label = f"custom:{custom_path}"
-        with open(custom_path, "r", encoding="utf-8") as handle:
-            rule_source = handle.read()
+        if os.path.isdir(custom_path):
+            filepaths = {
+                f"rule_{index}": path
+                for index, path in enumerate(_collect_yara_rule_files(custom_path), start=1)
+            }
+            rule_source = None
+        else:
+            with open(custom_path, "r", encoding="utf-8") as handle:
+                rule_source = handle.read()
+            filepaths = None
+    elif SECA_YARA_RULES_DIR and os.path.isdir(SECA_YARA_RULES_DIR):
+        rule_files = _collect_yara_rule_files(SECA_YARA_RULES_DIR)
+        filepaths = {
+            f"rule_{index}": path
+            for index, path in enumerate(rule_files, start=1)
+        }
+        mtime_sum = 0.0
+        for path in rule_files:
+            try:
+                mtime_sum += os.path.getmtime(path)
+            except OSError:
+                continue
+        cache_key = f"dir:{SECA_YARA_RULES_DIR}:{len(rule_files)}:{mtime_sum}"
+        source_label = f"curated:{SECA_YARA_RULES_DIR}"
+        rule_source = None
     else:
         rule_source = _default_yara_rules()
         cache_key = f"default:{hashlib.sha256(rule_source.encode('utf-8')).hexdigest()}"
         source_label = "builtin"
+        filepaths = None
 
     if _YARA_CACHE["key"] == cache_key and _YARA_CACHE["rules"] is not None:
         return _YARA_CACHE["rules"], source_label, None
 
     try:
-        compiled = yara.compile(source=rule_source)
+        if filepaths:
+            compiled = yara.compile(filepaths=filepaths, externals=YARA_EXTERNAL_VARIABLE_DEFAULTS)
+        else:
+            compiled = yara.compile(source=rule_source)
         _YARA_CACHE["key"] = cache_key
         _YARA_CACHE["rules"] = compiled
         _YARA_CACHE["source"] = source_label
@@ -3477,11 +4094,38 @@ def _get_compiled_yara_rules() -> Tuple[Optional[Any], str, Optional[str]]:
         return None, source_label, str(exc)
 
 
-def _run_yara_scan(file_bytes: bytes) -> Dict[str, Any]:
+def _build_yara_externals(file_bytes: bytes, filename: Optional[str] = None, content_type: Optional[str] = None) -> Dict[str, Any]:
+    ext = os.path.splitext(filename or "")[1].lower()
+    values = dict(YARA_EXTERNAL_VARIABLE_DEFAULTS)
+    values["filename"] = os.path.basename(filename or "")
+    values["filepath"] = values["filename"]
+    values["extension"] = ext
+    values["filetype"] = (content_type or "").lower() or ("pe" if file_bytes.startswith(b"MZ") else "")
+    values["md5"] = hashlib.md5(file_bytes).hexdigest()
+    values["magic"] = file_bytes[:4].hex() if file_bytes else ""
+    if pefile is not None and file_bytes.startswith(b"MZ"):
+        try:
+            pe = pefile.PE(data=file_bytes, fast_load=True)
+            values["imphash"] = pe.get_imphash() or ""
+            values["internal_filename"] = (
+                getattr(getattr(pe, "FileInfo", [{}])[0], "StringTable", [{}])[0].entries.get(b"InternalName", b"").decode(errors="ignore")
+                if hasattr(pe, "FileInfo") and pe.FileInfo
+                else ""
+            )
+        except Exception:
+            pass
+    return values
+
+
+def _run_yara_scan(file_bytes: bytes, filename: Optional[str] = None, content_type: Optional[str] = None) -> Dict[str, Any]:
     rules, source_label, err = _get_compiled_yara_rules()
     if rules is not None:
         try:
-            matches = rules.match(data=file_bytes, timeout=10)
+            matches = rules.match(
+                data=file_bytes,
+                timeout=15,
+                externals=_build_yara_externals(file_bytes, filename=filename, content_type=content_type),
+            )
             names = sorted({m.rule for m in matches})
             return {
                 "enabled": True,
@@ -3608,8 +4252,10 @@ def _build_file_scan_result(filename: str, content_type: Optional[str], file_byt
     sha256_hex_value = hashlib.sha256(file_bytes).hexdigest()
 
     hash_info = _hash_reputation_lookup(db, md5_hex, sha1_hex, sha256_hex_value)
-    yara_info = _run_yara_scan(file_bytes)
+    yara_info = _run_yara_scan(file_bytes, filename=filename, content_type=content_type)
     pe_info = _analyze_pe_metadata(file_bytes)
+    signature_info = _verify_windows_authenticode(file_bytes, filename)
+    clamav_info = _run_clamav_scan(file_bytes, filename)
 
     suspicious_strings = sorted(
         {
@@ -3620,10 +4266,14 @@ def _build_file_scan_result(filename: str, content_type: Optional[str], file_byt
     )[:12]
 
     threats: List[Dict[str, str]] = []
+    score_breakdown: List[Dict[str, Any]] = []
     score = base_risk
+    score_breakdown.append({"label": "file-category", "weight": base_risk, "reason": risk_category})
 
     if hash_info["databaseMatch"]:
-        score += 60
+        hash_weight = 78 if any(source in {"local-hash-feed", "malwarebazaar"} for source in hash_info.get("sources", [])) else 48
+        score += hash_weight
+        score_breakdown.append({"label": "malicious-hash-reputation", "weight": hash_weight, "reason": ", ".join(hash_info.get("sources", []))})
         threats.append(
             {
                 "name": "Known.Hash.Reputation",
@@ -3631,17 +4281,40 @@ def _build_file_scan_result(filename: str, content_type: Optional[str], file_byt
                 "description": "; ".join(hash_info["evidence"])[:200] or "Hash matched known malicious reputation data",
             }
         )
+    elif hash_info.get("knownGoodMatch"):
+        good_weight = -12
+        score += good_weight
+        score_breakdown.append({"label": "known-good-reference", "weight": good_weight, "reason": hash_info.get("knownGoodName") or "known software"})
+
     if yara_info["matches"]:
-        score += min(30, 10 + len(yara_info["matches"]) * 4)
+        high_match = any("High" in rule for rule in yara_info["matches"])
+        yara_weight = min(34, (14 if high_match else 8) + len(yara_info["matches"]) * (6 if high_match else 4))
+        score += yara_weight
+        score_breakdown.append({"label": "yara-matches", "weight": yara_weight, "reason": ", ".join(yara_info["matches"][:4])})
         threats.append(
             {
                 "name": "YARA.Rule.Match",
-                "severity": "high" if any("High" in rule for rule in yara_info["matches"]) else "medium",
+                "severity": "high" if high_match else "medium",
                 "description": f"Matched rules: {', '.join(yara_info['matches'][:4])}",
             }
         )
+    if clamav_info["found"]:
+        clam_signature = str(clamav_info.get("signature") or "FOUND")
+        is_pua = clam_signature.upper().startswith("PUA.")
+        clam_weight = 28 if is_pua else 82
+        score += clam_weight
+        score_breakdown.append({"label": "clamav-signature", "weight": clam_weight, "reason": clam_signature})
+        threats.append(
+            {
+                "name": "ClamAV.Signature.Match",
+                "severity": "medium" if is_pua else "high",
+                "description": clam_signature,
+            }
+        )
     if suspicious_strings:
-        score += min(22, len(suspicious_strings) * 4)
+        strings_weight = min(18, len(suspicious_strings) * (3 if risk_category in {"executable", "script"} else 2))
+        score += strings_weight
+        score_breakdown.append({"label": "suspicious-strings", "weight": strings_weight, "reason": ", ".join(suspicious_strings[:4])})
         threats.append(
             {
                 "name": "Suspicious.String.Patterns",
@@ -3650,17 +4323,48 @@ def _build_file_scan_result(filename: str, content_type: Optional[str], file_byt
             }
         )
     if pe_info["score"] > 0:
-        score += pe_info["score"]
+        pe_weight = min(26, int(pe_info["score"]))
+        score += pe_weight
+        score_breakdown.append({"label": "pe-anomalies", "weight": pe_weight, "reason": "; ".join(pe_info["anomalies"][:2]) or "pe metadata"})
         threats.append(
             {
                 "name": "PE.Metadata.Anomaly",
-                "severity": "high" if pe_info["score"] >= 18 else "medium",
+                "severity": "high" if pe_weight >= 18 else "medium",
                 "description": "; ".join(pe_info["anomalies"][:3]) or "Potentially suspicious PE metadata",
             }
         )
+    if signature_info["checked"] and signature_info["status"] not in {None, "Valid", "NotSigned"}:
+        signature_weight = 16 if signature_info["status"] in {"HashMismatch", "NotTrusted"} else 10
+        score += signature_weight
+        score_breakdown.append({"label": "invalid-signature", "weight": signature_weight, "reason": signature_info["status"]})
+        threats.append(
+            {
+                "name": "Code.Signature.Invalid",
+                "severity": "high" if signature_info["status"] in {"HashMismatch", "NotTrusted"} else "medium",
+                "description": signature_info["statusMessage"] or f"Authenticode status: {signature_info['status']}",
+            }
+        )
+    elif signature_info["checked"] and signature_info["status"] == "Valid":
+        valid_signature_weight = -8 if not hash_info["databaseMatch"] else -3
+        if signature_info.get("isOSBinary"):
+            valid_signature_weight -= 4
+        score += valid_signature_weight
+        score_breakdown.append({
+            "label": "trusted-signature",
+            "weight": valid_signature_weight,
+            "reason": signature_info.get("subject") or "valid authenticode",
+        })
+    if clamav_info.get("checked") and not clamav_info.get("found"):
+        score_breakdown.append({
+            "label": "clamav-clean-scan",
+            "weight": 0,
+            "reason": clamav_info.get("engine") or "clamav",
+        })
 
     if entropy > 7.4 and risk_category in {"executable", "script"}:
-        score += 12
+        entropy_weight = 14 if entropy >= 7.8 else 8
+        score += entropy_weight
+        score_breakdown.append({"label": "high-entropy", "weight": entropy_weight, "reason": f"entropy={entropy}"})
         threats.append(
             {
                 "name": "High.Entropy.Content",
@@ -3669,10 +4373,13 @@ def _build_file_scan_result(filename: str, content_type: Optional[str], file_byt
             }
         )
 
-    score = min(100, int(score))
-    if score >= 70:
+    score = max(0, min(100, int(score)))
+    high_severity_count = sum(1 for threat in threats if threat.get("severity") == "high")
+    if hash_info["databaseMatch"] and any(source in {"local-hash-feed", "malwarebazaar"} for source in hash_info.get("sources", [])):
         status = "malicious"
-    elif score >= 35:
+    elif score >= 75 or (score >= 60 and high_severity_count >= 2):
+        status = "malicious"
+    elif score >= 38 or high_severity_count >= 1 or (len(threats) >= 2 and score >= 28):
         status = "suspicious"
     else:
         status = "clean"
@@ -3686,6 +4393,12 @@ def _build_file_scan_result(filename: str, content_type: Optional[str], file_byt
         "engines": int(hash_info["engines"]),
         "malwareFamily": hash_info.get("malwareFamily"),
         "sources": hash_info.get("sources", []),
+        "evidence": hash_info.get("evidence", []),
+        "knownGoodMatch": bool(hash_info.get("knownGoodMatch")),
+        "knownGoodName": hash_info.get("knownGoodName"),
+        "knownGoodProduct": hash_info.get("knownGoodProduct"),
+        "firstSeen": hash_info.get("firstSeen"),
+        "providerDetails": hash_info.get("providerDetails", {}),
     }
     analysis_warnings: List[str] = []
     if yara_info["error"]:
@@ -3703,6 +4416,8 @@ def _build_file_scan_result(filename: str, content_type: Optional[str], file_byt
         "yaraMatches": yara_info["matches"],
         "yaraEnabled": yara_info["enabled"],
         "yaraSource": yara_info["source"],
+        "signature": signature_info,
+        "clamav": clamav_info,
     }
     details = {
         "fileName": filename,
@@ -3729,6 +4444,7 @@ def _build_file_scan_result(filename: str, content_type: Optional[str], file_byt
             "timestamp": datetime.utcnow().isoformat(),
             "hashEvidence": hash_info.get("evidence", []),
             "analysisWarnings": analysis_warnings,
+            "scoreBreakdown": score_breakdown,
         },
     }
     return {"status": status, "threat_score": score, "details": details}
@@ -3823,26 +4539,73 @@ async def scan_url(
 async def scan_hash(
         scan_type: str = Form(...),
         target: str = Form(...),
-        status: str = Form(...),
-        threat_score: int = Form(...),
-        details: str = Form(...),
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
     try:
+        normalized_target = (target or "").strip().lower()
+        hash_type = _normalize_hash_type(normalized_target)
+        if hash_type is None:
+            raise HTTPException(status_code=400, detail="Unsupported hash format. Use MD5, SHA-1, or SHA-256.")
+
+        hash_info = _hash_reputation_lookup(
+            db,
+            normalized_target if hash_type == "md5" else "",
+            normalized_target if hash_type == "sha1" else "",
+            normalized_target if hash_type == "sha256" else "",
+        )
+
+        threat_score = 0
+        status = "clean"
+        strong_malicious_sources = {"local-hash-feed", "malwarebazaar", "threat-feed-collision"}
+        matched_sources = set(hash_info.get("sources", []))
+        if hash_info["databaseMatch"] and matched_sources.intersection(strong_malicious_sources):
+            threat_score = min(100, 78 + min(18, hash_info["detections"] * 4))
+            status = "malicious"
+        elif hash_info["databaseMatch"]:
+            threat_score = min(100, 42 + min(25, hash_info["detections"] * 4))
+            status = "suspicious"
+        elif hash_info.get("knownGoodMatch"):
+            threat_score = 0
+            status = "clean"
+
+        details_payload = {
+            "hash": normalized_target,
+            "hashType": hash_type.upper(),
+            "found": bool(hash_info["databaseMatch"]),
+            "detections": int(hash_info["detections"]),
+            "engines": int(hash_info["engines"]),
+            "malwareFamily": hash_info.get("malwareFamily") or "None",
+            "firstSeen": hash_info.get("firstSeen"),
+            "sources": hash_info.get("sources", []),
+            "evidence": hash_info.get("evidence", []),
+            "knownGoodMatch": bool(hash_info.get("knownGoodMatch")),
+            "knownGoodName": hash_info.get("knownGoodName"),
+            "knownGoodProduct": hash_info.get("knownGoodProduct"),
+            "providerDetails": hash_info.get("providerDetails", {}),
+        }
+
         scan = Scan(
             user_id=current_user.id,
             scan_type=scan_type,
-            target=target,
+            target=normalized_target,
             status=status,
             threat_score=threat_score,
-            details=details
+            details=json.dumps(details_payload)
         )
         db.add(scan)
         db.commit()
-        create_audit_log(db, current_user.id, "Hash Check", f"Checked {target[:16]}...")
-        return {"success": True, "scan_id": scan.id}
+        create_audit_log(db, current_user.id, "Hash Check", f"Checked {normalized_target[:16]}...")
+        return {
+            "success": True,
+            "scan_id": scan.id,
+            "status": status,
+            "threat_score": threat_score,
+            "details": details_payload,
+        }
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -5222,8 +5985,7 @@ def _compute_verdict(
     target_filename: Optional[str] = None,
     scan_mode: str = "file",
 ) -> tuple:
-    """Heuristic scoring on normalised data."""
-    score = 0
+    """Weighted heuristic scoring on normalised sandbox telemetry."""
     findings = []
     action = (open_action or "").lower()
     mode = (scan_mode or "file").lower()
@@ -5233,21 +5995,28 @@ def _compute_verdict(
     executable_like_actions = {"execute", "shell-open", "test"}
     executable_like_exts = {".exe", ".dll", ".com", ".scr", ".pif", ".msi", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".wsf", ".hta"}
 
+    file_score = 0
+    registry_score = 0
+    process_score = 0
+    network_score = 0
+    context_score = 0
+    modifier_score = 0
+
     # Suspicious file writes and registry activity.
     susp_files = [f for f in files if f.get("suspicious")]
     local_file_changes = [f for f in files if str(f.get("path") or "").strip()]
     susp_reg = [r for r in registry if r.get("suspicious")]
     if susp_files:
-        score += 20
+        file_score += min(22, 8 + len(susp_files) * 7)
         findings.append(f"{len(susp_files)} suspicious file system change(s)")
     elif local_file_changes and not is_url_mode:
         if action in executable_like_actions or ext in executable_like_exts:
-            score += 12
+            file_score += min(10, 4 + len(local_file_changes) * 2)
             findings.append(f"{len(local_file_changes)} local file change(s) observed during executable run")
         else:
             findings.append(f"{len(local_file_changes)} local file change(s) observed")
     if susp_reg:
-        score += 30
+        registry_score += min(34, 18 + len(susp_reg) * 8)
         findings.append(f"{len(susp_reg)} suspicious registry write(s) - possible persistence")
 
     high_risk_procs = [p for p in processes if p.get("riskLevel") == "high" or p.get("suspicious")]
@@ -5262,7 +6031,7 @@ def _compute_verdict(
     high_risk_non_web = [n for n in non_web_net if n.get("networkRisk") == "high"]
 
     if high_risk_procs:
-        score += 35
+        process_score += min(36, 18 + len(high_risk_procs) * 8)
         findings.append(
             f"{len(high_risk_procs)} high-risk process(es) observed: "
             + ", ".join(p["name"] for p in high_risk_procs[:8])
@@ -5274,26 +6043,26 @@ def _compute_verdict(
         and (action in executable_like_actions or ext in executable_like_exts)
     ):
         if observed_userland_processes:
-            score += 14
+            process_score += min(14, 6 + len(observed_userland_processes))
             findings.append(
                 f"{len(observed_userland_processes)} runtime process(es) captured during sample execution"
             )
         else:
-            score += 8
+            process_score += 4
             findings.append(
                 "Sample launch succeeded but only minimal runtime telemetry was captured"
             )
 
     if contextual_shell:
         if high_risk_procs or susp_files or susp_reg or non_web_net:
-            score += 12
+            context_score += min(10, 4 + len(contextual_shell) * 2)
             findings.append(f"{len(contextual_shell)} shell process(es) correlated with other suspicious indicators")
         else:
             findings.append("Contextual shell activity observed but treated as low-confidence monitor noise")
 
     # External network connections.
     if non_web_net:
-        score += 30 if high_risk_non_web else 20
+        network_score += min(38, (26 if high_risk_non_web else 16) + len(non_web_net) * 4)
         if high_risk_non_web:
             findings.append(f"{len(high_risk_non_web)} high-risk non-web external connection(s) made")
         findings.append(f"{len(non_web_net)} non-web external connection(s) made")
@@ -5308,17 +6077,18 @@ def _compute_verdict(
         elif open_success is False and not has_other_categories:
             findings.append("Launch failed; outbound web traffic treated as background baseline")
         elif has_other_categories:
-            score += 10
+            network_score += min(10, 4 + len(web_net))
             findings.append(f"{len(web_net)} outbound web connection(s) alongside local suspicious indicators")
         elif action in {"execute", "test"}:
-            score += 8
+            network_score += min(8, 3 + len(web_net))
             findings.append(f"{len(web_net)} outbound web connection(s) during executable/script run")
         else:
-            score += 4
             findings.append(f"{len(web_net)} outbound web connection(s) observed (low-confidence)")
 
+    score = file_score + registry_score + process_score + network_score + context_score + modifier_score
+
     if open_success is False and not (high_risk_procs or susp_files or susp_reg or non_web_net):
-        score = min(score, 10)
+        score = min(score, 8)
         findings.append("Sample launch was not successful; verdict confidence reduced")
 
     if is_document_open and not (high_risk_procs or susp_files or susp_reg or non_web_net):
@@ -5330,15 +6100,37 @@ def _compute_verdict(
     if not findings:
         findings.append("No suspicious behaviour detected during sandbox execution")
 
-    if high_risk_procs or susp_reg or non_web_net:
+    active_components = sum(
+        1 for value in (file_score, registry_score, process_score, network_score, context_score) if value > 0
+    )
+
+    if susp_reg or high_risk_non_web or len(high_risk_procs) >= 2 or (high_risk_procs and susp_files):
+        confidence = "high"
+    elif active_components >= 2 or (high_risk_procs and web_net):
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    findings.insert(
+        0,
+        "Score breakdown: "
+        f"process={process_score}, network={network_score}, filesystem={file_score}, "
+        f"registry={registry_score}, context={context_score}",
+    )
+
+    if confidence == "high":
         findings.append("Signal confidence: high")
-    elif susp_files or (web_net and contextual_shell and action in {"execute", "test"}):
+    elif confidence == "medium":
         findings.append("Signal confidence: medium")
     else:
         findings.append("Signal confidence: low")
 
     score = min(100, score)
-    verdict = "malicious" if score >= 60 else "suspicious" if score >= 25 else "clean"
+    verdict = "clean"
+    if score >= 72 or (confidence == "high" and score >= 58):
+        verdict = "malicious"
+    elif score >= 32 or (confidence == "medium" and score >= 24):
+        verdict = "suspicious"
     return verdict, score, findings
 
 

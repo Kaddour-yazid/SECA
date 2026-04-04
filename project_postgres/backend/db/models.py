@@ -133,6 +133,18 @@ class GroupProxyAssignment(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class ExternalReputationCache(Base):
+    __tablename__ = "external_reputation_cache"
+
+    id = Column(Integer, primary_key=True, index=True)
+    provider = Column(String, index=True, nullable=False)
+    lookup_key = Column(String, index=True, nullable=False)
+    status = Column(String, nullable=False, default="miss")
+    payload = Column(Text, nullable=True)
+    expires_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class EmailOtp(Base):
     __tablename__ = "email_otps"
 
