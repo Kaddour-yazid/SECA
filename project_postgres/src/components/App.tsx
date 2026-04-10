@@ -7,6 +7,7 @@ import { LoginView } from './LoginView';
 import { DashboardView } from './DashboardView';
 import { FileScannerView } from './FileScannerView';
 import { URLScannerView } from './URLScannerView';
+import { EmailScannerView } from './EmailScannerView';
 import { HashCheckerView } from './HashCheckerView';
 import { AuditLogsView } from './AuditLogsView';
 import { GatewayStartView } from './GatewayStartView';
@@ -213,6 +214,9 @@ function AppContent() {
           </div>
           <div className={activeView === 'url' ? 'h-full' : 'hidden h-full'}>
             <URLScannerView />
+          </div>
+          <div className={activeView === 'email' ? 'h-full' : 'hidden h-full'}>
+            <EmailScannerView />
           </div>
           <div className={activeView === 'hash' ? 'h-full' : 'hidden h-full'}>
             <HashCheckerView />

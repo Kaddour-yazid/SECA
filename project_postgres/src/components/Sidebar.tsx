@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { FileText, Globe, Hash, LayoutDashboard, Network, Settings, ShieldBan, ScrollText } from 'lucide-react';
+import { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight, FileText, Globe, Hash, LayoutDashboard, Mail, Network, Settings, ShieldBan, ScrollText } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useTheme } from '../contexts/ThemeContext';
@@ -27,20 +27,18 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
   const { theme } = useTheme();
   const navRef = useRef<HTMLElement | null>(null);
   const itemRefs = useRef<Record<string, HTMLButtonElement | null>>({});
-  const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [isHovered, setIsHovered] = useState(false);
+  const [isCollapsed, setIsCollapsed] = useState(true);
   const [activeIndicator, setActiveIndicator] = useState({
     top: 0,
     height: 0,
     ready: false,
   });
 
-  const isCollapsed = !isHovered;
-
   const scanningItems: MenuItem[] = [
     { id: 'dashboard', label: translateText('Dashboard'), icon: LayoutDashboard },
     { id: 'file', label: translateText('File Scanner'), icon: FileText },
     { id: 'url', label: translateText('URL Scanner'), icon: Globe },
+    { id: 'email', label: translateText('Email Scanner'), icon: Mail },
     { id: 'hash', label: translateText('Hash Checker'), icon: Hash },
   ];
 
@@ -61,8 +59,8 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
 
   const isLight = theme === 'light';
   const sidebarShellClass = isLight
-    ? `${isCollapsed ? 'w-20' : 'w-64'} overflow-hidden bg-[#f8fbff] border-r border-[#d9e6f2] flex flex-col transition-[width] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]`
-    : `${isCollapsed ? 'w-20' : 'w-64'} overflow-hidden bg-slate-800 border-r border-slate-700 flex flex-col transition-[width] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]`;
+    ? `${isCollapsed ? 'w-20' : 'w-64'} overflow-hidden bg-[#f8fbff] border-r border-[#d9e6f2] flex flex-col transition-[width] duration-300 ease-out`
+    : `${isCollapsed ? 'w-20' : 'w-64'} overflow-hidden bg-slate-800 border-r border-slate-700 flex flex-col transition-[width] duration-300 ease-out`;
   const navDefaultClass = isLight
     ? 'text-slate-700 bg-transparent hover:bg-sky-100 hover:text-sky-700'
     : 'text-slate-300 bg-transparent hover:bg-cyan-500/10 hover:text-cyan-400';
@@ -75,6 +73,15 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
     : `inline-flex h-10 ${isCollapsed ? 'w-10' : 'min-w-[200px] px-4'} items-center justify-center rounded-xl border border-slate-700 bg-slate-900/70 text-slate-200 hover:border-cyan-500/40 hover:text-cyan-200 transition-all duration-300`;
   const dividerClass = isLight ? 'bg-slate-300/80' : 'bg-white/10';
   const sectionLabelClass = isLight ? 'text-slate-500' : 'text-slate-500';
+  const toggleButtonClass = isLight
+    ? 'border border-[#d9e6f2] bg-white text-slate-600 shadow-[0_8px_24px_rgba(15,23,42,0.12)] hover:border-sky-300 hover:text-sky-700'
+    : 'border border-slate-600 bg-slate-900 text-slate-300 shadow-[0_8px_24px_rgba(2,6,23,0.45)] hover:border-cyan-500/40 hover:text-cyan-200';
+  const sidebarGlowClass = isLight
+    ? 'bg-[radial-gradient(circle_at_left,rgba(56,189,248,0.18)_0%,rgba(125,211,252,0.12)_28%,rgba(255,255,255,0)_72%)]'
+    : 'bg-[radial-gradient(circle_at_left,rgba(34,211,238,0.18)_0%,rgba(8,145,178,0.12)_28%,rgba(15,23,42,0)_72%)]';
+  const toggleGlowClass = isLight
+    ? 'bg-[radial-gradient(circle,rgba(56,189,248,0.28)_0%,rgba(125,211,252,0.16)_45%,rgba(255,255,255,0)_75%)]'
+    : 'bg-[radial-gradient(circle,rgba(34,211,238,0.30)_0%,rgba(6,182,212,0.18)_45%,rgba(15,23,42,0)_75%)]';
 
   const updateActiveIndicator = useCallback(() => {
     const navEl = navRef.current;
@@ -112,38 +119,12 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
     };
   }, [updateActiveIndicator, menuItems.length, isCollapsed]);
 
-  useEffect(() => {
-    return () => {
-      if (hoverTimeoutRef.current) {
-        clearTimeout(hoverTimeoutRef.current);
-      }
-    };
-  }, []);
-
-  const handleMouseEnter = () => {
-    if (hoverTimeoutRef.current) {
-      clearTimeout(hoverTimeoutRef.current);
-      hoverTimeoutRef.current = null;
-    }
-    setIsHovered(true);
-  };
-
-  const handleMouseLeave = () => {
-    if (hoverTimeoutRef.current) {
-      clearTimeout(hoverTimeoutRef.current);
-    }
-    hoverTimeoutRef.current = setTimeout(() => {
-      setIsHovered(false);
-      hoverTimeoutRef.current = null;
-    }, 120);
-  };
-
   return (
-    <div
-      className={sidebarShellClass}
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
-    >
+    <aside className="group/sidebar relative flex h-full">
+      <div className="pointer-events-none absolute inset-y-0 left-0 w-40">
+        <div className={`absolute -left-12 top-10 h-[78%] w-48 rounded-full blur-3xl ${sidebarGlowClass}`} />
+      </div>
+      <div className={sidebarShellClass}>
       <nav
         ref={navRef}
         className={`relative flex-1 ${isCollapsed ? 'px-2 py-4' : 'px-4 py-5'} overflow-y-auto [&::-webkit-scrollbar]:hidden`}
@@ -232,6 +213,20 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
           </button>
         </div>
       </div>
-    </div>
+
+      <div className="pointer-events-none absolute right-0 top-1/2 z-20 h-14 w-14 translate-x-1/2 -translate-y-1/2 opacity-0 transition-opacity duration-200 group-hover/sidebar:opacity-100">
+        <div className={`h-full w-full rounded-full blur-md ${toggleGlowClass}`} />
+      </div>
+      <button
+        type="button"
+        onClick={() => setIsCollapsed((prev) => !prev)}
+        className={`absolute right-0 top-1/2 z-30 flex h-9 w-9 translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full transition-all duration-200 opacity-0 group-hover/sidebar:opacity-100 ${toggleButtonClass}`}
+        aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        title={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+      >
+        {isCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+      </button>
+      </div>
+    </aside>
   );
 }

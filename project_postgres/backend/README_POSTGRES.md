@@ -163,3 +163,29 @@ python check_db_security.py
 Safe dynamic sandbox test sample is available at:
 
 `db/test_samples/benign_dynamic_probe.cmd`
+
+## Threat feed import from Kaggle
+
+The backend can import the public dataset `sid321axn/malicious-urls-dataset` into `threat_urls`.
+
+From `project_postgres/backend`:
+
+```powershell
+.\.venv\Scripts\python.exe .\db\import_kaggle_malicious_urls.py
+```
+
+What it does:
+- downloads the dataset through `kagglehub`
+- reads `malicious_phish.csv`
+- imports only `phishing`, `malware`, and `defacement`
+- skips `benign`
+- normalizes scheme-less rows to `https://...`
+- stores URLs encrypted in `threat_urls`
+
+Useful options:
+
+```powershell
+.\.venv\Scripts\python.exe .\db\import_kaggle_malicious_urls.py --dry-run
+.\.venv\Scripts\python.exe .\db\import_kaggle_malicious_urls.py --limit 5000
+.\.venv\Scripts\python.exe .\db\import_kaggle_malicious_urls.py --verified
+```

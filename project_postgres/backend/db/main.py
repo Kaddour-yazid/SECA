@@ -11,16 +11,19 @@ from email import policy
 from email.parser import BytesParser, Parser
 from email.utils import getaddresses
 import asyncio
+import base64
 import uuid
 import fnmatch
 from concurrent.futures import ThreadPoolExecutor
 import json
 import ipaddress
 import hashlib
+import io
 import math
 import re
 import os
 import socket
+import ssl
 import shutil
 import subprocess
 import tempfile
@@ -29,7 +32,7 @@ import logging
 import threading
 import urllib.error
 import urllib.request
-from urllib.parse import quote, urlencode, urlparse, urlsplit
+from urllib.parse import quote, urlencode, urlparse, urlsplit, urljoin
 from datetime import datetime, timedelta
 from html import unescape
 import unicodedata
@@ -68,6 +71,12 @@ try:
     import yara  # type: ignore
 except Exception:
     yara = None
+
+try:
+    from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError  # type: ignore
+except Exception:
+    async_playwright = None
+    PlaywrightTimeoutError = Exception
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -2429,6 +2438,99 @@ DOMAIN_ONLY_REPUTATION_HOSTS = {
     "discord.com",
     "cdn.discordapp.com",
 }
+TRUSTED_ROOT_DOMAINS = {
+    "youtube.com",
+    "google.com",
+    "facebook.com",
+    "instagram.com",
+    "github.com",
+    "microsoft.com",
+    "apple.com",
+    "amazon.com",
+    "linkedin.com",
+    "reddit.com",
+    "tiktok.com",
+    "discord.com",
+    "dropbox.com",
+    "openai.com",
+    "chatgpt.com",
+    "whatsapp.com",
+    "x.com",
+    "twitter.com",
+    "netflix.com",
+    "spotify.com",
+    "telegram.org",
+}
+TRUSTED_BRAND_TOKENS = {
+    "youtube": {"youtube.com", "youtu.be"},
+    "google": {"google.com", "googleapis.com", "gstatic.com"},
+    "facebook": {"facebook.com", "fb.com", "fbcdn.net", "fbsbx.com", "messenger.com"},
+    "instagram": {"instagram.com", "cdninstagram.com"},
+    "github": {"github.com", "githubusercontent.com"},
+    "microsoft": {"microsoft.com", "live.com", "office.com", "outlook.com"},
+    "apple": {"apple.com", "icloud.com"},
+    "amazon": {"amazon.com", "amazonaws.com"},
+    "linkedin": {"linkedin.com"},
+    "paypal": {"paypal.com"},
+    "discord": {"discord.com", "discord.gg"},
+    "openai": {"openai.com", "chatgpt.com"},
+}
+TRUSTED_BRAND_PATH_TOKENS = tuple(TRUSTED_BRAND_TOKENS.keys())
+MULTI_LABEL_PUBLIC_SUFFIXES = {
+    "co.uk",
+    "org.uk",
+    "gov.uk",
+    "ac.uk",
+    "com.au",
+    "net.au",
+    "org.au",
+    "co.jp",
+    "com.br",
+    "com.tr",
+    "co.in",
+    "com.mx",
+    "com.cn",
+}
+
+
+def _hostname_matches_root(hostname: str, root: str) -> bool:
+    host = (hostname or "").strip().lower()
+    normalized_root = (root or "").strip().lower()
+    return bool(host) and (host == normalized_root or host.endswith(f".{normalized_root}"))
+
+
+def _is_trusted_root_domain(hostname: str) -> bool:
+    return any(_hostname_matches_root(hostname, root) for root in TRUSTED_ROOT_DOMAINS)
+
+
+def _brand_impersonation_tokens(hostname: str) -> List[str]:
+    host = (hostname or "").strip().lower()
+    if not host:
+        return []
+
+    found: List[str] = []
+    for token, allowed_roots in TRUSTED_BRAND_TOKENS.items():
+        if token not in host:
+            continue
+        if any(_hostname_matches_root(host, allowed_root) for allowed_root in allowed_roots):
+            continue
+        found.append(token)
+    return found
+
+
+def _guess_registered_domain(hostname: str) -> str:
+    host = (hostname or "").strip().lower().strip(".")
+    parts = [part for part in host.split(".") if part]
+    if len(parts) <= 2:
+        return host
+
+    tail2 = ".".join(parts[-2:])
+    tail3 = ".".join(parts[-3:])
+    if tail2 in MULTI_LABEL_PUBLIC_SUFFIXES and len(parts) >= 3:
+        return tail3
+    if ".".join(parts[-2:]) in {"co", "com", "net", "org"} and len(parts) >= 3:
+        return tail3
+    return tail2
 
 
 def _clean_email_text(text: str) -> str:
@@ -2953,7 +3055,7 @@ def layer2_phishtank_check(url: str, db: Session) -> Dict[str, Any]:
     """Layer 2: Malicious URL Database Check (75K+ URLs)"""
     normalized_url = url.strip()
     parsed_url = urlparse(normalized_url)
-    domain = (parsed_url.netloc or parsed_url.hostname or "").lower()
+    domain = (parsed_url.hostname or parsed_url.netloc or "").lower()
 
     # Check imported threat feed entries stored in PostgreSQL.
     try:
@@ -2977,17 +3079,32 @@ def layer2_phishtank_check(url: str, db: Session) -> Dict[str, Any]:
             domain_matches = db.query(ThreatUrl).filter(ThreatUrl.domain == domain).count()
             if domain_matches > 0:
                 logger.info(f"DOMAIN MATCH: {domain} appears in {domain_matches} threat feed entries")
-                downgraded = domain in DOMAIN_ONLY_REPUTATION_HOSTS
+                shared_host = domain in DOMAIN_ONLY_REPUTATION_HOSTS
+                trusted_root = _is_trusted_root_domain(domain)
+                downgraded = shared_host or trusted_root
+                domain_context = (
+                    "trusted_root"
+                    if trusted_root
+                    else "shared_host"
+                    if shared_host
+                    else "standard"
+                )
+                domain_only_score = 0 if downgraded else 20
                 return {
-                    "found": not downgraded,
+                    "found": False if downgraded else True,
                     "verified": False,
                     "domain_matches": domain_matches,
                     "threat_level": "low" if downgraded else "medium",
                     "match_type": "domain_only",
-                    "downgraded_shared_host": downgraded,
+                    "downgraded_shared_host": shared_host,
+                    "downgraded_trusted_root": trusted_root,
+                    "domain_context": domain_context,
+                    "domain_only_score": domain_only_score,
                     "message": (
-                        f"Domain appears in {domain_matches} imported threat feed entries, but this is a shared hosting platform"
-                        if downgraded
+                        f"Domain appears in {domain_matches} imported threat feed entries, but this is a trusted root domain and only exact URL hits are treated as malicious"
+                        if trusted_root
+                        else f"Domain appears in {domain_matches} imported threat feed entries, but this is a shared hosting platform"
+                        if shared_host
                         else f"Domain appears in {domain_matches} imported threat feed entries"
                     ),
                 }
@@ -3021,7 +3138,8 @@ def layer2_phishtank_check(url: str, db: Session) -> Dict[str, Any]:
 def layer3_domain_reputation(url: str) -> Dict[str, Any]:
     """Layer 3: Domain Reputation Check"""
     parsed = urlparse(url)
-    domain = parsed.netloc
+    domain = (parsed.hostname or parsed.netloc or "").lower()
+    path_and_query = f"{parsed.path or ''}?{parsed.query or ''}".lower()
 
     # Simulate domain reputation checks
     suspicious_tlds = ['.tk', '.ml', '.ga', '.cf', '.gq', '.xyz', '.top']
@@ -3034,6 +3152,12 @@ def layer3_domain_reputation(url: str) -> Dict[str, Any]:
     # Check for subdomain tricks (e.g., paypal.malicious.com)
     subdomain_count = domain.count('.')
     suspicious_subdomain = subdomain_count > 2
+    trusted_root = _is_trusted_root_domain(domain)
+    brand_impersonation = _brand_impersonation_tokens(domain)
+    trusted_brand_path_tokens = [
+        token for token in TRUSTED_BRAND_PATH_TOKENS
+        if token in path_and_query and token not in domain
+    ]
 
     issues = []
     reputation_score = 100
@@ -3046,9 +3170,17 @@ def layer3_domain_reputation(url: str) -> Dict[str, Any]:
         issues.append("Domain contains suspicious keywords")
         reputation_score -= 20
 
-    if suspicious_subdomain:
+    if suspicious_subdomain and not trusted_root:
         issues.append("Multiple subdomains detected")
         reputation_score -= 15
+
+    if brand_impersonation:
+        issues.append(f"Domain imitates trusted brands: {', '.join(brand_impersonation[:3])}")
+        reputation_score -= 35
+
+    if trusted_brand_path_tokens and not trusted_root:
+        issues.append(f"Path/query references trusted brands on an unrelated host: {', '.join(trusted_brand_path_tokens[:3])}")
+        reputation_score -= 10
 
     # Check for homograph attacks (IDN)
     if any(ord(char) > 127 for char in domain):
@@ -3060,6 +3192,9 @@ def layer3_domain_reputation(url: str) -> Dict[str, Any]:
         "reputation_score": max(0, reputation_score),
         "suspicious_tld": is_suspicious_tld,
         "suspicious_keywords": has_suspicious_keywords,
+        "trusted_root_domain": trusted_root,
+        "brand_impersonation": brand_impersonation,
+        "path_brand_abuse": trusted_brand_path_tokens,
         "issues": issues,
         "threat_level": "high" if reputation_score < 50 else "medium" if reputation_score < 75 else "low"
     }
@@ -3069,16 +3204,17 @@ def layer4_content_analysis(url: str) -> Dict[str, Any]:
     """Layer 4: Content Analysis (simulated)"""
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
+    full_lower = url.lower()
 
     indicators = []
     threat_score = 0
 
     # Check for common phishing patterns
-    if 'verify' in url.lower() or 'confirm' in url.lower():
+    if 'verify' in full_lower or 'confirm' in full_lower:
         indicators.append("URL contains verification/confirmation language")
         threat_score += 15
 
-    if 'suspended' in url.lower() or 'locked' in url.lower():
+    if 'suspended' in full_lower or 'locked' in full_lower:
         indicators.append("URL suggests account suspension/lock")
         threat_score += 20
 
@@ -3089,9 +3225,24 @@ def layer4_content_analysis(url: str) -> Dict[str, Any]:
         threat_score += 10
 
     # Check for suspicious query parameters
-    if 'token' in url.lower() or 'session' in url.lower():
+    if 'token' in full_lower or 'session' in full_lower:
         indicators.append("Contains authentication parameters")
         threat_score += 10
+
+    if not _is_trusted_root_domain(host):
+        host_impersonation = _brand_impersonation_tokens(host)
+        if host_impersonation:
+            indicators.append(f"Host imitates trusted brands: {', '.join(host_impersonation[:3])}")
+            threat_score += 18
+
+        deceptive_brands = [token for token in TRUSTED_BRAND_PATH_TOKENS if token in full_lower and token not in host]
+        if deceptive_brands:
+            indicators.append(f"Unrelated host references trusted brands: {', '.join(deceptive_brands[:3])}")
+            threat_score += 15
+
+    if re.search(r"https?%3a|https?://", parsed.path.lower()) or re.search(r"https?%3a|https?://", parsed.query.lower()):
+        indicators.append("Embedded external URL detected in path or query")
+        threat_score += 12
 
     # Open-source-inspired URL heuristics used by many scanners.
     if host.startswith("xn--") or any(ord(char) > 127 for char in host):
@@ -3133,6 +3284,865 @@ def layer4_content_analysis(url: str) -> Dict[str, Any]:
     }
 
 
+URL_DETAILS_TIMEOUT_SECONDS = 6.0
+URL_DETAILS_MAX_BODY_BYTES = 512 * 1024
+URL_SCAN_MIN_DURATION_SECONDS = 1.6
+URL_SCREENSHOT_TIMEOUT_MS = 12000
+URL_SCREENSHOT_VIEWPORT_WIDTH = 1440
+URL_SCREENSHOT_VIEWPORT_HEIGHT = 960
+HTML_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+HTML_HREF_RE = re.compile(r"""href\s*=\s*["']([^"'#]+)["']""", re.IGNORECASE)
+
+
+class _TrackingRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.chain: List[Dict[str, Any]] = []
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        self.chain.append({
+            "status_code": int(code),
+            "location": str(newurl),
+        })
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _safe_iso(dt: Optional[datetime]) -> Optional[str]:
+    return dt.isoformat() if isinstance(dt, datetime) else None
+
+
+def _extract_html_title(body_bytes: bytes) -> Optional[str]:
+    if not body_bytes:
+        return None
+    try:
+        snippet = body_bytes[:65536].decode("utf-8", "ignore")
+    except Exception:
+        return None
+    match = HTML_TITLE_RE.search(snippet)
+    if not match:
+        return None
+    title = unescape(match.group(1)).strip()
+    title = re.sub(r"\s+", " ", title)
+    return title[:240] if title else None
+
+
+def _extract_links_from_html(base_url: str, body_bytes: bytes, limit: int = 20) -> List[str]:
+    if not body_bytes:
+        return []
+    try:
+        snippet = body_bytes[:200000].decode("utf-8", "ignore")
+    except Exception:
+        return []
+
+    links: List[str] = []
+    seen = set()
+    for raw_link in HTML_HREF_RE.findall(snippet):
+        try:
+            absolute = urljoin(base_url, raw_link.strip())
+            parsed = urlparse(absolute)
+            if parsed.scheme not in {"http", "https"}:
+                continue
+            normalized = absolute.strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            links.append(normalized)
+            if len(links) >= limit:
+                break
+        except Exception:
+            continue
+    return links
+
+
+def _resolve_dns_addresses(hostname: str) -> List[str]:
+    host = (hostname or "").strip()
+    if not host:
+        return []
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception:
+        return []
+
+    addresses: List[str] = []
+    seen = set()
+    for info in infos:
+        sockaddr = info[4]
+        ip = str(sockaddr[0]).strip()
+        if not ip or ip in seen:
+            continue
+        seen.add(ip)
+        addresses.append(ip)
+    return addresses[:12]
+
+
+def _fetch_tls_summary(target_url: str) -> Dict[str, Any]:
+    parsed = urlparse(target_url)
+    hostname = (parsed.hostname or "").strip().lower()
+    port = parsed.port or 443
+    if parsed.scheme != "https" or not hostname:
+        return {"available": False}
+
+    try:
+        context = ssl.create_default_context()
+        with socket.create_connection((hostname, port), timeout=URL_DETAILS_TIMEOUT_SECONDS) as sock:
+            with context.wrap_socket(sock, server_hostname=hostname) as secure_sock:
+                cert = secure_sock.getpeercert()
+    except Exception as exc:
+        return {
+            "available": False,
+            "error": str(exc),
+        }
+
+    def _flatten_name(parts: Any) -> str:
+        try:
+            flattened = []
+            for item in parts or []:
+                for key, value in item:
+                    flattened.append(f"{key}={value}")
+            return ", ".join(flattened)
+        except Exception:
+            return ""
+
+    san_entries = []
+    for kind, value in cert.get("subjectAltName", []) if isinstance(cert, dict) else []:
+        if kind == "DNS":
+            san_entries.append(str(value))
+
+    return {
+        "available": True,
+        "subject": _flatten_name(cert.get("subject")) if isinstance(cert, dict) else "",
+        "issuer": _flatten_name(cert.get("issuer")) if isinstance(cert, dict) else "",
+        "valid_from": cert.get("notBefore") if isinstance(cert, dict) else None,
+        "valid_to": cert.get("notAfter") if isinstance(cert, dict) else None,
+        "serial_number": cert.get("serialNumber") if isinstance(cert, dict) else None,
+        "subject_alt_names": san_entries[:10],
+    }
+
+
+def _extract_rdap_event(payload: Dict[str, Any], event_action: str) -> Optional[str]:
+    for event in payload.get("events", []) if isinstance(payload, dict) else []:
+        if str(event.get("eventAction") or "").lower() == event_action.lower():
+            value = event.get("eventDate")
+            if value:
+                return str(value)
+    return None
+
+
+def _extract_registrar_name(payload: Dict[str, Any]) -> Optional[str]:
+    entities = payload.get("entities", []) if isinstance(payload, dict) else []
+    for entity in entities:
+        roles = [str(role).lower() for role in entity.get("roles", [])]
+        if "registrar" not in roles:
+            continue
+        vcard = entity.get("vcardArray")
+        if isinstance(vcard, list) and len(vcard) >= 2 and isinstance(vcard[1], list):
+            for entry in vcard[1]:
+                if isinstance(entry, list) and len(entry) >= 4 and str(entry[0]).lower() == "fn":
+                    value = entry[3]
+                    if value:
+                        return str(value)
+        handle = entity.get("handle")
+        if handle:
+            return str(handle)
+    return None
+
+
+def _extract_entity_vcard_text(entity: Dict[str, Any], field_name: str) -> Optional[str]:
+    vcard = entity.get("vcardArray")
+    if not (isinstance(vcard, list) and len(vcard) >= 2 and isinstance(vcard[1], list)):
+        return None
+    for entry in vcard[1]:
+        if not (isinstance(entry, list) and len(entry) >= 4):
+            continue
+        if str(entry[0]).lower() != field_name.lower():
+            continue
+        value = entry[3]
+        if isinstance(value, list):
+            flattened = [str(item).strip() for item in value if str(item).strip()]
+            return ", ".join(flattened) if flattened else None
+        if value:
+            return str(value)
+    return None
+
+
+def _extract_entity_country(entity: Dict[str, Any]) -> Optional[str]:
+    adr_value = _extract_entity_vcard_text(entity, "adr")
+    if adr_value:
+        parts = [part.strip() for part in adr_value.split(",") if part.strip()]
+        if parts:
+            return parts[-1]
+    country_value = _extract_entity_vcard_text(entity, "country-name")
+    if country_value:
+        return country_value
+    return None
+
+
+def _extract_entity_email(entity: Dict[str, Any]) -> Optional[str]:
+    email_value = _extract_entity_vcard_text(entity, "email")
+    if email_value:
+        return email_value
+    return None
+
+
+def _extract_registry_country(payload: Dict[str, Any]) -> Optional[str]:
+    entities = payload.get("entities", []) if isinstance(payload, dict) else []
+    for entity in entities:
+        roles = [str(role).lower() for role in entity.get("roles", [])]
+        if "registrar" in roles or "registrant" in roles:
+            country = _extract_entity_country(entity)
+            if country:
+                return country
+    return None
+
+
+def _extract_abuse_contact(payload: Dict[str, Any]) -> Optional[str]:
+    entities = payload.get("entities", []) if isinstance(payload, dict) else []
+    for entity in entities:
+        roles = [str(role).lower() for role in entity.get("roles", [])]
+        if "abuse" in roles:
+            email_value = _extract_entity_email(entity)
+            if email_value:
+                return email_value
+            handle = entity.get("handle")
+            if handle:
+                return str(handle)
+    return None
+
+
+def _fetch_domain_info(hostname: str) -> Dict[str, Any]:
+    host = (hostname or "").strip().lower()
+    if not host:
+        return {"available": False}
+
+    if _is_private_or_local_target_url(f"https://{host}/"):
+        return {
+            "available": False,
+            "error": "Refusing to collect domain intelligence for local/private targets.",
+        }
+
+    registered_domain = _guess_registered_domain(host)
+    dns_addresses = _resolve_dns_addresses(host)
+
+    rdap_url = f"https://rdap.org/domain/{registered_domain}"
+    request = urllib.request.Request(
+        rdap_url,
+        headers={"User-Agent": "SECA/1.0", "Accept": "application/rdap+json, application/json"},
+    )
+
+    rdap_payload: Dict[str, Any] = {}
+    rdap_error: Optional[str] = None
+    try:
+        with urllib.request.urlopen(request, timeout=URL_DETAILS_TIMEOUT_SECONDS) as response:
+            raw = response.read().decode("utf-8", "ignore")
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                rdap_payload = parsed
+    except Exception as exc:
+        rdap_error = str(exc)
+
+    nameservers = []
+    for entry in rdap_payload.get("nameservers", []) if isinstance(rdap_payload, dict) else []:
+        value = entry.get("ldhName") or entry.get("unicodeName")
+        if value:
+            nameservers.append(str(value))
+
+    return {
+        "available": bool(rdap_payload) or bool(dns_addresses),
+        "host": host,
+        "registered_domain": registered_domain,
+        "registrar": _extract_registrar_name(rdap_payload),
+        "registry_country": _extract_registry_country(rdap_payload),
+        "abuse_contact": _extract_abuse_contact(rdap_payload),
+        "created_at": _extract_rdap_event(rdap_payload, "registration"),
+        "updated_at": _extract_rdap_event(rdap_payload, "last changed"),
+        "expires_at": _extract_rdap_event(rdap_payload, "expiration"),
+        "dns_addresses": dns_addresses,
+        "nameservers": nameservers[:10],
+        "rdap_error": rdap_error,
+        "rdap_source": rdap_url,
+    }
+
+
+def _build_url_detail_categories(static_eval: Dict[str, Any]) -> List[str]:
+    categories: List[str] = []
+    details = static_eval.get("details") or {}
+    layers = details.get("layers") or {}
+    layer2 = layers.get("layer2_phishtank") or {}
+    layer4 = layers.get("layer4_content") or {}
+
+    threat_type = str(layer2.get("threat_type") or "").strip()
+    if threat_type:
+        categories.append(threat_type)
+
+    source = str(layer2.get("source") or "").strip()
+    if source:
+        categories.append(source)
+
+    match_type = str(layer2.get("match_type") or "").strip()
+    if match_type == "exact_url":
+        categories.append("exact-url-hit")
+    elif match_type == "domain_only":
+        categories.append("domain-only-hit")
+
+    for indicator in layer4.get("indicators") or []:
+        normalized = str(indicator).strip()
+        if normalized:
+            categories.append(normalized)
+        if len(categories) >= 6:
+            break
+
+    seen = set()
+    deduped: List[str] = []
+    for category in categories:
+        key = category.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(category)
+    return deduped[:6]
+
+
+def _lookup_url_scan_history(url: str, db: Session) -> Dict[str, Any]:
+    scans = (
+        db.query(Scan)
+        .filter(Scan.scan_type == "url_advanced", Scan.target == url)
+        .order_by(Scan.created_at.asc())
+        .all()
+    )
+    if not scans:
+        return {
+            "scan_count": 0,
+            "first_submission": None,
+            "last_submission": None,
+            "last_analysis": None,
+        }
+
+    first = scans[0]
+    last = scans[-1]
+    return {
+        "scan_count": len(scans),
+        "first_submission": _safe_iso(first.created_at),
+        "last_submission": _safe_iso(last.created_at),
+        "last_analysis": _safe_iso(last.created_at),
+    }
+
+
+def _fetch_url_http_response_details(target_url: str) -> Dict[str, Any]:
+    allowed, reason = _validate_dynamic_url_target(target_url)
+    if not allowed:
+        return {
+            "fetch_allowed": False,
+            "error": reason,
+        }
+
+    redirect_handler = _TrackingRedirectHandler()
+    opener = urllib.request.build_opener(redirect_handler)
+    request = urllib.request.Request(
+        target_url,
+        headers={
+            "User-Agent": "SECA/1.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+    )
+
+    response_obj = None
+    body = b""
+    status_code: Optional[int] = None
+    final_url = target_url
+    headers: Dict[str, str] = {}
+
+    try:
+        with opener.open(request, timeout=URL_DETAILS_TIMEOUT_SECONDS) as response:
+            response_obj = response
+            status_code = int(getattr(response, "status", 0) or response.getcode())
+            final_url = response.geturl() or target_url
+            headers = {str(key).lower(): str(value) for key, value in response.headers.items()}
+            body = response.read(URL_DETAILS_MAX_BODY_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        response_obj = exc
+        status_code = int(exc.code)
+        final_url = exc.geturl() or target_url
+        headers = {str(key).lower(): str(value) for key, value in exc.headers.items()}
+        body = exc.read(URL_DETAILS_MAX_BODY_BYTES + 1)
+    except Exception as exc:
+        return {
+            "fetch_allowed": True,
+            "error": str(exc),
+        }
+
+    truncated = len(body) > URL_DETAILS_MAX_BODY_BYTES
+    body = body[:URL_DETAILS_MAX_BODY_BYTES]
+    body_length = len(body)
+    body_sha256 = hashlib.sha256(body).hexdigest() if body else None
+    page_title = _extract_html_title(body)
+
+    try:
+        final_host = (urlparse(final_url).hostname or "").strip().lower()
+        resolved_ips = _resolve_dns_addresses(final_host)
+        serving_ip = resolved_ips[0] if resolved_ips else None
+    except Exception:
+        resolved_ips = []
+        serving_ip = None
+
+    header_items = [{"name": key, "value": value} for key, value in headers.items()]
+    content_length_raw = headers.get("content-length", "").strip()
+    try:
+        content_length = int(content_length_raw) if content_length_raw else body_length
+    except ValueError:
+        content_length = body_length
+
+    extracted_links = _extract_links_from_html(final_url, body)
+
+    return {
+        "fetch_allowed": True,
+        "final_url": final_url,
+        "serving_ip_address": serving_ip,
+        "resolved_ips": resolved_ips,
+        "status_code": status_code,
+        "body_length": content_length,
+        "body_sha256": body_sha256,
+        "headers": header_items,
+        "page_title": page_title,
+        "redirect_chain": redirect_handler.chain,
+        "outgoing_links": extracted_links,
+        "redirected": final_url != target_url,
+        "body_truncated": truncated,
+        "fetched_at": datetime.utcnow().isoformat(),
+        "tls": _fetch_tls_summary(final_url),
+    }
+
+
+async def _capture_url_screenshot_bytes(target_url: str) -> bytes:
+    allowed, reason = _validate_dynamic_url_target(target_url)
+    if not allowed:
+        raise HTTPException(status_code=400, detail=reason)
+    if async_playwright is None:
+        raise HTTPException(status_code=503, detail="Playwright is not installed on this backend.")
+
+    try:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            context = await browser.new_context(
+                viewport={
+                    "width": URL_SCREENSHOT_VIEWPORT_WIDTH,
+                    "height": URL_SCREENSHOT_VIEWPORT_HEIGHT,
+                },
+                ignore_https_errors=True,
+                java_script_enabled=True,
+            )
+            page = await context.new_page()
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=URL_SCREENSHOT_TIMEOUT_MS)
+            await page.wait_for_timeout(1200)
+            screenshot = await page.screenshot(type="png", full_page=False)
+            await context.close()
+            await browser.close()
+            return screenshot
+    except PlaywrightTimeoutError:
+        raise HTTPException(status_code=504, detail="Timed out while capturing website screenshot.")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Website screenshot failed: {exc}")
+
+
+def _image_bytes_to_data_url(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def _truncate_text(value: Any, max_length: int = 240) -> str:
+    text = str(value or "").strip()
+    if len(text) <= max_length:
+        return text
+    return text[: max_length - 3] + "..."
+
+
+def _extract_request_redirect_chain(request: Any) -> List[str]:
+    chain: List[str] = []
+    current = request
+    while current is not None:
+        try:
+            chain.append(str(current.url))
+            current = current.redirected_from
+        except Exception:
+            break
+    chain.reverse()
+    return chain
+
+
+async def _collect_form_summary(page: Any) -> Dict[str, Any]:
+    try:
+        return await page.evaluate(
+            """() => {
+                const forms = Array.from(document.forms || []);
+                const items = forms.slice(0, 10).map((form) => {
+                    const inputs = Array.from(form.querySelectorAll('input'));
+                    const passwordFields = inputs.filter((input) => (input.type || '').toLowerCase() === 'password').length;
+                    return {
+                        action: form.action || '',
+                        method: (form.method || 'get').toUpperCase(),
+                        inputCount: inputs.length,
+                        passwordFields,
+                    };
+                });
+                return {
+                    count: forms.length,
+                    passwordFormCount: items.filter((item) => item.passwordFields > 0).length,
+                    items,
+                };
+            }"""
+        )
+    except Exception:
+        return {"count": 0, "passwordFormCount": 0, "items": []}
+
+
+def _detect_browser_dynamic_indicators(
+    final_url: str,
+    outgoing_hosts: List[str],
+    console_messages: List[Dict[str, Any]],
+    downloads: List[Dict[str, Any]],
+    dialogs: List[Dict[str, Any]],
+    page_errors: List[str],
+    form_summary: Dict[str, Any],
+    html_snapshot: str,
+) -> List[str]:
+    indicators: List[str] = []
+    final_host = (urlparse(final_url).hostname or "").lower()
+
+    if downloads:
+        indicators.append("browser-triggered-download")
+    if dialogs:
+        indicators.append("browser-dialog")
+    if page_errors:
+        indicators.append("page-script-error")
+    if int(form_summary.get("passwordFormCount") or 0) > 0:
+        indicators.append("password-form-present")
+
+    suspicious_console_keywords = ("credential", "wallet", "captcha", "token", "phish", "verify")
+    for message in console_messages[:20]:
+        text = str(message.get("text") or "").lower()
+        if any(keyword in text for keyword in suspicious_console_keywords):
+            indicators.append("suspicious-console-text")
+            break
+
+    if len(outgoing_hosts) >= 8:
+        indicators.append("many-outgoing-hosts")
+
+    suspicious_script_tokens = (
+        "eval(",
+        "document.write(",
+        "fromcharcode(",
+        "atob(",
+        "unescape(",
+        "window.location.replace(",
+    )
+    lowered_html = html_snapshot.lower()
+    if any(token in lowered_html for token in suspicious_script_tokens):
+        indicators.append("obfuscated-script-pattern")
+
+    if final_host and int(form_summary.get("passwordFormCount") or 0) > 0:
+        for item in form_summary.get("items") or []:
+            action_host = (urlparse(str(item.get("action") or "")).hostname or "").lower()
+            if action_host and action_host != final_host:
+                indicators.append("cross-domain-password-form")
+                break
+
+    deduped: List[str] = []
+    seen = set()
+    for item in indicators:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped
+
+
+def _score_browser_dynamic_result(
+    final_url: str,
+    outgoing_hosts: List[str],
+    downloads: List[Dict[str, Any]],
+    dialogs: List[Dict[str, Any]],
+    page_errors: List[str],
+    form_summary: Dict[str, Any],
+    indicators: List[str],
+) -> Tuple[str, int, List[str]]:
+    score = 0
+    summary: List[str] = []
+
+    if downloads:
+        score += min(40, 20 + len(downloads) * 10)
+        summary.append(f"{len(downloads)} browser download event(s) observed")
+    if dialogs:
+        score += min(12, 4 + len(dialogs) * 4)
+        summary.append(f"{len(dialogs)} browser dialog event(s) observed")
+    if page_errors:
+        score += min(12, 4 + len(page_errors) * 2)
+        summary.append(f"{len(page_errors)} page script error(s) captured")
+
+    password_forms = int(form_summary.get("passwordFormCount") or 0)
+    if password_forms > 0:
+        score += min(20, 8 + password_forms * 5)
+        summary.append(f"{password_forms} password form(s) detected in rendered DOM")
+
+    if len(outgoing_hosts) >= 8:
+        score += 8
+        summary.append(f"{len(outgoing_hosts)} distinct outgoing host(s) observed")
+
+    if "cross-domain-password-form" in indicators:
+        score += 20
+        summary.append("Password form submits to a different domain")
+    if "obfuscated-script-pattern" in indicators:
+        score += 14
+        summary.append("Obfuscated JavaScript pattern observed in rendered HTML")
+    if "suspicious-console-text" in indicators:
+        score += 8
+        summary.append("Suspicious security-related console text observed")
+    if "browser-triggered-download" in indicators and password_forms > 0:
+        score += 10
+        summary.append("Download behaviour occurred alongside credential collection surface")
+
+    score = min(100, score)
+    verdict = "clean"
+    if score >= 55:
+        verdict = "malicious"
+    elif score >= 25:
+        verdict = "suspicious"
+
+    if not summary:
+        summary.append("No suspicious browser-level behaviour detected during fast dynamic scan")
+
+    summary.insert(0, f"Observed {len(outgoing_hosts)} outgoing host(s) while rendering {final_url}")
+    return verdict, score, summary
+
+
+async def _run_browser_dynamic_async(job_id: str, target_url: str) -> None:
+    job = _browser_dynamic_jobs[job_id]
+    started_at = time.time()
+
+    def update(step: str, progress: int) -> None:
+        job["step"] = step
+        job["progress"] = max(0, min(100, int(progress)))
+        logger.info("[job %s][browser] %s", job_id[:8], step)
+
+    def ensure_not_cancelled() -> None:
+        if job.get("cancel_requested"):
+            raise RuntimeError("Browser dynamic analysis cancelled by user.")
+
+    if async_playwright is None:
+        raise RuntimeError("Playwright is not installed on this backend.")
+
+    requests_seen: List[Dict[str, Any]] = []
+    responses_seen: List[Dict[str, Any]] = []
+    console_messages: List[Dict[str, Any]] = []
+    page_errors: List[str] = []
+    dialogs_seen: List[Dict[str, Any]] = []
+    downloads_seen: List[Dict[str, Any]] = []
+    outgoing_hosts: List[str] = []
+    outgoing_host_seen = set()
+    screenshot_timeline: List[Dict[str, Any]] = []
+    redirect_chain: List[str] = []
+
+    def on_request(request: Any) -> None:
+        if len(requests_seen) >= BROWSER_DYNAMIC_MAX_REQUESTS:
+            return
+        host = (urlparse(str(request.url)).hostname or "").lower()
+        if host and host not in outgoing_host_seen:
+            outgoing_host_seen.add(host)
+            outgoing_hosts.append(host)
+        requests_seen.append(
+            {
+                "method": str(request.method),
+                "url": str(request.url),
+                "resourceType": str(request.resource_type),
+            }
+        )
+
+    def on_response(response: Any) -> None:
+        if len(responses_seen) >= BROWSER_DYNAMIC_MAX_RESPONSES:
+            return
+        headers = {}
+        try:
+            headers = response.headers
+        except Exception:
+            headers = {}
+        responses_seen.append(
+            {
+                "url": str(response.url),
+                "status": int(response.status),
+                "contentType": str(headers.get("content-type") or ""),
+            }
+        )
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        context = await browser.new_context(
+            viewport={"width": 1440, "height": 960},
+            ignore_https_errors=True,
+            java_script_enabled=True,
+            accept_downloads=True,
+        )
+        page = await context.new_page()
+
+        page.on("request", on_request)
+        page.on("response", on_response)
+        page.on("console", lambda msg: console_messages.append({"type": str(msg.type), "text": _truncate_text(msg.text, 300)}) if len(console_messages) < 20 else None)
+        page.on("pageerror", lambda exc: page_errors.append(_truncate_text(exc, 300)) if len(page_errors) < 20 else None)
+
+        async def handle_dialog(dialog: Any) -> None:
+            if len(dialogs_seen) < 10:
+                dialogs_seen.append({"type": str(dialog.type), "message": _truncate_text(dialog.message, 300)})
+            try:
+                await dialog.dismiss()
+            except Exception:
+                pass
+
+        async def handle_download(download: Any) -> None:
+            if len(downloads_seen) >= 10:
+                return
+            try:
+                downloads_seen.append(
+                    {
+                        "url": str(download.url),
+                        "suggestedFilename": str(download.suggested_filename),
+                    }
+                )
+            except Exception:
+                downloads_seen.append({"url": "", "suggestedFilename": ""})
+
+        page.on("dialog", handle_dialog)
+        page.on("download", handle_download)
+
+        try:
+            update("Launching browser instrumentation...", 8)
+            ensure_not_cancelled()
+            response = await page.goto(target_url, wait_until="domcontentloaded", timeout=URL_SCREENSHOT_TIMEOUT_MS)
+            final_url = page.url
+            try:
+                nav_request = response.request if response else None
+            except Exception:
+                nav_request = None
+            if nav_request is not None:
+                redirect_chain = _extract_request_redirect_chain(nav_request)
+                if final_url and (not redirect_chain or redirect_chain[-1] != final_url):
+                    redirect_chain.append(final_url)
+
+            initial_image = await page.screenshot(type="jpeg", quality=60, full_page=False)
+            screenshot_timeline.append({"label": "after-domcontentloaded", "image": _image_bytes_to_data_url(initial_image, "image/jpeg")})
+
+            update("Observing browser activity...", 42)
+            remaining_wait = BROWSER_DYNAMIC_WAIT_MS
+            while remaining_wait > 0:
+                ensure_not_cancelled()
+                step_wait = min(1000, remaining_wait)
+                await page.wait_for_timeout(step_wait)
+                remaining_wait -= step_wait
+
+            settled_image = await page.screenshot(type="jpeg", quality=60, full_page=False)
+            screenshot_timeline.append({"label": "after-settle", "image": _image_bytes_to_data_url(settled_image, "image/jpeg")})
+
+            update("Collecting DOM intelligence...", 70)
+            ensure_not_cancelled()
+            final_title = await page.title()
+            html_snapshot = await page.content()
+            form_summary = await _collect_form_summary(page)
+
+            indicators = _detect_browser_dynamic_indicators(
+                final_url=final_url,
+                outgoing_hosts=outgoing_hosts,
+                console_messages=console_messages,
+                downloads=downloads_seen,
+                dialogs=dialogs_seen,
+                page_errors=page_errors,
+                form_summary=form_summary,
+                html_snapshot=html_snapshot,
+            )
+            verdict, threat_score, summary = _score_browser_dynamic_result(
+                final_url=final_url,
+                outgoing_hosts=outgoing_hosts,
+                downloads=downloads_seen,
+                dialogs=dialogs_seen,
+                page_errors=page_errors,
+                form_summary=form_summary,
+                indicators=indicators,
+            )
+
+            update("Browser dynamic analysis complete.", 100)
+            job["status"] = "done"
+            job["finished_at"] = datetime.utcnow().isoformat()
+            job["result"] = {
+                "verdict": verdict,
+                "threatScore": threat_score,
+                "duration": int(time.time() - started_at),
+                "targetUrl": target_url,
+                "finalUrl": final_url,
+                "finalTitle": final_title,
+                "requestCount": len(requests_seen),
+                "responseCount": len(responses_seen),
+                "requests": requests_seen,
+                "responses": responses_seen,
+                "redirectChain": redirect_chain,
+                "consoleMessages": console_messages,
+                "downloads": downloads_seen,
+                "dialogs": dialogs_seen,
+                "pageErrors": page_errors,
+                "outgoingHosts": outgoing_hosts[:30],
+                "forms": form_summary,
+                "indicators": indicators,
+                "screenshots": screenshot_timeline,
+                "summary": summary,
+            }
+        finally:
+            await context.close()
+            await browser.close()
+
+
+def _run_browser_dynamic_blocking(job_id: str, target_url: str) -> None:
+    job = _browser_dynamic_jobs[job_id]
+    try:
+        asyncio.run(_run_browser_dynamic_async(job_id, target_url))
+    except Exception as exc:
+        logger.error("Browser dynamic job %s failed: %s", job_id, exc, exc_info=True)
+        job["status"] = "error"
+        job["error"] = str(exc)
+        job["finished_at"] = datetime.utcnow().isoformat()
+
+
+def _build_url_details_payload(url: str, db: Session) -> Dict[str, Any]:
+    normalized_url = (url or "").strip()
+    static_eval = _evaluate_url_static(normalized_url, db)
+    categories = _build_url_detail_categories(static_eval)
+    history = _lookup_url_scan_history(normalized_url, db)
+
+    url_hash = sha256_hex(normalized_url)
+    threat_entry = db.query(ThreatUrl).filter(ThreatUrl.url_hash == url_hash).first()
+    feed_first_seen = _safe_iso(threat_entry.created_at) if threat_entry else None
+
+    parsed = urlparse(normalized_url)
+    domain = (parsed.hostname or "").strip().lower()
+    domain_feed_matches = db.query(ThreatUrl).filter(ThreatUrl.domain == domain).count() if domain else 0
+    domain_info = _fetch_domain_info(domain) if domain else {"available": False}
+
+    return {
+        "url": normalized_url,
+        "categories": categories,
+        "history": {
+            **history,
+            "feed_first_seen": feed_first_seen,
+            "domain_feed_matches": domain_feed_matches,
+        },
+        "domain_info": domain_info,
+        "http_response": _fetch_url_http_response_details(normalized_url),
+        "static_context": {
+            "status": static_eval.get("status"),
+            "threat_score": static_eval.get("threat_score"),
+            "scan_timestamp": ((static_eval.get("details") or {}).get("scan_timestamp")),
+            "match_type": (((static_eval.get("details") or {}).get("layers") or {}).get("layer2_phishtank") or {}).get("match_type"),
+            "source": (((static_eval.get("details") or {}).get("layers") or {}).get("layer2_phishtank") or {}).get("source"),
+            "verified": bool(((((static_eval.get("details") or {}).get("layers") or {}).get("layer2_phishtank") or {}).get("verified"))),
+        },
+    }
+
+
 def _evaluate_url_static(url: str, db: Session) -> Dict[str, Any]:
     """Compute 4-layer URL static verdict once and reuse for both static + dynamic flows."""
     # Layer 1: Format Validation
@@ -3159,10 +4169,14 @@ def _evaluate_url_static(url: str, db: Session) -> Dict[str, Any]:
         else:
             threat_score += 40
     elif layer2.get("match_type") == "domain_only":
-        threat_score += 10 if layer2.get("downgraded_shared_host") else 20
+        threat_score += int(layer2.get("domain_only_score", 20))
 
     layer3_score = 100 - int(layer3.get("reputation_score", 100))
     threat_score += int(layer3_score * 0.25)
+    if layer3.get("brand_impersonation"):
+        threat_score += 20
+    if layer3.get("path_brand_abuse"):
+        threat_score += 20
     threat_score += int(layer4.get("threat_score", 0))
 
     if threat_score >= 60 or (layer2.get("found") and layer2.get("match_type") == "exact_url"):
@@ -3199,6 +4213,7 @@ async def url_scan_advanced(
         db: Session = Depends(get_db)
 ):
     """Advanced 4-layer URL scanning (authenticated)"""
+    started_at = time.perf_counter()
     try:
         user_id = current_user.id
         static_eval = _evaluate_url_static(url, db)
@@ -3222,6 +4237,11 @@ async def url_scan_advanced(
         # Create audit log
         create_audit_log(db, user_id, "Advanced URL Scan", f"Scanned {url[:50]}...")
 
+        elapsed = time.perf_counter() - started_at
+        remaining = URL_SCAN_MIN_DURATION_SECONDS - elapsed
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+
         return {
             "success": True,
             "scan_id": scan.id,
@@ -3232,6 +4252,42 @@ async def url_scan_advanced(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/url-scan-details")
+async def url_scan_details(
+        url: str,
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+):
+    """Return VT-style technical details for a scanned URL using local collection logic."""
+    try:
+        normalized_url = (url or "").strip()
+        if not normalized_url:
+            raise HTTPException(status_code=422, detail="URL is required.")
+        return _build_url_details_payload(normalized_url, db)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/url-scan-screenshot")
+async def url_scan_screenshot(
+        url: str,
+        current_user: User = Depends(get_current_user),
+):
+    """Capture a normal browser screenshot for a scanned URL without launching sandbox analysis."""
+    normalized_url = (url or "").strip()
+    if not normalized_url:
+        raise HTTPException(status_code=422, detail="URL is required.")
+
+    screenshot_bytes = await _capture_url_screenshot_bytes(normalized_url)
+    return StreamingResponse(
+        io.BytesIO(screenshot_bytes),
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post("/email-scan")
@@ -5567,19 +6623,34 @@ URL_DYNAMIC_ALLOWED_DOMAINS = {
     for d in os.environ.get("SECA_URL_DYNAMIC_ALLOWED_DOMAINS", "").split(",")
     if d.strip()
 }
+BROWSER_DYNAMIC_WAIT_MS = min(
+    15000,
+    max(2000, int(os.environ.get("SECA_BROWSER_DYNAMIC_WAIT_MS", "6000"))),
+)
+BROWSER_DYNAMIC_MAX_REQUESTS = max(
+    20,
+    int(os.environ.get("SECA_BROWSER_DYNAMIC_MAX_REQUESTS", "120")),
+)
+BROWSER_DYNAMIC_MAX_RESPONSES = max(
+    20,
+    int(os.environ.get("SECA_BROWSER_DYNAMIC_MAX_RESPONSES", "120")),
+)
 logger.info(
-    "Sandbox config: reuse=%s auto_close=%s keep_open=%s heartbeat=%ss url_observation=%ss allowlist_size=%s",
+    "Sandbox config: reuse=%s auto_close=%s keep_open=%s heartbeat=%ss url_observation=%ss browser_wait_ms=%s allowlist_size=%s",
     REUSE_SANDBOX_SESSION,
     AUTO_CLOSE_SANDBOX,
     KEEP_SANDBOX_OPEN,
     MONITOR_HEARTBEAT_SECONDS,
     URL_DYNAMIC_OBSERVATION_SECONDS,
+    BROWSER_DYNAMIC_WAIT_MS,
     len(URL_DYNAMIC_ALLOWED_DOMAINS),
 )
 
 # Job tracking: {job_id: {status, step, progress, result, error}}
 _sandbox_jobs: Dict[str, Dict[str, Any]] = {}
 _executor = ThreadPoolExecutor(max_workers=1)
+_browser_dynamic_jobs: Dict[str, Dict[str, Any]] = {}
+_browser_dynamic_executor = ThreadPoolExecutor(max_workers=1)
 DYNAMIC_JOB_RETENTION_SECONDS = max(
     60,
     int(os.environ.get("SECA_DYNAMIC_JOB_RETENTION_SECONDS", "900"))
@@ -5642,6 +6713,34 @@ def _cleanup_terminal_sandbox_jobs() -> None:
         if len(_sandbox_jobs) <= DYNAMIC_JOB_MAX_TRACKED:
             break
         _sandbox_jobs.pop(jid, None)
+
+
+def _cleanup_terminal_browser_dynamic_jobs() -> None:
+    now = datetime.utcnow()
+    cutoff = now - timedelta(seconds=DYNAMIC_JOB_RETENTION_SECONDS)
+
+    for jid, job in list(_browser_dynamic_jobs.items()):
+        if job.get("status") not in {"done", "error"}:
+            continue
+        finished_at = _parse_iso8601(job.get("finished_at")) or _parse_iso8601(job.get("started_at"))
+        if finished_at and finished_at < cutoff:
+            _browser_dynamic_jobs.pop(jid, None)
+
+    if len(_browser_dynamic_jobs) <= DYNAMIC_JOB_MAX_TRACKED:
+        return
+
+    terminal_jobs: List[tuple] = []
+    for jid, job in _browser_dynamic_jobs.items():
+        if job.get("status") not in {"done", "error"}:
+            continue
+        finished_at = _parse_iso8601(job.get("finished_at")) or _parse_iso8601(job.get("started_at")) or datetime.min
+        terminal_jobs.append((finished_at, jid))
+
+    terminal_jobs.sort(key=lambda item: item[0])
+    for _, jid in terminal_jobs:
+        if len(_browser_dynamic_jobs) <= DYNAMIC_JOB_MAX_TRACKED:
+            break
+        _browser_dynamic_jobs.pop(jid, None)
 
 
 def clean_sandbox_share():
@@ -6853,6 +7952,118 @@ async def start_url_dynamic_analysis(
     }
 
 
+@app.post("/analyze/url/browser-dynamic")
+async def start_browser_dynamic_analysis(
+    url: str = Form(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Fast browser-instrumented URL analysis using Playwright.
+    This complements sandbox execution with richer browser-level telemetry.
+    """
+    static_eval = _evaluate_url_static(url, db)
+    static_status = str(static_eval.get("status", "clean"))
+    static_score = int(static_eval.get("threat_score", 0))
+
+    if static_status == "malicious":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Fast browser dynamic analysis blocked by policy: static verdict is malicious.",
+                "static_status": static_status,
+                "static_threat_score": static_score,
+            },
+        )
+
+    allowed, reason = _validate_dynamic_url_target(url)
+    if not allowed:
+        raise HTTPException(status_code=422, detail=reason)
+
+    _cleanup_terminal_browser_dynamic_jobs()
+    active = [jid for jid, j in _browser_dynamic_jobs.items() if j.get("status") == "running"]
+    if active:
+        raise HTTPException(
+            status_code=409,
+            detail="Another fast browser dynamic analysis is already running. Cancel or wait for completion."
+        )
+
+    job_id = str(uuid.uuid4())
+    _browser_dynamic_jobs[job_id] = {
+        "status": "running",
+        "step": "Launching browser instrumentation...",
+        "progress": 3,
+        "result": None,
+        "error": None,
+        "filename": url,
+        "user_id": current_user.id,
+        "started_at": datetime.utcnow().isoformat(),
+        "finished_at": None,
+        "scan_mode": "browser-url",
+        "target_url": url,
+        "static_status": static_status,
+        "static_threat_score": static_score,
+        "cancel_requested": False,
+    }
+
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(
+        _browser_dynamic_executor,
+        _run_browser_dynamic_blocking,
+        job_id,
+        url,
+    )
+
+    logger.info("Browser dynamic job %s created for %s", job_id[:8], url)
+    return {
+        "job_id": job_id,
+        "status": "running",
+        "static_status": static_status,
+        "static_threat_score": static_score,
+    }
+
+
+def _cancel_browser_dynamic_job_for_user(job_id: str, current_user: User) -> Dict[str, Any]:
+    job = _browser_dynamic_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("status") != "running":
+        return {"job_id": job_id, "status": job.get("status"), "message": "Job is not running"}
+    if job.get("user_id") != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Not allowed to cancel this job")
+
+    job["cancel_requested"] = True
+    job["step"] = "Cancellation requested..."
+    return {"job_id": job_id, "status": "cancelling"}
+
+
+def _get_browser_dynamic_job_status_for_user(job_id: str, current_user: User) -> Dict[str, Any]:
+    _cleanup_terminal_browser_dynamic_jobs()
+    job = _browser_dynamic_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("user_id") != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Not allowed to read this job")
+
+    response = {
+        "job_id": job_id,
+        "status": job["status"],
+        "step": job.get("step", ""),
+        "progress": job.get("progress", 0),
+        "filename": job.get("filename", ""),
+        "finished_at": job.get("finished_at"),
+        "scan_mode": job.get("scan_mode", "browser-url"),
+        "target_url": job.get("target_url"),
+        "static_status": job.get("static_status"),
+        "static_threat_score": job.get("static_threat_score"),
+    }
+    if job["status"] == "done":
+        response["result"] = job["result"]
+    elif job["status"] == "error":
+        response["error"] = job.get("error", "Unknown error")
+    return response
+
+
 def _cancel_dynamic_job_for_user(job_id: str, current_user: User) -> Dict[str, Any]:
     """Shared cancel helper for file + URL sandbox jobs."""
     job = _sandbox_jobs.get(job_id)
@@ -6930,6 +8141,15 @@ async def cancel_url_dynamic_analysis(
     return _cancel_dynamic_job_for_user(job_id, current_user)
 
 
+@app.post("/analyze/url/browser-dynamic/cancel/{job_id}")
+async def cancel_browser_dynamic_analysis(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Request cancellation for a running fast browser dynamic URL job."""
+    return _cancel_browser_dynamic_job_for_user(job_id, current_user)
+
+
 @app.get("/analyze/dynamic/status/{job_id}")
 async def get_dynamic_status(
     job_id: str,
@@ -6946,6 +8166,15 @@ async def get_url_dynamic_status(
 ):
     """Poll this endpoint every 2s to get URL sandbox progress and results."""
     return _get_dynamic_job_status_for_user(job_id, current_user)
+
+
+@app.get("/analyze/url/browser-dynamic/status/{job_id}")
+async def get_browser_dynamic_status(
+    job_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Poll this endpoint every 2s to get fast browser dynamic URL progress and results."""
+    return _get_browser_dynamic_job_status_for_user(job_id, current_user)
 
 
 if __name__ == "__main__":
