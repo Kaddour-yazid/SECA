@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Globe,
   AlertCircle,
@@ -10,6 +10,13 @@ import {
   Lock,
   Database,
   Eye,
+  Play,
+  Monitor,
+  FolderOpen,
+  Settings,
+  ChevronDown,
+  ChevronUp,
+  XCircle,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -45,13 +52,59 @@ type ScanResult = {
   };
 };
 
+type DynamicProcess = { pid: number; name: string; action: string; suspicious: boolean };
+type DynamicNetwork = { protocol: string; destination: string; port: number; suspicious: boolean };
+type DynamicFile = { path: string; action: 'created' | 'modified' | 'deleted'; suspicious: boolean };
+type DynamicRegistry = { key: string; action: 'read' | 'write' | 'delete'; suspicious: boolean };
+
+type DynamicResult = {
+  verdict: 'clean' | 'malicious' | 'suspicious';
+  threatScore: number;
+  duration: number;
+  processes: DynamicProcess[];
+  network: DynamicNetwork[];
+  files: DynamicFile[];
+  registry: DynamicRegistry[];
+  summary: string[];
+};
+
+type DynamicPollResponse = {
+  job_id: string;
+  status: 'running' | 'done' | 'error';
+  step: string;
+  progress: number;
+  filename: string;
+  result?: DynamicResult;
+  error?: string;
+};
+
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').trim().replace(/\/+$/, '');
+const apiUrl = (path: string) => `${API_BASE_URL}${path.startsWith('/') ? path : `/${path}`}`;
+
 export function URLScannerView() {
-  const { user, token } = useAuth();
+  const { user, token, signOut } = useAuth();
   const [url, setUrl] = useState('');
   const [scanning, setScanning] = useState(false);
   const [result, setResult] = useState<ScanResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [currentLayer, setCurrentLayer] = useState(0);
+  const [dynState, setDynState] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  const [dynStep, setDynStep] = useState('');
+  const [dynProgress, setDynProgress] = useState(0);
+  const [dynResult, setDynResult] = useState<DynamicResult | null>(null);
+  const [dynError, setDynError] = useState<string | null>(null);
+  const [dynJobId, setDynJobId] = useState<string | null>(null);
+  const [dynCancelling, setDynCancelling] = useState(false);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({
+    processes: true,
+    network: true,
+    files: true,
+    registry: true,
+  });
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollGenerationRef = useRef(0);
+  const activePollJobRef = useRef<string | null>(null);
+  const pollAbortRef = useRef<AbortController | null>(null);
 
   // Log the result to verify backend data
   useEffect(() => {
@@ -71,6 +124,14 @@ export function URLScannerView() {
     setResult(null);
     setError(null);
     setCurrentLayer(0);
+    clearPoll();
+    setDynState('idle');
+    setDynStep('');
+    setDynProgress(0);
+    setDynResult(null);
+    setDynError(null);
+    setDynJobId(null);
+    setDynCancelling(false);
 
     try {
       new URL(url);
@@ -82,7 +143,7 @@ export function URLScannerView() {
 
       const formData = new URLSearchParams({ url });
 
-      const res = await fetch('http://127.0.0.1:8000/url-scan-advanced', {
+      const res = await fetch(apiUrl('/url-scan-advanced'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
@@ -171,6 +232,188 @@ export function URLScannerView() {
   const layer2 = result?.details?.layers?.layer2_phishtank || {};
   const layer3 = result?.details?.layers?.layer3_reputation || {};
   const layer4 = result?.details?.layers?.layer4_content || {};
+
+  const clearPoll = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    if (pollAbortRef.current) {
+      pollAbortRef.current.abort();
+      pollAbortRef.current = null;
+    }
+    activePollJobRef.current = null;
+    pollGenerationRef.current += 1;
+  };
+
+  const startPolling = (jobId: string, authToken: string) => {
+    clearPoll();
+    activePollJobRef.current = jobId;
+    const pollGeneration = pollGenerationRef.current;
+
+    const isCurrentPoll = () =>
+      activePollJobRef.current === jobId && pollGenerationRef.current === pollGeneration;
+
+    const pollOnce = async () => {
+      if (!isCurrentPoll()) return;
+
+      if (pollAbortRef.current) pollAbortRef.current.abort();
+      const controller = new AbortController();
+      pollAbortRef.current = controller;
+
+      try {
+        const pollRes = await fetch(apiUrl(`/analyze/url/dynamic/status/${jobId}`), {
+          headers: { Authorization: `Bearer ${authToken}` },
+          signal: controller.signal,
+        });
+        if (!isCurrentPoll()) return;
+
+        if (!pollRes.ok) {
+          if (pollRes.status === 401) {
+            clearPoll();
+            setDynError('Session expired. Please sign in again.');
+            setDynState('error');
+            setDynJobId(null);
+            setDynCancelling(false);
+            signOut();
+            return;
+          }
+          if (pollRes.status === 404) {
+            clearPoll();
+            setDynError('Dynamic URL job not found anymore. Start a new run.');
+            setDynState('error');
+            setDynJobId(null);
+            setDynCancelling(false);
+            return;
+          }
+          throw new Error(`Poll error ${pollRes.status}`);
+        }
+
+        const poll: DynamicPollResponse = await pollRes.json();
+        if (!isCurrentPoll()) return;
+
+        setDynStep(poll.step || '');
+        setDynProgress(typeof poll.progress === 'number' ? poll.progress : 0);
+
+        if (poll.status === 'done' && poll.result) {
+          clearPoll();
+          setDynResult(poll.result);
+          setDynState('done');
+          setDynJobId(null);
+          setDynCancelling(false);
+          setDynError(null);
+        } else if (poll.status === 'error') {
+          clearPoll();
+          setDynError(poll.error || 'Dynamic URL analysis failed');
+          setDynState('error');
+          setDynJobId(null);
+          setDynCancelling(false);
+        } else {
+          setDynState('running');
+        }
+      } catch (pollErr) {
+        if (controller.signal.aborted || !isCurrentPoll()) return;
+        clearPoll();
+        setDynError(pollErr instanceof Error ? pollErr.message : 'Lost connection to backend');
+        setDynState('error');
+        setDynJobId(null);
+        setDynCancelling(false);
+      } finally {
+        if (pollAbortRef.current === controller) {
+          pollAbortRef.current = null;
+        }
+      }
+    };
+
+    void pollOnce();
+    pollRef.current = setInterval(() => {
+      void pollOnce();
+    }, 2000);
+  };
+
+  const startDynamicUrlScan = async () => {
+    if (!result || !token) return;
+    if (result.status === 'malicious') {
+      setDynError('Dynamic URL analysis is blocked when static verdict is malicious.');
+      setDynState('error');
+      return;
+    }
+
+    setDynState('running');
+    setDynError(null);
+    setDynResult(null);
+    setDynProgress(5);
+    setDynStep('Preparing URL sandbox environment...');
+    setDynCancelling(false);
+
+    try {
+      const formData = new URLSearchParams({ url: result.details.url || url });
+      const startRes = await fetch(apiUrl('/analyze/url/dynamic'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Authorization: `Bearer ${token}`,
+        },
+        body: formData,
+      });
+
+      const payload = await startRes.json().catch(() => ({}));
+      if (!startRes.ok) {
+        if (startRes.status === 401) {
+          signOut();
+          throw new Error('Session expired. Please sign in again.');
+        }
+        if (startRes.status === 409) {
+          throw new Error('Another dynamic analysis is already running. Cancel it or wait for completion.');
+        }
+        if (startRes.status === 422) {
+          const detail = payload?.detail;
+          if (typeof detail === 'string') throw new Error(detail);
+          if (detail?.message) throw new Error(detail.message);
+        }
+        throw new Error(payload?.detail || payload?.message || `Server error ${startRes.status}`);
+      }
+
+      const jobId = String(payload.job_id || '');
+      if (!jobId) {
+        throw new Error('Backend did not return a URL dynamic job id.');
+      }
+      setDynJobId(jobId);
+      startPolling(jobId, token);
+    } catch (err) {
+      clearPoll();
+      setDynError(err instanceof Error ? err.message : 'Failed to start URL dynamic analysis.');
+      setDynState('error');
+      setDynJobId(null);
+      setDynCancelling(false);
+    }
+  };
+
+  const cancelDynamic = async () => {
+    if (!dynJobId || !token) return;
+    setDynCancelling(true);
+    try {
+      await fetch(apiUrl(`/analyze/url/dynamic/cancel/${dynJobId}`), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch {
+      // best effort
+    } finally {
+      clearPoll();
+      setDynState('idle');
+      setDynResult(null);
+      setDynError(null);
+      setDynProgress(0);
+      setDynStep('');
+      setDynJobId(null);
+      setDynCancelling(false);
+    }
+  };
+
+  const toggleExpand = (section: string) => setExpanded((prev) => ({ ...prev, [section]: !prev[section] }));
+
+  useEffect(() => () => { clearPoll(); }, []);
 
   return (
     <div className="flex-1 bg-slate-900 overflow-hidden flex flex-col h-full">
@@ -275,6 +518,15 @@ export function URLScannerView() {
               <div className="flex items-center gap-2 text-red-400">
                 <AlertCircle className="w-5 h-5" />
                 <p className="font-medium">{error}</p>
+              </div>
+            </div>
+          )}
+
+          {dynError && (
+            <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 mb-6">
+              <div className="flex items-center gap-2 text-red-400">
+                <AlertCircle className="w-5 h-5" />
+                <p className="font-medium">{dynError}</p>
               </div>
             </div>
           )}
@@ -457,6 +709,181 @@ export function URLScannerView() {
                 )}
               </div>
 
+              {/* Dynamic URL Sandbox (Layer 5) */}
+              <div className="space-y-4 pt-2">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-purple-500/10 border border-purple-500/30 rounded-lg flex items-center justify-center text-purple-400">
+                    <Monitor className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="text-white font-semibold">Layer 5: Dynamic Sandbox</h4>
+                    <p className="text-slate-400 text-sm">Isolated runtime behavior analysis (purple dynamic section)</p>
+                  </div>
+                </div>
+
+                {dynState === 'idle' && (
+                  <div className="bg-gradient-to-r from-purple-900/40 to-blue-900/40 border border-purple-500/30 rounded-xl p-6">
+                    <div className="flex items-start gap-4">
+                      <div className="w-12 h-12 bg-purple-500/20 border border-purple-500/30 rounded-xl flex items-center justify-center flex-shrink-0">
+                        <Monitor className="w-6 h-6 text-purple-400" />
+                      </div>
+                      <div className="flex-1">
+                        <h4 className="text-white font-bold text-lg mb-1">Dynamic URL Sandbox Analysis</h4>
+                        <p className="text-slate-400 text-sm mb-1">
+                          Opens the URL inside an isolated <strong className="text-slate-300">Windows Sandbox VM</strong> and monitors process/network behavior.
+                        </p>
+                        <p className="text-slate-500 text-xs mb-3">
+                          Policy: static malicious URLs are blocked before sandbox launch. Clean/suspicious URLs can run.
+                        </p>
+                        <div className="flex flex-wrap gap-4 text-xs text-slate-400 mb-4">
+                          <span className="flex items-center gap-1"><Monitor className="w-3 h-3" />Process monitoring</span>
+                          <span className="flex items-center gap-1"><Globe className="w-3 h-3" />Network traffic</span>
+                          <span className="flex items-center gap-1"><FolderOpen className="w-3 h-3" />File system</span>
+                          <span className="flex items-center gap-1"><Settings className="w-3 h-3" />Registry</span>
+                        </div>
+                        {result.status === 'malicious' && (
+                          <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-2 mb-3 text-red-400 text-xs">
+                            URL flagged malicious by static analysis. Sandbox run is blocked.
+                          </div>
+                        )}
+                        <button
+                          onClick={startDynamicUrlScan}
+                          disabled={result.status === 'malicious'}
+                          className="flex items-center gap-2 px-5 py-2.5 bg-purple-600 hover:bg-purple-700 text-white font-semibold rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <Play className="w-4 h-4" /> Run Dynamic Sandbox Analysis
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {dynState === 'running' && (
+                  <div className="bg-slate-800/50 border border-purple-500/30 rounded-xl p-8">
+                    <div className="flex items-center justify-between mb-5">
+                      <div className="flex items-center gap-3">
+                        <Monitor className="w-8 h-8 text-purple-400 animate-pulse" />
+                        <div>
+                          <h4 className="text-white font-bold">Windows Sandbox Running</h4>
+                          <p className="text-slate-500 text-xs">Live progress from backend</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={cancelDynamic}
+                        disabled={dynCancelling}
+                        className="flex items-center gap-1 text-xs text-slate-500 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition disabled:opacity-60 disabled:cursor-not-allowed"
+                      >
+                        <XCircle className="w-3 h-3" /> {dynCancelling ? 'Cancelling...' : 'Cancel'}
+                      </button>
+                    </div>
+                    <div className="bg-slate-900/50 rounded-full h-4 mb-3 overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-purple-600 to-blue-500 transition-all duration-700"
+                        style={{ width: `${Math.max(dynProgress, 2)}%` }}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between mb-5">
+                      <p className="text-purple-300 text-sm font-medium">{dynStep}</p>
+                      <span className="text-slate-400 text-sm font-mono">{dynProgress}%</span>
+                    </div>
+                  </div>
+                )}
+
+                {dynState === 'done' && dynResult && (
+                  <div className="space-y-4">
+                  <div className="bg-slate-800/50 border border-purple-500/30 rounded-xl p-6 text-center">
+                    <div className="flex justify-center mb-3">
+                      {dynResult.verdict === 'clean' && <CheckCircle className="w-16 h-16 text-green-400" />}
+                      {dynResult.verdict === 'suspicious' && <AlertTriangle className="w-16 h-16 text-yellow-400" />}
+                      {dynResult.verdict === 'malicious' && <AlertCircle className="w-16 h-16 text-red-400" />}
+                    </div>
+                    <h4 className="text-white font-bold text-xl mb-2">Dynamic Analysis Complete</h4>
+                    <span className={`inline-block px-4 py-2 rounded-full text-sm font-semibold border ${getStatusColor(dynResult.verdict)}`}>
+                      {dynResult.verdict.toUpperCase()}
+                    </span>
+                    <p className="text-slate-400 text-sm mt-2">Execution: {dynResult.duration}s &bull; Dynamic threat score: {dynResult.threatScore}/100</p>
+                    <div className="mt-4 text-left bg-slate-900/50 rounded-lg p-4 space-y-1">
+                      {dynResult.summary.map((s, i) => <p key={i} className="text-sm text-slate-300">{s}</p>)}
+                    </div>
+                  </div>
+
+                  {([
+                    {
+                      key: 'processes', label: 'Process Activity', Icon: Monitor, items: dynResult.processes,
+                      empty: '✓ No notable process activity',
+                      render: (p: DynamicProcess) => (
+                        <div className={`rounded-lg p-3 border text-sm ${p.suspicious ? 'bg-red-500/10 border-red-500/30' : 'bg-slate-900/50 border-slate-600'}`}>
+                          <div className="flex items-center gap-2 mb-1">
+                            {p.suspicious && <AlertCircle className="w-3 h-3 text-red-400" />}
+                            <span className="font-mono text-white">{p.name}</span>
+                            <span className="text-slate-500 text-xs">PID: {p.pid}</span>
+                            {p.suspicious && <span className="ml-auto text-xs text-red-400 font-medium">SUSPICIOUS</span>}
+                          </div>
+                          <p className={`text-xs ${p.suspicious ? 'text-red-300' : 'text-slate-400'}`}>{p.action}</p>
+                        </div>
+                      ),
+                    },
+                    {
+                      key: 'network', label: 'Network Connections', Icon: Globe, items: dynResult.network,
+                      empty: '✓ No external network connections',
+                      render: (n: DynamicNetwork) => (
+                        <div className={`rounded-lg p-3 border text-sm ${n.suspicious ? 'bg-red-500/10 border-red-500/30' : 'bg-slate-900/50 border-slate-600'}`}>
+                          <div className="flex items-center justify-between">
+                            <span className="font-mono text-white">{n.protocol} → {n.destination}:{n.port}</span>
+                            {n.suspicious && <span className="text-xs text-red-400 font-medium">⚠ EXTERNAL</span>}
+                          </div>
+                        </div>
+                      ),
+                    },
+                    {
+                      key: 'files', label: 'File System Changes', Icon: FolderOpen, items: dynResult.files,
+                      empty: '✓ No significant file system changes',
+                      render: (f: DynamicFile) => (
+                        <div className={`rounded-lg p-3 border text-sm ${f.suspicious ? 'bg-yellow-500/10 border-yellow-500/30' : 'bg-slate-900/50 border-slate-600'}`}>
+                          <p className="font-mono text-white text-xs break-all">{f.path}</p>
+                        </div>
+                      ),
+                    },
+                    {
+                      key: 'registry', label: 'Registry Changes', Icon: Settings, items: dynResult.registry,
+                      empty: '✓ No registry modifications',
+                      render: (r: DynamicRegistry) => (
+                        <div className={`rounded-lg p-3 border text-sm ${r.suspicious ? 'bg-red-500/10 border-red-500/30' : 'bg-slate-900/50 border-slate-600'}`}>
+                          <p className="font-mono text-white text-xs break-all">{r.key}</p>
+                        </div>
+                      ),
+                    },
+                  ] as const).map(({ key, label, Icon, items, render, empty }) => (
+                    <div key={key} className="bg-slate-800/50 border border-slate-700 rounded-xl overflow-hidden">
+                      <button
+                        onClick={() => toggleExpand(key)}
+                        className="w-full flex items-center justify-between p-4 text-white font-semibold hover:bg-slate-700/30 transition"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Icon className="w-4 h-4 text-cyan-400" />{label}
+                          <span className="text-slate-500 text-sm font-normal">({items.length})</span>
+                        </div>
+                        {expanded[key] ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                      </button>
+                      {expanded[key] && (
+                        <div className="px-4 pb-4 space-y-2">
+                          {items.length === 0
+                            ? <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-3"><p className="text-green-400 text-sm">{empty}</p></div>
+                            : items.map((item, i) => <div key={i}>{render(item)}</div>)}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+
+                  <button
+                    onClick={() => { setDynState('idle'); setDynResult(null); setDynError(null); }}
+                    className="w-full py-3 border border-slate-600 text-slate-400 hover:text-white hover:border-slate-400 rounded-lg transition text-sm"
+                  >
+                    Run Dynamic Analysis Again
+                  </button>
+                  </div>
+                )}
+              </div>
 
             </div>
           )}

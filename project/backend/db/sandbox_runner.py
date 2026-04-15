@@ -17,17 +17,20 @@ OUT = SHARE_ROOT / "out"
 TOOLS = SHARE_ROOT / "tools"
 WSB_PATH = SHARE_ROOT / "session_launch.wsb"
 MONITOR_SCRIPT = SHARE_ROOT / "monitor.ps1"
+REPO_MONITOR_SCRIPT = Path(__file__).with_name("monitor.ps1")
 SANDBOX_PROCESS_NAMES = (
     "WindowsSandbox",
     "WindowsSandboxClient",
     "WindowsSandboxRemoteSession",
     "WindowsSandboxServer",
+    "codex-windows-sandbox",
 )
 SANDBOX_ACTIVE_PROCESS_NAMES = (
     "WindowsSandbox",
     "WindowsSandboxClient",
     "WindowsSandboxRemoteSession",
     "WindowsSandboxServer",
+    "codex-windows-sandbox",
 )
 SANDBOX_AUXILIARY_PROCESS_NAMES = (
     "vmmemWindowsSandbox",
@@ -51,6 +54,28 @@ def _clear_stale_triggers() -> None:
     for pattern in ("*.scan.json", "*.scan.tmp"):
         for path in INBOX.glob(pattern):
             _safe_unlink(path)
+
+
+def _ensure_monitor_script() -> None:
+    """
+    Keep host-side monitor script in sync with repository-managed version.
+    This guarantees support for trigger flags such as shutdownAfterDone.
+    """
+    if not REPO_MONITOR_SCRIPT.exists():
+        return
+    try:
+        desired = REPO_MONITOR_SCRIPT.read_text(encoding="utf-8")
+    except Exception:
+        return
+
+    current = None
+    if MONITOR_SCRIPT.exists():
+        try:
+            current = MONITOR_SCRIPT.read_text(encoding="utf-8")
+        except Exception:
+            current = None
+    if current != desired:
+        MONITOR_SCRIPT.write_text(desired, encoding="utf-8")
 
 
 def _write_session_wsb() -> Path:
@@ -102,15 +127,27 @@ def _host_diagnostics(session_id: str) -> Dict[str, object]:
     }
 
 
-def create_trigger(session_id: str, filename: str, duration: int = 60) -> Path:
+def create_trigger(
+    session_id: str,
+    filename: Optional[str] = None,
+    duration: int = 60,
+    shutdown_after_done: bool = False,
+    scan_mode: str = "file",
+    target_url: Optional[str] = None,
+) -> Path:
     """
     Write trigger atomically so sandbox monitor never sees a partial file.
     """
-    trigger = {
+    trigger: Dict[str, object] = {
         "sessionId": session_id,
-        "targetRelativePath": filename,
+        "scanMode": scan_mode,
         "durationSeconds": duration,
+        "shutdownAfterDone": bool(shutdown_after_done),
     }
+    if scan_mode == "url":
+        trigger["targetUrl"] = (target_url or "").strip()
+    else:
+        trigger["targetRelativePath"] = filename or ""
     trigger_path = INBOX / f"{session_id}.scan.json"
     tmp_path = INBOX / f"{session_id}.scan.tmp"
     with open(tmp_path, "w", encoding="utf-8") as handle:
@@ -264,9 +301,12 @@ def run_dynamic_scan(
     done_grace: int = 45,
     launch_wsb_file: bool = True,
     allow_existing_monitor: bool = False,
+    shutdown_after_done: bool = True,
     on_progress: Optional[Callable[[str, int], None]] = None,
     session_id: Optional[str] = None,
     abort_if: Optional[Callable[[], bool]] = None,
+    scan_mode: str = "file",
+    target_url: Optional[str] = None,
 ) -> Dict[str, object]:
     """
     file_bytes: raw bytes of uploaded file
@@ -281,8 +321,13 @@ def run_dynamic_scan(
             on_progress(step, bounded)
 
     _ensure_dirs()
+    _ensure_monitor_script()
     report("Preparing sandbox workspace...", 6)
     session = session_id or uuid.uuid4().hex
+    mode = (scan_mode or "file").strip().lower()
+    if mode not in {"file", "url"}:
+        return {"status": "error", "reason": f"unsupported-scan-mode:{mode}"}
+
     safe_name = Path(filename).name or "uploaded.bin"
     ready_marker = SHARE_ROOT / "sandbox_ready.txt"
     abort_reason: Optional[str] = None
@@ -297,20 +342,34 @@ def run_dynamic_scan(
             "message": f"Expected monitor script at {MONITOR_SCRIPT}",
         }
 
-    target_path = TO_ANALYZE / safe_name
-    with open(target_path, "wb") as handle:
-        handle.write(file_bytes)
-    report("Writing file to sandbox share...", 10)
+    if mode == "file":
+        target_path = TO_ANALYZE / safe_name
+        with open(target_path, "wb") as handle:
+            handle.write(file_bytes)
+        report("Writing file to sandbox share...", 10)
+    else:
+        safe_name = "url_target.txt"
+        report("Preparing URL target for sandbox...", 10)
 
     (OUT / f"session_{session}").mkdir(parents=True, exist_ok=True)
 
     # Keep queue deterministic: a previous failed sample may leave stale triggers behind.
     _clear_stale_triggers()
 
-    trigger_path = create_trigger(session, safe_name, duration)
+    trigger_path = create_trigger(
+        session_id=session,
+        filename=safe_name,
+        duration=duration,
+        shutdown_after_done=shutdown_after_done,
+        scan_mode=mode,
+        target_url=target_url,
+    )
     report("Writing sandbox trigger...", 15)
     diagnostics = _host_diagnostics(session)
     diagnostics["trigger_path"] = str(trigger_path)
+    diagnostics["scan_mode"] = mode
+    if target_url:
+        diagnostics["target_url"] = target_url
 
     wsb_path = _write_session_wsb()
     diagnostics["wsb_path"] = str(wsb_path)
@@ -411,6 +470,29 @@ def run_dynamic_scan(
         return {"status": "error", "reason": reason, "diagnostics": diagnostics}
 
     diagnostics["ready_via"] = ready_via
+    # Even after ready marker, ensure monitor actually consumed this session trigger.
+    if trigger_path.exists():
+        trigger_consumed_after_ready = wait_for_trigger_consumed(
+            trigger_path=trigger_path,
+            timeout=15,
+            on_tick=lambda elapsed, timeout: report(
+                "Waiting for sandbox monitor to consume trigger...",
+                40 + int(min(1.0, elapsed / max(timeout, 1.0)) * 10),
+            ),
+            abort_if=should_abort,
+        )
+        diagnostics["trigger_consumed_after_ready"] = trigger_consumed_after_ready
+        diagnostics["trigger_present_after_ready_wait"] = trigger_path.exists()
+        if not trigger_consumed_after_ready:
+            reason = abort_reason or "monitor-unresponsive"
+            _safe_unlink(trigger_path)
+            if reason == "sandbox-exited":
+                report("Sandbox session closed unexpectedly.", 45)
+            elif reason == "cancelled":
+                report("Sandbox scan cancelled.", 45)
+            else:
+                report("Sandbox monitor did not consume trigger.", 45)
+            return {"status": "error", "reason": reason, "diagnostics": diagnostics}
 
     print("[INFO] Sandbox ready. Waiting for done marker...")
     report("Sandbox ready. Executing file...", 50)
