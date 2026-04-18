@@ -1,8 +1,10 @@
 ﻿import { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
+  BarChart3,
   Briefcase,
   Clock3,
+  Globe,
   Shield,
   UserCheck,
   UserPlus,
@@ -12,7 +14,8 @@ import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
 import { apiUrl } from '../config/api';
 
-type MonitoringTab = 'overview' | 'employees' | 'sessions';
+type MonitoringTab = 'overview' | 'employees' | 'sessions' | 'person-detail' | 'group-detail';
+type MonitoringRange = 'day' | '3days' | 'week' | 'month';
 
 type UserRow = {
   id: number;
@@ -81,6 +84,69 @@ type GroupProxyAssignment = {
   proxy_port: number;
   enabled: boolean;
   note?: string | null;
+};
+
+type ProxyUsageSiteRow = {
+  host: string;
+  request_count: number;
+  blocked_count?: number;
+  allowed_count?: number;
+  unique_members?: number;
+  last_seen?: string | null;
+};
+
+type ProxyUsageMemberRow = {
+  user_id: number | null;
+  email?: string | null;
+  name: string;
+  request_count: number;
+  blocked_count: number;
+  allowed_count: number;
+  unique_sites: number;
+  last_seen?: string | null;
+  top_sites: ProxyUsageSiteRow[];
+};
+
+type ProxyUsageGroupRow = {
+  group_name: string;
+  department: string;
+  request_count: number;
+  blocked_count: number;
+  allowed_count: number;
+  unique_sites: number;
+  unique_members: number;
+  last_seen?: string | null;
+  top_sites: ProxyUsageSiteRow[];
+};
+
+type ProxyUsageDailyRow = {
+  date: string;
+  request_count: number;
+  blocked_count: number;
+  allowed_count: number;
+  unique_sites: number;
+  unique_members: number;
+};
+
+type ProxyUsageSummary = {
+  department: string;
+  group_name: string;
+  request_count: number;
+  blocked_count: number;
+  allowed_count: number;
+  unique_sites: number;
+  unique_members: number;
+};
+
+type ProxyUsageStatsPayload = {
+  period: MonitoringRange;
+  days: number;
+  generated_at: string;
+  group_summary: ProxyUsageSummary;
+  top_sites: ProxyUsageSiteRow[];
+  member_stats: ProxyUsageMemberRow[];
+  group_stats: ProxyUsageGroupRow[];
+  daily_stats: ProxyUsageDailyRow[];
 };
 
 type EmployeeSlot = {
@@ -211,11 +277,15 @@ export function GatewayStartView() {
   const { token, user } = useAuth();
   const { translateText } = useLanguage();
   const [activePanel, setActivePanel] = useState<MonitoringTab>('overview');
+  const [activeRange, setActiveRange] = useState<MonitoringRange>('week');
   const [users, setUsers] = useState<UserRow[]>([]);
   const [scanRows, setScanRows] = useState<ScanRow[]>([]);
   const [desktopSessions, setDesktopSessions] = useState<DesktopSessionRow[]>([]);
   const [gatewayHistory, setGatewayHistory] = useState<GatewayHistoryRow[]>([]);
   const [groupProxyAssignment, setGroupProxyAssignment] = useState<GroupProxyAssignment | null>(null);
+  const [proxyUsageStats, setProxyUsageStats] = useState<ProxyUsageStatsPayload | null>(null);
+  const [selectedMemberId, setSelectedMemberId] = useState<number | null>(null);
+  const [selectedGroupName, setSelectedGroupName] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -224,7 +294,7 @@ export function GatewayStartView() {
     const loadMonitoringData = async () => {
       setLoading(true);
       try {
-        const [usersRes, scansRes, sessionsRes, historyRes, assignmentRes] = await Promise.all([
+        const [usersRes, scansRes, sessionsRes, historyRes, assignmentRes, usageStatsRes] = await Promise.all([
           fetch(apiUrl('/users'), {
             headers: { Authorization: `Bearer ${token}` },
           }),
@@ -238,6 +308,9 @@ export function GatewayStartView() {
             headers: { Authorization: `Bearer ${token}` },
           }),
           fetch(apiUrl('/monitoring/group-proxy-assignment'), {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+          fetch(apiUrl(`/monitoring/proxy-usage-stats?period=${activeRange}`), {
             headers: { Authorization: `Bearer ${token}` },
           }),
         ]);
@@ -277,12 +350,20 @@ export function GatewayStartView() {
         } else {
           setGroupProxyAssignment(null);
         }
+
+        if (usageStatsRes.ok) {
+          const usageData = await usageStatsRes.json();
+          setProxyUsageStats(usageData as ProxyUsageStatsPayload);
+        } else {
+          setProxyUsageStats(null);
+        }
       } catch {
         setUsers([]);
         setScanRows([]);
         setDesktopSessions([]);
         setGatewayHistory([]);
         setGroupProxyAssignment(null);
+        setProxyUsageStats(null);
       } finally {
         setLoading(false);
       }
@@ -296,7 +377,8 @@ export function GatewayStartView() {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [token]);
+  }, [token, activeRange]);
+
 
   const adminDepartment = user?.department || '';
   const adminGroup = user?.group_name || '';
@@ -433,6 +515,57 @@ export function GatewayStartView() {
 
   const recentScans = useMemo(() => sortedGroupScans.slice(0, 5), [sortedGroupScans]);
 
+  const rangeOptions: { id: MonitoringRange; label: string }[] = [
+    { id: 'day', label: '24h' },
+    { id: '3days', label: '3 days' },
+    { id: 'week', label: '7 days' },
+    { id: 'month', label: '30 days' },
+  ];
+
+  const memberUsageById = useMemo(() => {
+    const next = new Map<number, ProxyUsageMemberRow>();
+    for (const item of proxyUsageStats?.member_stats || []) {
+      if (item.user_id != null) {
+        next.set(item.user_id, item);
+      }
+    }
+    return next;
+  }, [proxyUsageStats]);
+
+  const groupUsageByName = useMemo(() => {
+    const next = new Map<string, ProxyUsageGroupRow>();
+    for (const item of proxyUsageStats?.group_stats || []) {
+      next.set(item.group_name, item);
+    }
+    return next;
+  }, [proxyUsageStats]);
+
+  const selectedMemberUsage = selectedMemberId != null ? memberUsageById.get(selectedMemberId) ?? null : null;
+  const selectedMemberUser = selectedMemberId != null ? realEmployees.find((entry) => entry.id === selectedMemberId) ?? null : null;
+  const selectedMemberSession = selectedMemberId != null ? latestSessionByUser.get(selectedMemberId) : undefined;
+  const selectedGroupUsage = selectedGroupName ? groupUsageByName.get(selectedGroupName) ?? null : null;
+
+  const renderRangeSwitcher = () => (
+    <div className="flex flex-wrap gap-2">
+      {rangeOptions.map((range) => {
+        const active = activeRange === range.id;
+        return (
+          <button
+            key={range.id}
+            onClick={() => setActiveRange(range.id)}
+            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+              active
+                ? 'bg-cyan-500 text-white shadow-lg'
+                : 'text-slate-300 hover:bg-cyan-500/10 hover:text-cyan-400'
+            }`}
+          >
+            {range.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+
   const tabs: { id: MonitoringTab; label: string; icon: typeof Activity }[] = [
     { id: 'overview', label: translateText('Overview'), icon: Activity },
     { id: 'employees', label: translateText('Employees'), icon: Users },
@@ -534,7 +667,16 @@ export function GatewayStartView() {
                     Built from the employees registered in the current admin group.
                   </p>
                 </div>
-                {loading && <span className="text-sm text-slate-500">Loading...</span>}
+                <div className="flex flex-col items-end gap-2">
+                  {renderRangeSwitcher()}
+                  <span className="text-xs text-slate-500">
+                    {proxyUsageStats
+                      ? `Window: last ${proxyUsageStats.days} day${proxyUsageStats.days > 1 ? 's' : ''}`
+                      : loading
+                        ? 'Loading...'
+                        : 'No usage window yet'}
+                  </span>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
@@ -551,6 +693,268 @@ export function GatewayStartView() {
                   <p className="mt-3 text-lg font-semibold text-white">
                     {realEmployees.length} / {EXPECTED_GROUP_EMPLOYEES}
                   </p>
+                </div>
+              </div>
+
+              <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-4">
+                <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-sm text-slate-400">Proxy Requests</p>
+                    <Activity className="h-4 w-4 text-cyan-300" />
+                  </div>
+                  <p className="text-2xl font-bold text-white">
+                    {proxyUsageStats?.group_summary.request_count ?? 0}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-sm text-slate-400">Blocked by Proxy</p>
+                    <Shield className="h-4 w-4 text-red-300" />
+                  </div>
+                  <p className="text-2xl font-bold text-red-300">
+                    {proxyUsageStats?.group_summary.blocked_count ?? 0}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-sm text-slate-400">Unique Sites</p>
+                    <Globe className="h-4 w-4 text-sky-300" />
+                  </div>
+                  <p className="text-2xl font-bold text-white">
+                    {proxyUsageStats?.group_summary.unique_sites ?? 0}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-sm text-slate-400">Members with Activity</p>
+                    <Users className="h-4 w-4 text-emerald-300" />
+                  </div>
+                  <p className="text-2xl font-bold text-white">
+                    {proxyUsageStats?.group_summary.unique_members ?? 0}
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-[1.1fr_0.9fr]">
+                <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                  <div className="mb-4 flex items-center gap-2">
+                    <Globe className="h-5 w-5 text-cyan-300" />
+                    <h4 className="text-lg font-semibold text-white">Most Used Sites</h4>
+                  </div>
+                  {proxyUsageStats?.top_sites?.length ? (
+                    <div className="space-y-3">
+                      {proxyUsageStats.top_sites.map((site) => (
+                        <div key={site.host} className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-semibold text-white">{site.host}</p>
+                              <p className="mt-1 text-xs text-slate-400">
+                                {site.unique_members ?? 0} member(s) · Last seen {formatDateTime(site.last_seen || null)}
+                              </p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-lg font-bold text-white">{site.request_count}</p>
+                              <p className="text-xs text-slate-500">requests</p>
+                            </div>
+                          </div>
+                          <div className="mt-3 flex gap-2 text-xs">
+                            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-emerald-300">
+                              Allowed {site.allowed_count ?? 0}
+                            </span>
+                            <span className="rounded-full border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-red-300">
+                              Blocked {site.blocked_count ?? 0}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/35 p-5 text-sm text-slate-400">
+                      No proxy usage recorded in the selected period yet.
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                  <div className="mb-4 flex items-center gap-2">
+                    <BarChart3 className="h-5 w-5 text-cyan-300" />
+                    <h4 className="text-lg font-semibold text-white">Daily Activity</h4>
+                  </div>
+                  {proxyUsageStats?.daily_stats?.length ? (
+                    <div className="space-y-3">
+                      {proxyUsageStats.daily_stats.map((entry) => (
+                        <div key={entry.date} className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-semibold text-white">{entry.date}</p>
+                              <p className="mt-1 text-xs text-slate-400">
+                                {entry.unique_members} member(s) · {entry.unique_sites} site(s)
+                              </p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-lg font-bold text-white">{entry.request_count}</p>
+                              <p className="text-xs text-slate-500">requests</p>
+                            </div>
+                          </div>
+                          <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-800">
+                            <div
+                              className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-blue-500"
+                              style={{
+                                width: `${Math.max(
+                                  8,
+                                  Math.min(
+                                    100,
+                                    (entry.request_count /
+                                      Math.max(
+                                        1,
+                                        ...((proxyUsageStats?.daily_stats || []).map((item) => item.request_count)),
+                                      )) *
+                                      100,
+                                  ),
+                                )}%`,
+                              }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/35 p-5 text-sm text-slate-400">
+                      Daily proxy activity will appear here once group members browse through the attached proxy.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-2">
+                <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                  <div className="mb-4 flex items-center gap-2">
+                    <Users className="h-5 w-5 text-cyan-300" />
+                    <h4 className="text-lg font-semibold text-white">Usage by Person</h4>
+                  </div>
+                  {proxyUsageStats?.member_stats?.length ? (
+                    <div className="space-y-3">
+                      {proxyUsageStats.member_stats.map((member) => (
+                        <button
+                          key={`${member.user_id ?? member.email ?? member.name}`}
+                          type="button"
+                          disabled={member.user_id == null}
+                          onClick={() => {
+                            if (member.user_id != null) {
+                              setSelectedMemberId(member.user_id);
+                              setActivePanel('person-detail');
+                            }
+                          }}
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950/50 p-3 text-left transition hover:border-cyan-500/40 hover:bg-slate-900/70 disabled:cursor-default"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-semibold text-white">{member.name}</p>
+                              <p className="mt-1 text-xs text-slate-400">
+                                {member.email || 'No email'} · Last seen {formatDateTime(member.last_seen || null)}
+                              </p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-lg font-bold text-white">{member.request_count}</p>
+                              <p className="text-xs text-slate-500">requests</p>
+                            </div>
+                          </div>
+                          <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-emerald-300">
+                              Allowed {member.allowed_count}
+                            </span>
+                            <span className="rounded-full border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-red-300">
+                              Blocked {member.blocked_count}
+                            </span>
+                            <span className="rounded-full border border-slate-700 bg-slate-800/70 px-2.5 py-1 text-slate-300">
+                              Unique sites {member.unique_sites}
+                            </span>
+                          </div>
+                          <div className="mt-3 space-y-2">
+                            {member.top_sites.length ? (
+                              member.top_sites.slice(0, 10).map((site) => (
+                                <div
+                                  key={`${member.name}-${site.host}`}
+                                  className="flex items-center justify-between gap-3 rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2"
+                                >
+                                  <p className="truncate text-sm text-slate-200">{site.host}</p>
+                                  <span className="text-xs font-semibold text-cyan-300">{site.request_count} hit(s)</span>
+                                </div>
+                              ))
+                            ) : (
+                              <p className="text-sm text-slate-400">No site activity yet.</p>
+                            )}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/35 p-5 text-sm text-slate-400">
+                      No member usage data in the selected window.
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                  <div className="mb-4 flex items-center gap-2">
+                    <Briefcase className="h-5 w-5 text-cyan-300" />
+                    <h4 className="text-lg font-semibold text-white">Usage by Group</h4>
+                  </div>
+                  {proxyUsageStats?.group_stats?.length ? (
+                    <div className="space-y-3">
+                      {proxyUsageStats.group_stats.map((group) => (
+                        <button
+                          key={group.group_name}
+                          type="button"
+                          onClick={() => {
+                            setSelectedGroupName(group.group_name);
+                            setActivePanel('group-detail');
+                          }}
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950/50 p-3 text-left transition hover:border-cyan-500/40 hover:bg-slate-900/70"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-semibold text-white">{group.group_name}</p>
+                              <p className="mt-1 text-xs text-slate-400">
+                                {group.unique_members} member(s) · {group.unique_sites} site(s) · Last seen {formatDateTime(group.last_seen || null)}
+                              </p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-lg font-bold text-white">{group.request_count}</p>
+                              <p className="text-xs text-slate-500">requests</p>
+                            </div>
+                          </div>
+                          <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-emerald-300">
+                              Allowed {group.allowed_count}
+                            </span>
+                            <span className="rounded-full border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-red-300">
+                              Blocked {group.blocked_count}
+                            </span>
+                          </div>
+                          <div className="mt-3 space-y-2">
+                            {group.top_sites.length ? (
+                              group.top_sites.slice(0, 10).map((site) => (
+                                <div
+                                  key={`${group.group_name}-${site.host}`}
+                                  className="flex items-center justify-between gap-3 rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2"
+                                >
+                                  <p className="truncate text-sm text-slate-200">{site.host}</p>
+                                  <span className="text-xs font-semibold text-cyan-300">{site.request_count} hit(s)</span>
+                                </div>
+                              ))
+                            ) : (
+                              <p className="text-sm text-slate-400">No site activity yet.</p>
+                            )}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/35 p-5 text-sm text-slate-400">
+                      No group usage data in the selected window.
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -643,18 +1047,42 @@ export function GatewayStartView() {
 
         {activePanel === 'employees' && (
           <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
-            <h3 className="mb-5 text-xl font-bold text-white">Employees in Current Group</h3>
+            <div className="mb-5 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+              <div>
+                <h3 className="text-xl font-bold text-white">Employees in Current Group</h3>
+                <p className="mt-1 text-sm text-slate-400">
+                  Per-person proxy usage and most visited sites in the selected time window.
+                </p>
+              </div>
+              <div className="flex flex-col items-end gap-2">
+                {renderRangeSwitcher()}
+                <span className="text-xs text-slate-500">
+                  {proxyUsageStats
+                    ? `Window: last ${proxyUsageStats.days} day${proxyUsageStats.days > 1 ? 's' : ''}`
+                    : 'Usage window loading...'}
+                </span>
+              </div>
+            </div>
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               {employeeSlots.map((entry) => {
                 const scanCount = entry.id ? scanCountByUser.get(entry.id) || 0 : 0;
                 const latestSession = entry.id ? latestSessionByUser.get(entry.id) : undefined;
                 const status = connectionSummary(latestSession);
+                const usageStats = entry.id ? memberUsageById.get(entry.id) : undefined;
                 return (
-                  <div
+                  <button
                     key={entry.key}
-                    className={`rounded-xl border p-5 ${
+                    type="button"
+                    disabled={entry.state !== 'registered' || !entry.id}
+                    onClick={() => {
+                      if (entry.id) {
+                        setSelectedMemberId(entry.id);
+                        setActivePanel('person-detail');
+                      }
+                    }}
+                    className={`rounded-xl border p-5 text-left transition ${
                       entry.state === 'registered'
-                        ? 'border-slate-700 bg-slate-900/50'
+                        ? 'border-slate-700 bg-slate-900/50 hover:border-cyan-500/40 hover:bg-slate-900/70'
                         : 'border-dashed border-slate-700 bg-slate-950/35'
                     }`}
                   >
@@ -693,6 +1121,16 @@ export function GatewayStartView() {
                         <p className="mt-2 text-sm font-medium text-slate-200">{scanCount}</p>
                       </div>
                       <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Proxy Requests</p>
+                        <p className="mt-2 text-sm font-medium text-slate-200">{usageStats?.request_count ?? 0}</p>
+                      </div>
+                      <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Most Used Site</p>
+                        <p className="mt-2 truncate text-sm font-medium text-slate-200">
+                          {usageStats?.top_sites?.[0]?.host || 'No proxy usage yet'}
+                        </p>
+                      </div>
+                      <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
                         <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Sex</p>
                         <p className="mt-2 text-sm font-medium text-slate-200">{entry.sex || 'Pending'}</p>
                       </div>
@@ -720,11 +1158,232 @@ export function GatewayStartView() {
                             : status.label}
                         </p>
                       </div>
+                      <div className="col-span-2 rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Usage Summary in Selected Window</p>
+                        {usageStats ? (
+                          <>
+                            <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                              <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-emerald-300">
+                                Allowed {usageStats.allowed_count}
+                              </span>
+                              <span className="rounded-full border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-red-300">
+                                Blocked {usageStats.blocked_count}
+                              </span>
+                              <span className="rounded-full border border-slate-700 bg-slate-800/70 px-2.5 py-1 text-slate-300">
+                                Unique sites {usageStats.unique_sites}
+                              </span>
+                            </div>
+                            <div className="mt-3 space-y-2">
+                              {usageStats.top_sites.length ? (
+                                usageStats.top_sites.map((site) => (
+                                  <div
+                                    key={`${entry.key}-${site.host}`}
+                                    className="flex items-center justify-between gap-3 rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2"
+                                  >
+                                    <p className="truncate text-sm text-slate-200">{site.host}</p>
+                                    <span className="text-xs font-semibold text-cyan-300">
+                                      {site.request_count} hit(s)
+                                    </span>
+                                  </div>
+                                ))
+                              ) : (
+                                <p className="text-sm text-slate-400">
+                                  No proxy events recorded for this member in the selected period.
+                                </p>
+                              )}
+                            </div>
+                          </>
+                        ) : (
+                          <p className="mt-2 text-sm text-slate-400">
+                            No proxy events recorded for this member in the selected period.
+                          </p>
+                        )}
+                      </div>
                     </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>
+          </div>
+        )}
+
+        {activePanel === 'person-detail' && (
+          <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
+            <div className="mb-5 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+              <div>
+                <button
+                  type="button"
+                  onClick={() => setActivePanel('employees')}
+                  className="mb-3 inline-flex items-center gap-2 text-sm text-cyan-300 hover:text-cyan-200"
+                >
+                  Back to Employees
+                </button>
+                <h3 className="text-xl font-bold text-white">
+                  {selectedMemberUser ? formatName(selectedMemberUser) : selectedMemberUsage?.name || 'User Details'}
+                </h3>
+                <p className="mt-1 text-sm text-slate-400">
+                  Detailed proxy usage, most visited sites, and session context for the selected user.
+                </p>
+              </div>
+              <div className="flex flex-col items-end gap-2">
+                {renderRangeSwitcher()}
+                <span className="text-xs text-slate-500">
+                  {proxyUsageStats
+                    ? `Window: last ${proxyUsageStats.days} day${proxyUsageStats.days > 1 ? 's' : ''}`
+                    : 'Usage window loading...'}
+                </span>
+              </div>
+            </div>
+
+            {selectedMemberUsage ? (
+              <div className="space-y-6">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
+                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                    <p className="text-sm text-slate-400">Requests</p>
+                    <p className="mt-3 text-2xl font-bold text-white">{selectedMemberUsage.request_count}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                    <p className="text-sm text-slate-400">Allowed</p>
+                    <p className="mt-3 text-2xl font-bold text-emerald-300">{selectedMemberUsage.allowed_count}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                    <p className="text-sm text-slate-400">Blocked</p>
+                    <p className="mt-3 text-2xl font-bold text-red-300">{selectedMemberUsage.blocked_count}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                    <p className="text-sm text-slate-400">Unique Sites</p>
+                    <p className="mt-3 text-2xl font-bold text-white">{selectedMemberUsage.unique_sites}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                    <p className="text-sm text-slate-400">Last Activity</p>
+                    <p className="mt-3 text-sm font-semibold text-white">{formatDateTime(selectedMemberUsage.last_seen || null)}</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-4 xl:grid-cols-[0.95fr_1.05fr]">
+                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                    <h4 className="mb-4 text-lg font-semibold text-white">Identity & Session</h4>
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                      <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Email</p>
+                        <p className="mt-2 text-sm font-medium text-slate-200">{selectedMemberUsage.email || selectedMemberUser?.email || '-'}</p>
+                      </div>
+                      <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Department</p>
+                        <p className="mt-2 text-sm font-medium text-slate-200">{selectedMemberUser?.department || adminDepartment || '-'}</p>
+                      </div>
+                      <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Group</p>
+                        <p className="mt-2 text-sm font-medium text-slate-200">{selectedMemberUser?.group_name || adminGroup || '-'}</p>
+                      </div>
+                      <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Current Device</p>
+                        <p className="mt-2 text-sm font-medium text-slate-200">{selectedMemberSession?.hostname || selectedMemberSession?.device_id || 'No active session'}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                    <h4 className="mb-4 text-lg font-semibold text-white">Most Used Sites</h4>
+                    <div className="space-y-3">
+                      {selectedMemberUsage.top_sites.length ? (
+                        selectedMemberUsage.top_sites.map((site) => (
+                          <div key={`detail-${selectedMemberUsage.name}-${site.host}`} className="flex items-center justify-between gap-3 rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-3">
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-semibold text-white">{site.host}</p>
+                            </div>
+                            <span className="text-sm font-semibold text-cyan-300">{site.request_count} hit(s)</span>
+                          </div>
+                        ))
+                      ) : (
+                        <p className="text-sm text-slate-400">No recorded browsing yet in the selected window.</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/35 p-5 text-sm text-slate-400">
+                No detailed usage available yet for this user in the selected period.
+              </div>
+            )}
+          </div>
+        )}
+
+        {activePanel === 'group-detail' && (
+          <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
+            <div className="mb-5 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+              <div>
+                <button
+                  type="button"
+                  onClick={() => setActivePanel('overview')}
+                  className="mb-3 inline-flex items-center gap-2 text-sm text-cyan-300 hover:text-cyan-200"
+                >
+                  Back to Overview
+                </button>
+                <h3 className="text-xl font-bold text-white">{selectedGroupUsage?.group_name || selectedGroupName || 'Group Details'}</h3>
+                <p className="mt-1 text-sm text-slate-400">
+                  Detailed proxy usage, most visited sites, and group-level activity for the selected group.
+                </p>
+              </div>
+              <div className="flex flex-col items-end gap-2">
+                {renderRangeSwitcher()}
+                <span className="text-xs text-slate-500">
+                  {proxyUsageStats
+                    ? `Window: last ${proxyUsageStats.days} day${proxyUsageStats.days > 1 ? 's' : ''}`
+                    : 'Usage window loading...'}
+                </span>
+              </div>
+            </div>
+
+            {selectedGroupUsage ? (
+              <div className="space-y-6">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
+                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                    <p className="text-sm text-slate-400">Requests</p>
+                    <p className="mt-3 text-2xl font-bold text-white">{selectedGroupUsage.request_count}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                    <p className="text-sm text-slate-400">Allowed</p>
+                    <p className="mt-3 text-2xl font-bold text-emerald-300">{selectedGroupUsage.allowed_count}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                    <p className="text-sm text-slate-400">Blocked</p>
+                    <p className="mt-3 text-2xl font-bold text-red-300">{selectedGroupUsage.blocked_count}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                    <p className="text-sm text-slate-400">Members with Activity</p>
+                    <p className="mt-3 text-2xl font-bold text-white">{selectedGroupUsage.unique_members}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                    <p className="text-sm text-slate-400">Unique Sites</p>
+                    <p className="mt-3 text-2xl font-bold text-white">{selectedGroupUsage.unique_sites}</p>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                  <h4 className="mb-4 text-lg font-semibold text-white">Most Used Sites in This Group</h4>
+                  <div className="space-y-3">
+                    {selectedGroupUsage.top_sites.length ? (
+                      selectedGroupUsage.top_sites.map((site) => (
+                        <div key={`group-detail-${selectedGroupUsage.group_name}-${site.host}`} className="flex items-center justify-between gap-3 rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-semibold text-white">{site.host}</p>
+                          </div>
+                          <span className="text-sm font-semibold text-cyan-300">{site.request_count} hit(s)</span>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-sm text-slate-400">No recorded browsing yet in the selected window.</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/35 p-5 text-sm text-slate-400">
+                No detailed usage available yet for this group in the selected period.
+              </div>
+            )}
           </div>
         )}
 

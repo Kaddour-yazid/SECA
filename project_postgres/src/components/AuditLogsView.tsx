@@ -634,7 +634,7 @@ export function AuditLogsView() {
                             <td className="px-4 py-3 text-sm text-slate-300 whitespace-nowrap">{formatTimestamp(log.timestamp)}</td>
                             <td className="px-4 py-3 text-sm text-slate-200 whitespace-nowrap">{log.action}</td>
                             <td className="px-4 py-3 text-sm text-slate-300">
-                              <div className="rounded-md border border-slate-700 bg-slate-900/50 px-2.5 py-1.5 text-xs text-slate-300 line-clamp-1 break-all">
+                              <div className="rounded-md border border-slate-700 bg-slate-900/50 px-2.5 py-1.5 text-xs text-slate-300 whitespace-normal break-all leading-relaxed">
                                 {detailPreviewRows(log.details)}
                               </div>
                               <button onClick={() => setDetailsLog(log)} className="text-cyan-300 hover:text-cyan-200 text-xs inline-flex items-center gap-1 mt-1.5">
@@ -754,7 +754,7 @@ export function AuditLogsView() {
                       </td>
                       <td className="px-4 py-3 text-sm text-slate-300">{log.user_name || (log.user_id === null ? "System" : `User #${log.user_id}`)}</td>
                       <td className="px-4 py-3 text-sm text-slate-300">
-                        <div className="rounded-md border border-slate-700 bg-slate-900/50 px-2.5 py-1.5 text-xs text-slate-300 line-clamp-1 break-all">
+                        <div className="rounded-md border border-slate-700 bg-slate-900/50 px-2.5 py-1.5 text-xs text-slate-300 whitespace-normal break-all leading-relaxed">
                           {detailPreviewRows(log.details)}
                         </div>
                         <button onClick={() => setDetailsLog(log)} className="text-cyan-300 hover:text-cyan-200 text-xs inline-flex items-center gap-1 mt-1.5">

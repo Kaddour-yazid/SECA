@@ -5,4 +5,5 @@ db/*.db
 db/*.sqlite
 db/*.sqlite3
 db/yara_rules/
+db/generated_kaggle_url_feed.txt
 .env

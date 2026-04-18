@@ -6,7 +6,7 @@ from sqlalchemy import or_, inspect, text
 from sqlalchemy.orm import Session
 from typing import Dict, Any, Optional, List, Tuple
 from pydantic import BaseModel
-from collections import deque
+from collections import Counter, defaultdict, deque
 from email import policy
 from email.parser import BytesParser, Parser
 from email.utils import getaddresses
@@ -32,7 +32,7 @@ import logging
 import threading
 import urllib.error
 import urllib.request
-from urllib.parse import quote, urlencode, urlparse, urlsplit, urljoin
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlsplit, urljoin
 from datetime import datetime, timedelta
 from html import unescape
 import unicodedata
@@ -1946,6 +1946,48 @@ def _summarize_proxy_static_signals(static_eval: Dict[str, Any]) -> List[str]:
     return deduped[:6]
 
 
+def _should_block_proxy_static_eval(static_eval: Dict[str, Any]) -> bool:
+    status = str(static_eval.get("status") or "clean").strip().lower()
+    if status != "malicious":
+        return False
+
+    threat_score = int(static_eval.get("threat_score") or 0)
+    layers = (((static_eval.get("details") or {}).get("layers")) or {})
+    layer2 = layers.get("layer2_phishtank", {}) or {}
+    layer3 = layers.get("layer3_reputation", {}) or {}
+    layer4 = layers.get("layer4_content", {}) or {}
+
+    match_type = str(layer2.get("match_type") or "none").strip().lower()
+    source = str(layer2.get("source") or "").strip().lower()
+    found = bool(layer2.get("found"))
+
+    # Exact URL hits are strong enough to block immediately.
+    if found and match_type == "exact_url":
+        return True
+
+    # Explicit domain-only rules from the curated local feed are also allowed
+    # to block, but imported feed domain matches are too noisy for hard blocking.
+    if found and match_type == "domain_only" and source == "local-url-feed":
+        return True
+
+    # Domain-only matches from broad imported feeds should inform the score, but
+    # should not hard-block browsing on their own.
+    if match_type == "domain_only":
+        return False
+
+    brand_impersonation = bool(layer3.get("brand_impersonation"))
+    path_brand_abuse = bool(layer3.get("path_brand_abuse"))
+    layer4_score = int(layer4.get("threat_score") or 0)
+
+    # Keep proxy blocking for clearly dangerous heuristic outcomes, but require
+    # a stronger signal than the general scanner uses.
+    if threat_score >= 85:
+        return True
+    if threat_score >= 70 and (brand_impersonation or path_brand_abuse or layer4_score >= 35):
+        return True
+    return False
+
+
 def _proxy_static_scan_event_sync(
     *,
     client_ip: str,
@@ -1961,6 +2003,7 @@ def _proxy_static_scan_event_sync(
     static_match_type = "none"
     static_source: Optional[str] = None
     static_signals: List[str] = []
+    static_enforced_block = False
     block_reason = "policy_rule" if block_rule else None
 
     if scan_url:
@@ -1973,17 +2016,19 @@ def _proxy_static_scan_event_sync(
             static_match_type = str(layer2.get("match_type") or "none")
             static_source = layer2.get("source") or layer2.get("phish_id")
             static_signals = _summarize_proxy_static_signals(static_eval)
-            if static_status == "malicious":
+            static_enforced_block = _should_block_proxy_static_eval(static_eval)
+            if static_enforced_block:
                 block_reason = "static_malicious" if not block_rule else f"policy_rule+static_malicious"
         except Exception as exc:
             logger.warning("Proxy URL static scan failed for %s: %s", scan_url, exc)
             static_status = "error"
             static_signals = [f"Static scan error: {str(exc)[:140]}"]
+            static_enforced_block = False
             if not block_reason:
                 block_reason = None
 
-    blocked = bool(block_rule) or static_status == "malicious"
-    if block_rule and static_status != "malicious":
+    blocked = bool(block_rule) or static_enforced_block
+    if block_rule and not static_enforced_block:
         static_signals = [f"Matched proxy rule {block_rule}", *static_signals][:6]
 
     return {
@@ -3009,7 +3054,14 @@ def _analyze_email_payload(
 def layer1_format_validation(url: str) -> Dict[str, Any]:
     """Layer 1: Format Validation"""
     try:
-        parsed = urlparse(url)
+        normalized_url = _normalize_scan_url(url)
+        if not normalized_url:
+            return {
+                "passed": False,
+                "issues": ["Invalid URL format"],
+            }
+
+        parsed = urlparse(normalized_url)
 
         issues = []
         suspicious = False
@@ -3021,12 +3073,12 @@ def layer1_format_validation(url: str) -> Dict[str, Any]:
 
         # Check for suspicious characters
         suspicious_chars = ['@', '..', '///', '%00']
-        if any(char in url for char in suspicious_chars):
+        if any(char in normalized_url for char in suspicious_chars):
             issues.append("Suspicious characters detected")
             suspicious = True
 
         # Check URL length (phishing URLs are often very long)
-        if len(url) > 200:
+        if len(normalized_url) > 200:
             issues.append("Unusually long URL")
             suspicious = True
 
@@ -3041,7 +3093,8 @@ def layer1_format_validation(url: str) -> Dict[str, Any]:
             "issues": issues,
             "protocol": parsed.scheme,
             "domain": parsed.netloc,
-            "path": parsed.path
+            "path": parsed.path,
+            "normalized_url": normalized_url,
         }
     except Exception as e:
         return {
@@ -3053,9 +3106,43 @@ def layer1_format_validation(url: str) -> Dict[str, Any]:
 
 def layer2_phishtank_check(url: str, db: Session) -> Dict[str, Any]:
     """Layer 2: Malicious URL Database Check (75K+ URLs)"""
-    normalized_url = url.strip()
+    normalized_url = _normalize_scan_url(url) or url.strip()
     parsed_url = urlparse(normalized_url)
     domain = (parsed_url.hostname or parsed_url.netloc or "").lower()
+    effective_domain = _get_effective_host(domain)
+
+    local_feed = _load_local_url_feed()
+    if normalized_url in local_feed["exact"]:
+        threat_type = local_feed["exact"][normalized_url]
+        return {
+            "found": True,
+            "verified": True,
+            "threat_type": threat_type,
+            "source": "local-url-feed",
+            "threat_level": "high",
+            "match_type": "exact_url",
+            "message": "URL found in local curated threat feed",
+        }
+    if domain and domain in local_feed["domains"]:
+        return {
+            "found": True,
+            "verified": True,
+            "threat_type": local_feed["domains"][domain],
+            "source": "local-url-feed",
+            "threat_level": "high",
+            "match_type": "domain_only",
+            "message": "Domain found in local curated threat feed",
+        }
+    if effective_domain and effective_domain in local_feed["domains"]:
+        return {
+            "found": True,
+            "verified": True,
+            "threat_type": local_feed["domains"][effective_domain],
+            "source": "local-url-feed",
+            "threat_level": "high",
+            "match_type": "domain_only",
+            "message": "Effective domain found in local curated threat feed",
+        }
 
     # Check imported threat feed entries stored in PostgreSQL.
     try:
@@ -3137,7 +3224,8 @@ def layer2_phishtank_check(url: str, db: Session) -> Dict[str, Any]:
 
 def layer3_domain_reputation(url: str) -> Dict[str, Any]:
     """Layer 3: Domain Reputation Check"""
-    parsed = urlparse(url)
+    normalized_url = _normalize_scan_url(url) or url
+    parsed = urlparse(normalized_url)
     domain = (parsed.hostname or parsed.netloc or "").lower()
     path_and_query = f"{parsed.path or ''}?{parsed.query or ''}".lower()
 
@@ -3202,19 +3290,22 @@ def layer3_domain_reputation(url: str) -> Dict[str, Any]:
 
 def layer4_content_analysis(url: str) -> Dict[str, Any]:
     """Layer 4: Content Analysis (simulated)"""
-    parsed = urlparse(url)
+    normalized_url = _normalize_scan_url(url) or url
+    parsed = urlparse(normalized_url)
     host = (parsed.hostname or "").lower()
-    full_lower = url.lower()
+    full_lower = normalized_url.lower()
+    query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    query_keys = {key.lower() for key, _ in query_pairs}
 
     indicators = []
     threat_score = 0
 
     # Check for common phishing patterns
-    if 'verify' in full_lower or 'confirm' in full_lower:
+    if 'verify' in normalized_url.lower() or 'confirm' in normalized_url.lower():
         indicators.append("URL contains verification/confirmation language")
         threat_score += 15
 
-    if 'suspended' in full_lower or 'locked' in full_lower:
+    if 'suspended' in normalized_url.lower() or 'locked' in normalized_url.lower():
         indicators.append("URL suggests account suspension/lock")
         threat_score += 20
 
@@ -3225,7 +3316,7 @@ def layer4_content_analysis(url: str) -> Dict[str, Any]:
         threat_score += 10
 
     # Check for suspicious query parameters
-    if 'token' in full_lower or 'session' in full_lower:
+    if 'token' in normalized_url.lower() or 'session' in normalized_url.lower():
         indicators.append("Contains authentication parameters")
         threat_score += 10
 
@@ -3253,18 +3344,18 @@ def layer4_content_analysis(url: str) -> Dict[str, Any]:
         indicators.append("Direct IPv4 host used instead of domain")
         threat_score += 20
 
-    if "@" in url:
+    if "@" in normalized_url:
         indicators.append("URL contains '@' userinfo obfuscation pattern")
         threat_score += 15
 
-    if len(url) >= 200:
+    if len(normalized_url) >= 200:
         indicators.append("Very long URL length")
         threat_score += 20
-    elif len(url) >= 120:
+    elif len(normalized_url) >= 120:
         indicators.append("Long URL length")
         threat_score += 10
 
-    if url.count("%") >= 6:
+    if normalized_url.count("%") >= 6:
         indicators.append("Heavy URL encoding detected")
         threat_score += 8
 
@@ -3275,6 +3366,32 @@ def layer4_content_analysis(url: str) -> Dict[str, Any]:
     if host.count(".") >= 4:
         indicators.append("Deep subdomain chain detected")
         threat_score += 8
+
+    if len(query_pairs) >= 4:
+        indicators.append("High number of query parameters")
+        threat_score += 6
+
+    if "option" in query_keys and any(value.lower().startswith("com_") for key, value in query_pairs if key.lower() == "option"):
+        indicators.append("Legacy CMS component route detected")
+        threat_score += 6
+
+    if {"option", "tmpl"}.issubset(query_keys):
+        option_value = next((value.lower() for key, value in query_pairs if key.lower() == "option"), "")
+        tmpl_value = next((value.lower() for key, value in query_pairs if key.lower() == "tmpl"), "")
+        if option_value == "com_mailto" and tmpl_value == "component":
+            indicators.append("Encoded legacy mailto redirect pattern detected")
+            threat_score += 18
+
+    if any(key.lower().startswith("vsig") for key, _ in query_pairs):
+        indicators.append("Suspicious legacy CMS signature parameter detected")
+        threat_score += 20
+
+    redirect_keys = {"link", "url", "target", "dest", "destination", "redir", "redirect"}
+    for key, value in query_pairs:
+        if key.lower() in redirect_keys and _looks_like_base64_token(value):
+            indicators.append("Encoded redirect target detected in query string")
+            threat_score += 18
+            break
 
     return {
         "indicators": indicators,
@@ -4145,17 +4262,19 @@ def _build_url_details_payload(url: str, db: Session) -> Dict[str, Any]:
 
 def _evaluate_url_static(url: str, db: Session) -> Dict[str, Any]:
     """Compute 4-layer URL static verdict once and reuse for both static + dynamic flows."""
+    normalized_url = _normalize_scan_url(url) or url.strip()
+
     # Layer 1: Format Validation
-    layer1 = layer1_format_validation(url)
+    layer1 = layer1_format_validation(normalized_url)
 
     # Layer 2: Threat DB check
-    layer2 = layer2_phishtank_check(url, db)
+    layer2 = layer2_phishtank_check(normalized_url, db)
 
     # Layer 3: Domain reputation
-    layer3 = layer3_domain_reputation(url)
+    layer3 = layer3_domain_reputation(normalized_url)
 
     # Layer 4: Content analysis
-    layer4 = layer4_content_analysis(url)
+    layer4 = layer4_content_analysis(normalized_url)
 
     threat_score = 0
     status = "clean"
@@ -4187,7 +4306,7 @@ def _evaluate_url_static(url: str, db: Session) -> Dict[str, Any]:
         status = "clean"
 
     scan_details = {
-        "url": url,
+        "url": normalized_url,
         "layers": {
             "layer1_format": layer1,
             "layer2_phishtank": layer2,
@@ -4216,7 +4335,11 @@ async def url_scan_advanced(
     started_at = time.perf_counter()
     try:
         user_id = current_user.id
-        static_eval = _evaluate_url_static(url, db)
+        normalized_url = _normalize_scan_url(url)
+        if not normalized_url:
+            raise HTTPException(status_code=400, detail="Invalid URL format")
+
+        static_eval = _evaluate_url_static(normalized_url, db)
         status = static_eval["status"]
         threat_score = int(static_eval["threat_score"])
         scan_details = static_eval["details"]
@@ -4225,7 +4348,7 @@ async def url_scan_advanced(
         scan = Scan(
             user_id=user_id,
             scan_type="url_advanced",
-            target=url,
+            target=normalized_url,
             status=status,
             threat_score=threat_score,
             details=json.dumps(scan_details)
@@ -4235,7 +4358,7 @@ async def url_scan_advanced(
         db.refresh(scan)
 
         # Create audit log
-        create_audit_log(db, user_id, "Advanced URL Scan", f"Scanned {url[:50]}...")
+        create_audit_log(db, user_id, "Advanced URL Scan", f"Scanned {normalized_url[:80]}...")
 
         elapsed = time.perf_counter() - started_at
         remaining = URL_SCAN_MIN_DURATION_SECONDS - elapsed
@@ -4396,6 +4519,62 @@ SUSPICIOUS_API_IMPORTS = {
     "urlmonikercreatefromurl",
 }
 _HASH_FEED_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "entries": {}}
+_URL_FEED_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "exact": {}, "domains": {}}
+
+
+def _normalize_scan_url(raw: str) -> Optional[str]:
+    value = (raw or "").strip()
+    if not value:
+        return None
+
+    if "://" not in value:
+        value = f"http://{value}"
+
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+
+    host = (parsed.hostname or "").lower().strip(".")
+    if not host:
+        return None
+
+    scheme = (parsed.scheme or "http").lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    include_port = bool(port and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)))
+    netloc = f"{host}:{port}" if include_port else host
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    return f"{scheme}://{netloc}{path}"
+
+
+def _get_effective_host(host: str) -> str:
+    candidate = (host or "").lower().strip(".")
+    if not candidate:
+        return ""
+    parts = candidate.split(".")
+    if len(parts) < 2:
+        return candidate
+    suffix = ".".join(parts[-2:])
+    if suffix in MULTI_LABEL_PUBLIC_SUFFIXES and len(parts) >= 3:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
+def _looks_like_base64_token(value: str) -> bool:
+    token = (value or "").strip()
+    if len(token) < 16:
+        return False
+    if len(token) % 4 != 0:
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9+/=]+", token):
+        return False
+    return any(char in token for char in "/+=")
 _YARA_CACHE: Dict[str, Any] = {"key": None, "rules": None, "source": "disabled", "error": None}
 YARA_EXT_VAR_EXCLUDED_FILES = {
     "generic_anomalies.yar",
@@ -4512,6 +4691,53 @@ def _load_local_hash_feed() -> Dict[str, str]:
     _HASH_FEED_CACHE["mtime"] = mtime
     _HASH_FEED_CACHE["entries"] = entries
     return entries
+
+
+def _load_local_url_feed() -> Dict[str, Dict[str, str]]:
+    path = os.environ.get("SECA_URL_FEED", "").strip()
+    if not path:
+        generated_path = os.path.join(os.path.dirname(__file__), "generated_kaggle_url_feed.txt")
+        curated_path = os.path.join(os.path.dirname(__file__), "local_threat_urls.txt")
+        path = generated_path if os.path.exists(generated_path) else curated_path
+    if not os.path.exists(path):
+        return {"exact": {}, "domains": {}}
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return {"exact": {}, "domains": {}}
+    if _URL_FEED_CACHE["path"] == path and _URL_FEED_CACHE["mtime"] == mtime:
+        return {"exact": _URL_FEED_CACHE["exact"], "domains": _URL_FEED_CACHE["domains"]}
+
+    exact_entries: Dict[str, str] = {}
+    domain_entries: Dict[str, str] = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = [part.strip() for part in line.split(",", 2)]
+                candidate = parts[0]
+                threat_type = parts[1] if len(parts) > 1 and parts[1] else "malicious-url"
+                if candidate.lower().startswith("domain:"):
+                    domain = candidate.split(":", 1)[1].strip().lower().strip(".")
+                    if domain:
+                        domain_entries[domain] = threat_type
+                    continue
+                normalized = _normalize_scan_url(candidate)
+                if not normalized:
+                    continue
+                exact_entries[normalized] = threat_type
+    except Exception as exc:
+        logger.warning("Failed to load local URL feed from %s: %s", path, exc)
+        exact_entries = {}
+        domain_entries = {}
+
+    _URL_FEED_CACHE["path"] = path
+    _URL_FEED_CACHE["mtime"] = mtime
+    _URL_FEED_CACHE["exact"] = exact_entries
+    _URL_FEED_CACHE["domains"] = domain_entries
+    return {"exact": exact_entries, "domains": domain_entries}
 
 
 def _get_cached_reputation(db: Session, provider: str, lookup_key: str) -> Optional[Dict[str, Any]]:
@@ -5881,6 +6107,326 @@ async def gateway_api_history(
             and str(row.get("group_name") or "").strip() == admin_group
         ]
     return rows[:limit]
+
+
+def _gateway_history_timestamp(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    text_value = str(value).strip()
+    if not text_value:
+        return None
+    try:
+        return datetime.fromisoformat(text_value.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _gateway_history_host(row: Dict[str, Any]) -> str:
+    direct_host = str(row.get("host") or "").strip().lower()
+    if direct_host:
+        return direct_host
+
+    for candidate in (row.get("scan_url"), row.get("target")):
+        candidate_text = str(candidate or "").strip()
+        if not candidate_text:
+            continue
+
+        if "://" in candidate_text:
+            parsed = urlparse(candidate_text)
+            if parsed.hostname:
+                return parsed.hostname.strip().lower()
+
+        trimmed = candidate_text.split("/", 1)[0]
+        if ":" in trimmed:
+            trimmed = trimmed.split(":", 1)[0]
+        trimmed = trimmed.strip().lower()
+        if trimmed:
+            return trimmed
+
+    return "unknown-host"
+
+
+@app.get("/monitoring/proxy-usage-stats")
+async def monitoring_proxy_usage_stats(
+        period: str = Query("week"),
+        current_user: User = Depends(require_admin),
+        db: Session = Depends(get_db),
+):
+    period_windows = {
+        "day": 1,
+        "3days": 3,
+        "week": 7,
+        "month": 30,
+    }
+    if period not in period_windows:
+        raise HTTPException(status_code=400, detail="Invalid monitoring period")
+
+    admin_department = str(current_user.department or "").strip()
+    admin_group = str(current_user.group_name or "").strip()
+    if not admin_department or not admin_group:
+        return {
+            "period": period,
+            "days": period_windows[period],
+            "generated_at": datetime.utcnow().isoformat(),
+            "group_summary": {
+                "department": admin_department,
+                "group_name": admin_group,
+                "request_count": 0,
+                "blocked_count": 0,
+                "allowed_count": 0,
+                "unique_sites": 0,
+                "unique_members": 0,
+            },
+            "top_sites": [],
+            "member_stats": [],
+            "group_stats": [],
+            "daily_stats": [],
+        }
+
+    cutoff = datetime.utcnow() - timedelta(days=period_windows[period])
+    department_rows = [
+        row for row in list(gateway_history)
+        if str(row.get("department") or "").strip() == admin_department
+    ]
+    scoped_rows = []
+    scoped_department_rows = []
+    for row in department_rows:
+        row_ts = _gateway_history_timestamp(row.get("timestamp"))
+        if not row_ts or row_ts < cutoff:
+            continue
+        scoped_department_rows.append(row)
+        if str(row.get("group_name") or "").strip() == admin_group:
+            scoped_rows.append(row)
+
+    members = (
+        db.query(User)
+        .filter(
+            User.department == admin_department,
+            User.group_name == admin_group,
+            User.is_admin.is_(False),
+        )
+        .order_by(User.first_name.asc(), User.last_name.asc(), User.email.asc())
+        .all()
+    )
+
+    member_stats_map: Dict[str, Dict[str, Any]] = {}
+    top_sites_counter: Counter[str] = Counter()
+    top_sites_blocked: Counter[str] = Counter()
+    top_sites_allowed: Counter[str] = Counter()
+    top_sites_members: Dict[str, set] = defaultdict(set)
+    top_sites_last_seen: Dict[str, str] = {}
+    group_stats_map: Dict[str, Dict[str, Any]] = {}
+    daily_bucket_map: Dict[str, Dict[str, Any]] = {}
+
+    for member in members:
+        member_name = _desktop_user_display_name(member)
+        member_stats_map[f"user:{member.id}"] = {
+            "user_id": member.id,
+            "email": member.email,
+            "name": member_name,
+            "request_count": 0,
+            "blocked_count": 0,
+            "allowed_count": 0,
+            "unique_sites": set(),
+            "top_sites": Counter(),
+            "last_seen": None,
+        }
+
+    for row in scoped_department_rows:
+        host = _gateway_history_host(row)
+        blocked = bool(row.get("blocked"))
+        timestamp = _gateway_history_timestamp(row.get("timestamp"))
+        timestamp_text = timestamp.isoformat() if timestamp else None
+        user_id = row.get("user_id")
+        user_email = str(row.get("user_email") or "").strip() or None
+        user_name = str(row.get("user_name") or "").strip() or user_email or "Unassigned"
+        group_name = str(row.get("group_name") or "").strip() or "Unassigned group"
+
+        group_bucket = group_stats_map.setdefault(
+            group_name,
+            {
+                "group_name": group_name,
+                "department": admin_department,
+                "request_count": 0,
+                "blocked_count": 0,
+                "allowed_count": 0,
+                "unique_sites": set(),
+                "unique_members": set(),
+                "top_sites": Counter(),
+                "last_seen": None,
+            },
+        )
+        group_bucket["request_count"] += 1
+        if blocked:
+            group_bucket["blocked_count"] += 1
+        else:
+            group_bucket["allowed_count"] += 1
+        group_bucket["unique_sites"].add(host)
+        group_bucket["top_sites"][host] += 1
+        if user_id is not None or user_email or user_name:
+            group_bucket["unique_members"].add(
+                f"user:{user_id}" if user_id is not None else f"email:{(user_email or user_name).lower()}"
+            )
+        if timestamp_text and (not group_bucket["last_seen"] or str(group_bucket["last_seen"]) < timestamp_text):
+            group_bucket["last_seen"] = timestamp_text
+
+        if group_name == admin_group:
+            member_key = f"user:{user_id}" if user_id is not None else f"email:{(user_email or user_name).lower()}"
+            if member_key not in member_stats_map:
+                member_stats_map[member_key] = {
+                    "user_id": user_id,
+                    "email": user_email,
+                    "name": user_name,
+                    "request_count": 0,
+                    "blocked_count": 0,
+                    "allowed_count": 0,
+                    "unique_sites": set(),
+                    "top_sites": Counter(),
+                    "last_seen": None,
+                }
+
+            member_row = member_stats_map[member_key]
+            member_row["request_count"] += 1
+            if blocked:
+                member_row["blocked_count"] += 1
+            else:
+                member_row["allowed_count"] += 1
+            member_row["top_sites"][host] += 1
+            member_row["unique_sites"].add(host)
+            if timestamp_text:
+                if not member_row["last_seen"] or str(member_row["last_seen"]) < timestamp_text:
+                    member_row["last_seen"] = timestamp_text
+
+            top_sites_counter[host] += 1
+            if blocked:
+                top_sites_blocked[host] += 1
+            else:
+                top_sites_allowed[host] += 1
+            top_sites_members[host].add(member_key)
+            if timestamp_text and (host not in top_sites_last_seen or top_sites_last_seen[host] < timestamp_text):
+                top_sites_last_seen[host] = timestamp_text
+
+            if timestamp:
+                bucket_key = timestamp.strftime("%Y-%m-%d")
+                bucket = daily_bucket_map.setdefault(
+                    bucket_key,
+                    {
+                        "date": bucket_key,
+                        "request_count": 0,
+                        "blocked_count": 0,
+                        "allowed_count": 0,
+                        "unique_sites": set(),
+                        "unique_members": set(),
+                    },
+                )
+                bucket["request_count"] += 1
+                if blocked:
+                    bucket["blocked_count"] += 1
+                else:
+                    bucket["allowed_count"] += 1
+                bucket["unique_sites"].add(host)
+                bucket["unique_members"].add(member_key)
+
+    top_sites = [
+        {
+            "host": host,
+            "request_count": count,
+            "blocked_count": int(top_sites_blocked.get(host, 0)),
+            "allowed_count": int(top_sites_allowed.get(host, 0)),
+            "unique_members": len(top_sites_members.get(host, set())),
+            "last_seen": top_sites_last_seen.get(host),
+        }
+        for host, count in top_sites_counter.most_common(15)
+    ]
+
+    member_stats = []
+    for data in member_stats_map.values():
+        top_member_sites = [
+            {
+                "host": host,
+                "request_count": count,
+            }
+            for host, count in data["top_sites"].most_common(8)
+        ]
+        member_stats.append(
+            {
+                "user_id": data["user_id"],
+                "email": data["email"],
+                "name": data["name"],
+                "request_count": int(data["request_count"]),
+                "blocked_count": int(data["blocked_count"]),
+                "allowed_count": int(data["allowed_count"]),
+                "unique_sites": len(data["unique_sites"]),
+                "last_seen": data["last_seen"],
+                "top_sites": top_member_sites,
+            }
+        )
+
+    member_stats.sort(
+        key=lambda item: (
+            -int(item["request_count"]),
+            str(item["name"]).lower(),
+        )
+    )
+
+    daily_stats = []
+    for key in sorted(daily_bucket_map.keys()):
+        bucket = daily_bucket_map[key]
+        daily_stats.append(
+            {
+                "date": bucket["date"],
+                "request_count": int(bucket["request_count"]),
+                "blocked_count": int(bucket["blocked_count"]),
+                "allowed_count": int(bucket["allowed_count"]),
+                "unique_sites": len(bucket["unique_sites"]),
+                "unique_members": len(bucket["unique_members"]),
+            }
+        )
+
+    group_stats = []
+    for data in group_stats_map.values():
+        group_stats.append(
+            {
+                "group_name": data["group_name"],
+                "department": data["department"],
+                "request_count": int(data["request_count"]),
+                "blocked_count": int(data["blocked_count"]),
+                "allowed_count": int(data["allowed_count"]),
+                "unique_sites": len(data["unique_sites"]),
+                "unique_members": len(data["unique_members"]),
+                "last_seen": data["last_seen"],
+                "top_sites": [
+                    {"host": host, "request_count": count}
+                    for host, count in data["top_sites"].most_common(12)
+                ],
+            }
+        )
+
+    group_stats.sort(
+        key=lambda item: (
+            -int(item["request_count"]),
+            str(item["group_name"]).lower(),
+        )
+    )
+
+    return {
+        "period": period,
+        "days": period_windows[period],
+        "generated_at": datetime.utcnow().isoformat(),
+        "group_summary": {
+            "department": admin_department,
+            "group_name": admin_group,
+            "request_count": sum(int(item["request_count"]) for item in member_stats),
+            "blocked_count": sum(int(item["blocked_count"]) for item in member_stats),
+            "allowed_count": sum(int(item["allowed_count"]) for item in member_stats),
+            "unique_sites": len(top_sites_counter),
+            "unique_members": len([item for item in member_stats if int(item["request_count"]) > 0]),
+        },
+        "top_sites": top_sites,
+        "member_stats": member_stats,
+        "group_stats": group_stats,
+        "daily_stats": daily_stats,
+    }
 
 
 @app.get("/gateway/api/stats")

@@ -1,0 +1,232 @@
+﻿\documentclass[12pt,a4paper]{report}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage{geometry}
+\usepackage{setspace}
+\usepackage{graphicx}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+
+\geometry{margin=2.5cm}
+\setstretch{1.2}
+\setlength{\parskip}{0.35em}
+\setlength{\parindent}{0pt}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    urlcolor=blue,
+    pdftitle={Filtration des URLs}
+}
+
+\titleformat{\chapter}[hang]{\bfseries\Large}{\thechapter}{0.8em}{}
+\titleformat{\section}{\bfseries\large}{\thesection}{0.8em}{}
+
+\newcommand{\reporttitle}{Filtration des URLs}
+\newcommand{\reportsubtitle}{Scan statique, scan dynamique et intégration au proxy}
+\newcommand{\ustoname}{Université des Sciences et de la Technologie d'Oran Mohamed Boudiaf}
+\newcommand{\moduleinfo}{Sécurité d'information}
+\newcommand{\academicyear}{2025 -- 2026}
+
+\newcommand{\headerstyle}{
+    \fancyhf{}
+    \fancyhead[L]{Filtration des URLs}
+    \fancyhead[R]{USTO-MB}
+    \fancyfoot[C]{\thepage}
+    \renewcommand{\headrulewidth}{0.4pt}
+}
+
+\begin{document}
+
+\begin{titlepage}
+    \centering
+
+    {\large République Algérienne Démocratique et Populaire\par}
+    \vspace{0.15cm}
+    {\normalsize Ministère de l'Enseignement Supérieur et de la Recherche Scientifique\par}
+    \vspace{0.15cm}
+    {\normalsize \ustoname\par}
+
+    \vspace{0.45cm}
+    \rule{0.88\textwidth}{0.4pt}
+
+    \vspace{0.55cm}
+    \IfFileExists{usto_logo.png}{
+        \includegraphics[width=3.1cm]{usto_logo.png}\par
+    }{
+        \fbox{\parbox[c][3.1cm][c]{3.1cm}{\centering Logo\\USTO}}\par
+    }
+
+    \vspace{0.35cm}
+    {\large \textbf{Université des Sciences et de la Technologie d'Oran Mohamed Boudiaf}\par}
+
+    \vspace{0.45cm}
+    \rule{0.88\textwidth}{0.4pt}
+
+    \vspace{0.75cm}
+    {\Huge \textbf{Rapport de TP}\par}
+    \vspace{0.35cm}
+    {\Large Option : \moduleinfo\par}
+
+    \vspace{1cm}
+    {\LARGE \textbf{\reporttitle}\par}
+    \vspace{0.3cm}
+    {\large \reportsubtitle\par}
+
+    \vspace{1.2cm}
+    \begin{flushleft}
+        \renewcommand{\arraystretch}{1.2}
+        \begin{tabular}{@{}p{5cm}p{9cm}}
+            \textbf{Thème :} & Sécurisation des accès web \\
+            \textbf{Sous-thème :} & Filtration des URLs \\
+            \textbf{Année universitaire :} & \academicyear \\
+        \end{tabular}
+    \end{flushleft}
+
+    \vfill
+    \rule{0.88\textwidth}{0.4pt}
+    \vspace{0.2cm}
+    {\normalsize Avril 2026\par}
+\end{titlepage}
+
+\pagenumbering{roman}
+\pagestyle{plain}
+
+\chapter*{Introduction générale}
+\addcontentsline{toc}{chapter}{Introduction générale}
+
+La filtration des URLs répond à un besoin simple en apparence, mais techniquement exigeant : décider si un lien web doit être autorisé, surveillé ou bloqué. Une URL peut mener vers un service légitime, mais elle peut aussi cacher un site de phishing, un domaine temporaire, une page de téléchargement piégée ou une redirection vers une ressource malveillante. Dans un contexte de sécurité, il est donc nécessaire de traiter l'URL comme un indicateur à part entière et non comme une simple chaîne de caractères.
+
+Le système étudié met en place une chaîne complète autour de cet objet. L'adresse est d'abord normalisée, puis soumise à un scan statique en plusieurs couches. Elle peut être comparée à une base de données d'URLs connues comme dangereuses, puis observée dynamiquement dans un environnement isolé si un approfondissement est nécessaire. La même logique est ensuite réutilisée dans le forward proxy afin que l'analyse ne reste pas théorique : elle intervient directement lorsqu'un navigateur émet une requête.
+
+L'objectif de ce rapport est de présenter cette architecture de manière concise et technique. L'accent est mis sur les quatre couches du scan statique, sur la base de données d'URLs connues, sur le scan dynamique, puis sur l'intégration de cette logique dans le proxy, la blocklist administrative, l'audit et le monitoring.
+
+\tableofcontents
+\newpage
+
+\pagenumbering{arabic}
+\pagestyle{fancy}
+\headerstyle
+
+\chapter{Architecture générale}
+
+La filtration des URLs s'appuie sur plusieurs blocs complémentaires. Le premier est le moteur de scan statique, chargé de produire rapidement un score et un verdict. Le deuxième est la base de données des URLs connues comme malveillantes, qui permet d'introduire une mémoire de menace dans la décision. Le troisième est le scan dynamique, utilisé dans un environnement isolé pour approfondir certains cas. Le quatrième est le forward proxy, qui transforme l'analyse en contrôle effectif du trafic web.
+
+Le cycle global est le suivant :
+
+\begin{itemize}[leftmargin=1.2cm]
+    \item une URL est saisie manuellement ou interceptée dans une requête web ;
+    \item elle est normalisée avant toute analyse ;
+    \item le scan statique calcule un score et un verdict ;
+    \item une comparaison est faite avec les URLs déjà connues ;
+    \item si nécessaire, un scan dynamique complète l'évaluation ;
+    \item le proxy applique la décision d'autorisation ou de blocage ;
+    \item l'événement est enregistré dans les journaux et observé dans le monitoring.
+\end{itemize}
+
+Cette architecture est intéressante parce qu'elle sépare clairement l'analyse, la décision et la traçabilité. Le moteur d'analyse produit un résultat, le proxy applique une politique, et la journalisation permet ensuite de comprendre ce qui s'est réellement passé.
+
+\chapter{Le scan statique en quatre couches}
+
+Le scan statique est le cœur du traitement des URLs. Il est utilisé à la fois dans le scanner manuel et dans le proxy. Son intérêt principal est sa rapidité, ce qui le rend compatible avec une décision presque immédiate.
+
+\section{Validation du format}
+
+La première couche vérifie la forme générale de l'URL. Elle contrôle le schéma, la présence d'un domaine cohérent, la longueur du lien et certains motifs anormaux. Cette étape sert à repérer des structures inhabituelles comme l'utilisation d'une adresse IP à la place d'un nom de domaine, des séquences répétées, des caractères spéciaux trompeurs ou des encodages suspects.
+
+Même si cette couche ne suffit pas à elle seule pour conclure qu'une URL est malveillante, elle fournit un premier niveau d'alerte. Une URL techniquement valide peut déjà être considérée comme douteuse si sa construction ressemble à un lien d'usurpation ou de redirection cachée.
+
+\section{Comparaison avec les URLs connues}
+
+La deuxième couche consulte les bases locales de menaces. Deux tables sont particulièrement importantes : \texttt{threat\_urls} et \texttt{phishtank\_entries}. La première est conçue pour stocker des URLs malveillantes importées depuis des listes ou des flux externes. La seconde est spécialisée dans les URLs de phishing.
+
+Le système normalise l'URL, calcule son hash et cherche d'abord une correspondance exacte. Si aucune correspondance n'est trouvée, il peut encore comparer le domaine. Cette logique permet de détecter soit une URL déjà connue, soit un domaine déjà associé à un comportement malveillant.
+
+Cette couche apporte une forte valeur dès que les tables sont alimentées. Elle ancre la décision dans une base de connaissance concrète, au lieu de dépendre uniquement d'heuristiques. En revanche, si ces tables sont vides, la logique reste présente mais la détection repose alors surtout sur les autres couches.
+
+\section{Réputation du domaine}
+
+La troisième couche estime le niveau de confiance du domaine. Elle prend en compte des éléments comme certains TLD, des mots-clés sensibles intégrés au domaine, un nombre important de sous-domaines ou l'usage de caractères pouvant servir à imiter un nom légitime.
+
+Cette couche est particulièrement utile pour les domaines récents, peu connus ou construits pour ressembler à des plateformes populaires. Elle ne produit pas une certitude absolue, mais elle contribue à diminuer ou augmenter la confiance accordée à une destination.
+
+\section{Heuristiques de contenu}
+
+La quatrième couche analyse plus finement le contenu de l'URL. Elle cherche des signaux fréquents dans les liens malveillants : mots-clés comme \texttt{verify}, \texttt{update} ou \texttt{confirm}, présence de paramètres \texttt{token} ou \texttt{session}, usage de raccourcisseurs, ports non standards, profondeur excessive de sous-domaines ou longueur anormale du lien.
+
+Cette couche complète les précédentes en détectant des motifs qui ne reposent pas sur une base connue mais sur des caractéristiques récurrentes observées dans les campagnes de phishing et les redirections trompeuses.
+
+\section{Agrégation du score}
+
+Les résultats des quatre couches sont agrégés pour produire un score global et un verdict final. Le système distingue généralement trois niveaux : \texttt{clean}, \texttt{suspicious} et \texttt{malicious}. L'avantage de cette structure est de combiner plusieurs sources de signaux au lieu de s'appuyer sur un seul test binaire.
+
+\chapter{Base de données des URLs malveillantes}
+
+La présence d'une base de données dédiée constitue une partie essentielle de la filtration. Dans l'architecture étudiée, cette fonction repose surtout sur les tables \texttt{threat\_urls} et \texttt{phishtank\_entries}.
+
+La table \texttt{threat\_urls} permet de stocker des URLs importées avec plusieurs attributs utiles : hash de l'URL, URL chiffrée, domaine, hash du domaine, type de menace, source et indicateur de vérification. Cette structure rend la base exploitable dans un cadre réel, car elle ne se limite pas à une simple liste brute.
+
+La table \texttt{phishtank\_entries} apporte une spécialisation supplémentaire en se concentrant sur des URLs de phishing. Elle joue un rôle utile dans la détection de pages d'usurpation d'identité, de faux formulaires d'authentification ou de pages de récupération de credentials.
+
+La comparaison à cette base intervient tôt dans le scan statique. Si une correspondance exacte est trouvée, le niveau de confiance dans le caractère malveillant de l'URL devient élevé. Si seule une correspondance de domaine existe, le risque reste important mais doit être interprété avec plus de nuance.
+
+Cette partie montre qu'une filtration efficace ne dépend pas uniquement de règles heuristiques. Elle gagne en qualité lorsqu'elle est appuyée par une base de menaces réellement alimentée. Sans cette alimentation, l'architecture reste correcte, mais elle ne tire pas pleinement profit de la couche de connaissance.
+
+\chapter{Le scan dynamique}
+
+Le scan dynamique intervient comme mécanisme complémentaire. Il n'a pas pour but de remplacer le statique, mais d'observer certains cas dans un environnement contrôlé. Dans notre architecture, cette observation s'appuie sur Windows Sandbox.
+
+Le système crée un job associé à la cible, prépare une session isolée et récupère ensuite un état d'exécution. Cette étape est volontairement plus encadrée que le scan statique. Une URL déjà classée \texttt{malicious} n'est pas nécessairement exécutée, et seules les destinations HTTP ou HTTPS externes sont acceptées. Les hôtes locaux ou privés sont refusés pour éviter des comportements dangereux ou non pertinents.
+
+L'intérêt du dynamique est d'ajouter une profondeur d'analyse. Là où le statique évalue l'apparence, la structure et la réputation, le dynamique cherche à observer un comportement. Il peut ainsi fournir des indications sur les connexions réalisées, les processus lancés ou certaines modifications détectées dans l'environnement isolé.
+
+Cette couche reste toutefois plus coûteuse et plus lente. Elle doit donc être utilisée avec discernement, surtout dans un système qui doit conserver de bonnes performances pour la majorité des URLs traitées.
+
+\chapter{Intégration dans le forward proxy}
+
+L'intégration du scan statique dans le forward proxy est l'un des points les plus importants du système. C'est elle qui permet de faire passer l'analyse du stade d'outil de diagnostic au stade de mécanisme actif de contrôle.
+
+Lorsqu'un navigateur configuré pour utiliser le proxy envoie une requête, le proxy récupère la cible, vérifie d'abord si une règle locale de blocage s'applique, puis construit une \texttt{scan\_url}. Cette URL de scan est ensuite transmise au moteur statique, qui retourne un score, un verdict et des signaux d'explication.
+
+Le traitement suit alors une séquence simple :
+
+\begin{enumerate}[leftmargin=1.2cm]
+    \item réception de la requête ;
+    \item extraction de la cible ;
+    \item consultation de la blocklist locale ;
+    \item reconstruction de la \texttt{scan\_url} ;
+    \item exécution du scan statique ;
+    \item décision d'autorisation ou de blocage ;
+    \item écriture de l'événement dans l'audit.
+\end{enumerate}
+
+Pour HTTP, la reconstruction de l'URL est généralement plus complète, car le proxy voit l'hôte et le chemin. Pour HTTPS, la situation est différente. Le proxy voit souvent une requête \texttt{CONNECT} vers \texttt{host:443} et ne connaît pas toujours le chemin exact sans interception TLS. Il reconstruit alors une cible synthétique du type \texttt{https://hôte/}, ce qui reste suffisant pour appliquer une partie importante du scan statique.
+
+Ce point technique est essentiel : même sans inspecter entièrement le contenu HTTPS, le système peut déjà évaluer le domaine, la réputation, les heuristiques et les règles de blocage. Le proxy ne se contente donc pas de relayer le trafic ; il devient un point de décision de sécurité.
+
+\chapter{Blocklist, audit et monitoring}
+
+En plus du moteur analytique, le système comporte une blocklist administrative fondée sur la table \texttt{proxy\_block\_rules}. Cette table permet de définir des domaines ou motifs explicitement interdits. Elle ne représente pas la même logique que les bases de menaces connues. Les tables de menaces servent à reconnaître des URLs malveillantes déjà signalées, alors que la blocklist exprime une politique locale de contrôle.
+
+Cette distinction est importante. Un domaine peut être bloqué parce qu'il est dangereux, mais aussi parce qu'il est simplement non autorisé dans l'environnement de travail ou d'étude. Le proxy consulte cette blocklist en priorité, ce qui garantit que les règles administratives explicites sont respectées.
+
+La traçabilité est assurée par les tables de scans et d'audit. Les scans manuels d'URLs sont enregistrés dans \texttt{scans}, tandis que les événements de navigation, de blocage ou d'activité proxy peuvent être retrouvés dans \texttt{audit\_logs}. Cette couche d'audit permet de répondre à des questions pratiques : quelle URL a été analysée, quel verdict a été produit, quelle machine ou quel utilisateur était concerné, et à quel moment l'événement s'est-il produit.
+
+Le monitoring complète l'ensemble en ajoutant une vue de supervision. Il permet d'observer la présence des sessions, l'activité récente du proxy et l'état de certaines machines clientes. Cette dimension est importante, car filtrer efficacement suppose aussi de pouvoir vérifier que le trafic passe réellement par le proxy et que les décisions prises sont visibles dans le temps.
+
+\chapter*{Conclusion générale}
+\addcontentsline{toc}{chapter}{Conclusion générale}
+
+La filtration des URLs présentée ici repose sur une chaîne cohérente et complète. Le moteur statique en quatre couches fournit une décision rapide, la base de données d'URLs connues renforce la détection, le scan dynamique apporte une profondeur complémentaire, et le forward proxy transforme cette analyse en contrôle réel du trafic web.
+
+L'intérêt principal de cette architecture est sa cohérence. Le même raisonnement technique peut être utilisé dans un scan manuel et dans une requête de navigation réelle. La blocklist administrative, l'audit et le monitoring complètent ensuite cette logique pour en faire un système exploitable au-delà du simple démonstrateur.
+
+En résumé, la filtration des URLs n'est pas une simple liste noire. Elle constitue un mécanisme de sécurité structuré, fondé sur l'analyse, la mémoire de menace, la décision réseau et la traçabilité.
+
+\end{document}
