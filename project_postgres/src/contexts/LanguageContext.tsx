@@ -518,6 +518,58 @@ const literalTranslations: LiteralDictionary = {
   'Dynamic URL analysis failed.': { fr: "L'analyse URL dynamique a echoue.", ar: 'ÙØ´Ù„ ØªØ­Ù„ÙŠÙ„ Ø§Ù„Ø±Ø§Ø¨Ø· Ø§Ù„Ø¯ÙŠÙ†Ø§Ù…ÙŠÙƒÙŠ.' },
 };
 
+const arabicLiteralOverrides: Record<string, string> = {
+  Parameters: 'الإعدادات',
+  'Manage your language, appearance, account, and session from one place.': 'إدارة اللغة والمظهر والحساب والجلسة من مكان واحد.',
+  'Language Settings': 'إعدادات اللغة',
+  'Choose the interface language.': 'اختر لغة الواجهة.',
+  'Appearance Settings': 'إعدادات المظهر',
+  'Switch between light and dark mode.': 'التبديل بين الوضع الفاتح والداكن.',
+  'Account Settings': 'إعدادات الحساب',
+  'Review your current account information.': 'مراجعة معلومات الحساب الحالي.',
+  Logout: 'تسجيل الخروج',
+  'End the current session securely.': 'إنهاء الجلسة الحالية بأمان.',
+  'Select the language used across the SECA interface.': 'اختر اللغة المستخدمة في واجهة SECA.',
+  'Choose how the platform should look on this device.': 'اختر مظهر المنصة على هذا الجهاز.',
+  'Use a brighter interface.': 'استخدام واجهة أكثر سطوعا.',
+  'Use a darker interface.': 'استخدام واجهة داكنة.',
+  'Current account information for the active session.': 'معلومات الحساب للجلسة النشطة.',
+  Dashboard: 'لوحة التحكم',
+  'File Scanner': 'فاحص الملفات',
+  'URL Scanner': 'فاحص الروابط',
+  'Email Scanner': 'فاحص البريد الإلكتروني',
+  'Hash Checker': 'فاحص البصمة',
+  Monitoring: 'المراقبة',
+  'Audit Logs': 'سجلات التدقيق',
+  'Access Control': 'التحكم في الوصول',
+  Policies: 'السياسات',
+  'Security Analyzer': 'محلل الأمان',
+  Admin: 'مسؤول',
+  User: 'مستخدم',
+  'Light Mode': 'الوضع الفاتح',
+  'Dark Mode': 'الوضع الداكن',
+  'Website Access Control': 'التحكم في الوصول إلى المواقع',
+  'Advanced URL Scanner': 'فاحص الروابط المتقدم',
+  'Advanced File Scanner': 'فاحص الملفات المتقدم',
+  English: 'الإنجليزية',
+  Francais: 'الفرنسية',
+  Arabic: 'العربية',
+};
+
+const arabicKeyOverrides: Record<string, string> = {
+  'settings.button': 'الإعدادات',
+  'settings.title': 'الإعدادات',
+  'settings.subtitle': 'اختر لغة الواجهة.',
+  'settings.language': 'اللغة',
+  'settings.appearance': 'المظهر',
+  'settings.account': 'الحساب',
+  'settings.logout': 'تسجيل الخروج',
+  'settings.close': 'إغلاق',
+  'language.ar': 'العربية',
+  'language.fr': 'الفرنسية',
+  'language.en': 'الإنجليزية',
+};
+
 type RegexTranslator = {
   pattern: RegExp;
   render: (match: RegExpExecArray, language: Exclude<Language, 'en'>) => string;
@@ -724,7 +776,7 @@ function preserveWhitespace(original: string, translated: string): string {
 
 function replaceLiteralFragments(text: string, language: Exclude<Language, 'en'>): string {
   const replacements = Object.entries(literalTranslations)
-    .map(([source, translations]) => [source, translations[language]] as const)
+    .map(([source, translations]) => [source, safeTranslation(translations[language], source)] as const)
     .filter((entry): entry is [string, string] => Boolean(entry[1]))
     .sort((a, b) => b[0].length - a[0].length);
 
@@ -738,6 +790,17 @@ function replaceLiteralFragments(text: string, language: Exclude<Language, 'en'>
   return output;
 }
 
+function isCorruptedTranslation(value: string): boolean {
+  return /[ØÙÂÃ]/.test(value);
+}
+
+function safeTranslation(value: string | undefined, fallback: string): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  return isCorruptedTranslation(value) ? fallback : value;
+}
+
 function translateLiteral(text: string, language: Language): string {
   if (language === 'en') {
     return text;
@@ -748,7 +811,11 @@ function translateLiteral(text: string, language: Language): string {
     return text;
   }
 
-  const exact = literalTranslations[normalized]?.[language];
+  if (language === 'ar' && arabicLiteralOverrides[normalized]) {
+    return preserveWhitespace(text, arabicLiteralOverrides[normalized]);
+  }
+
+  const exact = safeTranslation(literalTranslations[normalized]?.[language], normalized);
   if (exact) {
     return preserveWhitespace(text, exact);
   }
@@ -926,7 +993,10 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
       language,
       isRtl,
       setLanguage: setLanguageState,
-      t: (key: string, fallback?: string) => keyTranslations[key]?.[language] ?? fallback ?? key,
+      t: (key: string, fallback?: string) =>
+        language === 'ar' && arabicKeyOverrides[key]
+          ? arabicKeyOverrides[key]
+          : safeTranslation(keyTranslations[key]?.[language], fallback ?? key) ?? fallback ?? key,
       translateText: (text: string) => translateLiteral(text, language),
     }),
     [isRtl, language]

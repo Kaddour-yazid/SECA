@@ -77,9 +77,12 @@ DEPARTMENT_GROUPS = {
     "SSI": {
         "label": "SSI",
         "groups": {
-            "Pôle SOC & Sécurité des Systèmes": "Pôle SOC & Sécurité des Systèmes",
-            "Pôle Sécurité Industrielle (OT)": "Pôle Sécurité Industrielle (OT)",
-            "Pôle Sécurité Applicative & Gouvernance": "Pôle Sécurité Applicative & Gouvernance",
+            "Pôle SOC & Sécurité des Systèmes": "Sécurité des Systèmes",
+            "Pôle Sécurité Industrielle (OT)": "Sécurité Industrielle (OT)",
+            "Pôle Sécurité Applicative & Gouvernance": "Sécurité Applicative & Gouvernance",
+            "Sécurité des Systèmes": "Sécurité des Systèmes",
+            "Sécurité Industrielle (OT)": "Sécurité Industrielle (OT)",
+            "Sécurité Applicative & Gouvernance": "Sécurité Applicative & Gouvernance",
         },
     },
 }

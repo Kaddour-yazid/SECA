@@ -1,0 +1,20 @@
+SECA DEMO SAMPLE - NOT AN EXECUTABLE
+
+This file intentionally has a misleading extension:
+fake_invoice.pdf.exe
+
+Purpose:
+- Demonstrate suspicious filename and extension analysis.
+- Show how attackers may hide executable-looking payloads behind document names.
+
+Safety:
+- This is plain text.
+- It is not a valid Windows executable.
+- It performs no action.
+
+Demo keywords for static scanners:
+powershell -enc
+cmd.exe /c
+CreateRemoteThread
+VirtualAlloc
+http://update-login.example.invalid/payload

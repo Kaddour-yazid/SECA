@@ -1,0 +1,16 @@
+SECA DEMO SAMPLE - ENCODED CONTENT ONLY
+
+This file contains harmless encoded-looking strings for static analysis demonstrations.
+
+Base64-like blob:
+U0VDQSBEZW1vIFNhbXBsZSAtIEhhcm1sZXNzIENvbnRlbnQgT25seQ==
+
+Suspicious-looking but inert strings:
+Invoke-WebRequest
+FromBase64String
+WScript.Shell
+AutoOpen
+Document_Open
+http://cdn-update.example.invalid/checkin
+
+No commands are executed by this file.

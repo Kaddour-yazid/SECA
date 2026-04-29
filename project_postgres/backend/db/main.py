@@ -3065,6 +3065,8 @@ def layer1_format_validation(url: str) -> Dict[str, Any]:
 
         issues = []
         suspicious = False
+        full_lower = url.lower()
+        query_lower = parsed.query.lower()
 
         # Check protocol
         if parsed.scheme not in ['http', 'https']:
@@ -3086,6 +3088,20 @@ def layer1_format_validation(url: str) -> Dict[str, Any]:
         ip_pattern = r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'
         if re.search(ip_pattern, parsed.netloc):
             issues.append("Uses IP address instead of domain")
+            suspicious = True
+
+        sqli_signatures = [
+            r"(?:\b|%20)(union)(?:\b|%20).{0,30}(?:\b|%20)(select)(?:\b|%20)",
+            r"(?:\b|%20)(or|and)(?:\b|%20)[^=&]{0,30}(?:=|%3d)[^=&]{0,30}",
+            r"(?:\b|%20)(drop|insert|update|delete)(?:\b|%20)",
+            r"(?:--|%2d%2d|/\*|\*/|%23)",
+            r"(?:\b|%20)(information_schema|xp_cmdshell|benchmark|sleep)(?:\b|%20)",
+        ]
+        if query_lower and any(re.search(pattern, query_lower) for pattern in sqli_signatures):
+            issues.append("SQL injection-style query payload detected")
+            suspicious = True
+        elif any(re.search(pattern, full_lower) for pattern in sqli_signatures):
+            issues.append("SQL injection-style path or query pattern detected")
             suspicious = True
 
         return {
@@ -3392,6 +3408,20 @@ def layer4_content_analysis(url: str) -> Dict[str, Any]:
             indicators.append("Encoded redirect target detected in query string")
             threat_score += 18
             break
+
+    sqli_regexes = [
+        r"(?:\b|%20)union(?:\b|%20).{0,30}(?:\b|%20)select(?:\b|%20)",
+        r"(?:\b|%20)(?:or|and)(?:\b|%20)[^=&]{0,30}(?:=|%3d)[^=&]{0,30}",
+        r"(?:\b|%20)(?:information_schema|xp_cmdshell|benchmark|sleep)(?:\b|%20)",
+    ]
+    sqli_hits = sum(1 for pattern in sqli_regexes if re.search(pattern, full_lower))
+    if sqli_hits:
+        indicators.append("SQL injection-like payload detected in URL parameters")
+        threat_score += 18 + min(18, (sqli_hits - 1) * 6)
+
+    if any(marker in full_lower for marker in ["--", "%2d%2d", "/*", "%2f*", "*/", "%23"]):
+        indicators.append("SQL comment/termination markers detected")
+        threat_score += 10
 
     return {
         "indicators": indicators,
@@ -3848,7 +3878,9 @@ async def _capture_url_screenshot_bytes(target_url: str) -> bytes:
                 java_script_enabled=True,
             )
             page = await context.new_page()
-            await page.goto(target_url, wait_until="domcontentloaded", timeout=URL_SCREENSHOT_TIMEOUT_MS)
+            response = await page.goto(target_url, wait_until="domcontentloaded", timeout=URL_SCREENSHOT_TIMEOUT_MS)
+            if response is None:
+                raise HTTPException(status_code=502, detail="Website is unavailable or could not be reached for screenshot capture.")
             await page.wait_for_timeout(1200)
             screenshot = await page.screenshot(type="png", full_page=False)
             await context.close()
@@ -3859,6 +3891,18 @@ async def _capture_url_screenshot_bytes(target_url: str) -> bytes:
     except HTTPException:
         raise
     except Exception as exc:
+        message = str(exc)
+        network_markers = [
+            "ERR_NAME_NOT_RESOLVED",
+            "ERR_CONNECTION_REFUSED",
+            "ERR_CONNECTION_TIMED_OUT",
+            "ERR_ADDRESS_UNREACHABLE",
+            "ERR_INTERNET_DISCONNECTED",
+            "ERR_CONNECTION_RESET",
+            "net::",
+        ]
+        if any(marker in message for marker in network_markers):
+            raise HTTPException(status_code=502, detail="Website is unavailable or could not be reached for screenshot capture.")
         raise HTTPException(status_code=500, detail=f"Website screenshot failed: {exc}")
 
 

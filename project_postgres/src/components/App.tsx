@@ -13,6 +13,7 @@ import { AuditLogsView } from './AuditLogsView';
 import { GatewayStartView } from './GatewayStartView';
 import { AccessControlView } from './AccessControlView';
 import { ParametersView } from './ParametersView';
+import { PoliciesView } from './PoliciesView';
 import { Sidebar } from './Sidebar';
 
 function TopStrip({ onViewChange }: { onViewChange: (view: string) => void }) {
@@ -46,7 +47,7 @@ function TopStrip({ onViewChange }: { onViewChange: (view: string) => void }) {
   }, [isProfileOpen]);
 
   return (
-    <header className="relative z-40 h-[88px] shrink-0 border-b border-slate-700/90 bg-slate-900/95 backdrop-blur-sm">
+    <header dir="ltr" className="relative z-40 h-[88px] shrink-0 border-b border-slate-700/90 bg-slate-900/95 backdrop-blur-sm">
       <div className="flex h-full items-center justify-between px-8">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600">
@@ -83,7 +84,7 @@ function TopStrip({ onViewChange }: { onViewChange: (view: string) => void }) {
             </button>
 
             {isProfileOpen && (
-              <div className="absolute right-0 top-full z-30 mt-3 w-80 overflow-hidden rounded-2xl border border-slate-700/80 bg-slate-900 shadow-2xl shadow-slate-950/60">
+              <div className="absolute right-0 top-full z-30 mt-3 w-80 max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border border-slate-700/80 bg-slate-900 text-left shadow-2xl shadow-slate-950/60">
                 <div className="border-b border-slate-800/90 bg-slate-900 px-5 py-4">
                   <div className="flex items-start gap-3">
                     <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-blue-500 to-blue-700 text-sm font-semibold text-white">
@@ -236,6 +237,9 @@ function AppContent() {
               <AccessControlView />
             </div>
           )}
+          <div className={activeView === 'policies' ? 'h-full' : 'hidden h-full'}>
+            <PoliciesView />
+          </div>
           <div className={activeView === 'settings' ? 'h-full' : 'hidden h-full'}>
             <ParametersView />
           </div>

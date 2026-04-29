@@ -1,0 +1,18 @@
+# Safe SECA URL demo samples
+# Domains are reserved for documentation/testing and should not resolve.
+
+# Brand impersonation / phishing style
+https://sonatrach-login-secure.example.invalid/auth/verify
+https://mail-sonatrach-support.example.invalid/password/reset
+https://onedrive-document-review.example.invalid/open?id=invoice042026
+
+# SQL injection style
+http://portal-admin.example.invalid/index.php?id=1%27%20OR%20%271%27=%271
+http://shop-api.example.invalid/products?id=1%20UNION%20SELECT%20username,password%20FROM%20users--
+
+# Suspicious redirect
+http://billing-review.example.invalid/login?redirect=http://evil.example.invalid
+
+# Benign comparison samples
+https://example.com/
+https://www.iana.org/domains/reserved

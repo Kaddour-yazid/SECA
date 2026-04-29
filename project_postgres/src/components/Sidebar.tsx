@@ -1,5 +1,5 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight, FileText, Globe, Hash, LayoutDashboard, Mail, Network, Settings, ShieldBan, ScrollText } from 'lucide-react';
+import { BookOpenCheck, ChevronLeft, ChevronRight, FileText, Globe, Hash, LayoutDashboard, Mail, Network, Settings, ShieldBan, ScrollText } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useTheme } from '../contexts/ThemeContext';
@@ -23,7 +23,7 @@ type MenuGroup = {
 
 export function Sidebar({ activeView, onViewChange }: SidebarProps) {
   const { user } = useAuth();
-  const { translateText } = useLanguage();
+  const { isRtl, translateText } = useLanguage();
   const { theme } = useTheme();
   const navRef = useRef<HTMLElement | null>(null);
   const itemRefs = useRef<Record<string, HTMLButtonElement | null>>({});
@@ -53,6 +53,7 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
   const groups: MenuGroup[] = [
     { id: 'scan', label: 'Scanning', items: scanningItems },
     ...(monitoringItems.length > 0 ? [{ id: 'monitor', label: 'Monitoring', items: monitoringItems }] : []),
+    { id: 'policies', label: 'Policies', items: [{ id: 'policies', label: translateText('Policies'), icon: BookOpenCheck }] },
   ];
 
   const menuItems = groups.flatMap((group) => group.items);
@@ -82,6 +83,9 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
   const toggleGlowClass = isLight
     ? 'bg-[radial-gradient(circle,rgba(56,189,248,0.28)_0%,rgba(125,211,252,0.16)_45%,rgba(255,255,255,0)_75%)]'
     : 'bg-[radial-gradient(circle,rgba(34,211,238,0.30)_0%,rgba(6,182,212,0.18)_45%,rgba(15,23,42,0)_75%)]';
+  const toggleEdgeClass = isRtl
+    ? 'left-0 -translate-x-1/2'
+    : 'right-0 translate-x-1/2';
 
   const updateActiveIndicator = useCallback(() => {
     const navEl = navRef.current;
@@ -120,7 +124,7 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
   }, [updateActiveIndicator, menuItems.length, isCollapsed]);
 
   return (
-    <aside className="group/sidebar relative flex h-full">
+    <aside dir="ltr" className="group/sidebar relative flex h-full">
       <div className="pointer-events-none absolute inset-y-0 left-0 w-40">
         <div className={`absolute -left-12 top-10 h-[78%] w-48 rounded-full blur-3xl ${sidebarGlowClass}`} />
       </div>
@@ -214,13 +218,13 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps) {
         </div>
       </div>
 
-      <div className="pointer-events-none absolute right-0 top-1/2 z-20 h-14 w-14 translate-x-1/2 -translate-y-1/2 opacity-0 transition-opacity duration-200 group-hover/sidebar:opacity-100">
+      <div className={`pointer-events-none absolute top-1/2 z-20 h-14 w-14 ${toggleEdgeClass} -translate-y-1/2 opacity-0 transition-opacity duration-200 group-hover/sidebar:opacity-100`}>
         <div className={`h-full w-full rounded-full blur-md ${toggleGlowClass}`} />
       </div>
       <button
         type="button"
         onClick={() => setIsCollapsed((prev) => !prev)}
-        className={`absolute right-0 top-1/2 z-30 flex h-9 w-9 translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full transition-all duration-200 opacity-0 group-hover/sidebar:opacity-100 ${toggleButtonClass}`}
+        className={`absolute top-1/2 z-30 flex h-9 w-9 ${toggleEdgeClass} -translate-y-1/2 items-center justify-center rounded-full transition-all duration-200 opacity-0 group-hover/sidebar:opacity-100 ${toggleButtonClass}`}
         aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         title={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
       >

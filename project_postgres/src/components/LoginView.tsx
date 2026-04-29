@@ -253,9 +253,9 @@ const departmentGroups = {
     'Groupe Décisionnel & Veille Technologique',
   ],
   SSI: [
-    'Pôle SOC & Sécurité des Systèmes',
-    'Pôle Sécurité Industrielle (OT)',
-    'Pôle Sécurité Applicative & Gouvernance',
+    'Sécurité des Systèmes',
+    'Sécurité Industrielle (OT)',
+    'Sécurité Applicative & Gouvernance',
   ],
 } as const;
 

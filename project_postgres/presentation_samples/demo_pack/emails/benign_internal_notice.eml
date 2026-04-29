@@ -1,0 +1,18 @@
+From: "Direction INF" <inf@example.invalid>
+To: employee@sonatrach.example
+Subject: Note interne - maintenance planifiee
+Date: Mon, 27 Apr 2026 10:00:00 +0100
+Message-ID: <demo-benign-notice-001@example.invalid>
+MIME-Version: 1.0
+Authentication-Results: mail.example.invalid; spf=pass smtp.mailfrom=example.invalid; dkim=pass; dmarc=pass
+Content-Type: text/plain; charset="UTF-8"
+
+Bonjour,
+
+Une operation de maintenance planifiee aura lieu ce soir.
+Aucune action urgente n'est requise.
+
+Lien informatif de demonstration :
+https://intranet.example.invalid/maintenance
+
+Ceci est un e-mail benin pour comparer les resultats avec le phishing demo.

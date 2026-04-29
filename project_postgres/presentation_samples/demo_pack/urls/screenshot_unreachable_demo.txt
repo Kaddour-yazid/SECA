@@ -1,0 +1,8 @@
+Use these to demonstrate graceful screenshot/network failure handling:
+
+http://does-not-resolve-seca-demo.invalid/
+http://192.0.2.123/login
+
+Expected behavior:
+- Scanner should still return heuristic results.
+- Screenshot capture may show an unavailable/unreachable message.

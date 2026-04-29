@@ -1,0 +1,15 @@
+SECA DEMO SAMPLE - NOT A SCREENSAVER EXECUTABLE
+
+This file intentionally uses the `.scr` extension to simulate a suspicious attachment.
+
+Safety:
+- Plain text only.
+- Not executable.
+- No payload.
+
+Suspicious demo indicators:
+invoice overdue
+urgent verification
+download required
+reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+bitsadmin /transfer

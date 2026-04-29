@@ -875,6 +875,10 @@ export function URLScannerView() {
 
     setWebsiteScreenshotLoading(true);
     setWebsiteScreenshotError(null);
+    setWebsiteScreenshotUrl((current) => {
+      if (current) URL.revokeObjectURL(current);
+      return force ? null : current;
+    });
 
     try {
       const response = await fetch(apiUrl(`/url-scan-screenshot?url=${encodeURIComponent(targetUrl)}`), {
@@ -897,6 +901,10 @@ export function URLScannerView() {
         return objectUrl;
       });
     } catch (err) {
+      setWebsiteScreenshotUrl((current) => {
+        if (current) URL.revokeObjectURL(current);
+        return null;
+      });
       setWebsiteScreenshotError(err instanceof Error ? err.message : 'Failed to capture website screenshot');
     } finally {
       setWebsiteScreenshotLoading(false);

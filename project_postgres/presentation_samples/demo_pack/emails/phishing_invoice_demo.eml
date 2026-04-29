@@ -1,0 +1,42 @@
+From: "Sonatrach Finance" <finance-alert@example.invalid>
+To: employee@sonatrach.example
+Reply-To: external-support@billing-review.example.invalid
+Subject: URGENT: Facture en attente de validation
+Date: Mon, 27 Apr 2026 09:30:00 +0100
+Message-ID: <demo-phishing-invoice-001@example.invalid>
+MIME-Version: 1.0
+Authentication-Results: mail.example.invalid; spf=fail smtp.mailfrom=example.invalid; dkim=fail; dmarc=fail
+Content-Type: multipart/alternative; boundary="SECA-DEMO-BOUNDARY"
+
+--SECA-DEMO-BOUNDARY
+Content-Type: text/plain; charset="UTF-8"
+
+Bonjour,
+
+Une facture urgente doit etre validee avant la fin de la journee.
+Veuillez ouvrir le portail ci-dessous :
+
+https://sonatrach-finance-login.example.invalid/session/verify
+
+Si le lien ne fonctionne pas, utilisez :
+http://billing-review.example.invalid/login?redirect=http://evil.example.invalid
+
+Piece jointe attendue : invoice_042026.pdf.exe
+
+Ceci est un e-mail de demonstration SECA. Aucun domaine n'est reel.
+
+--SECA-DEMO-BOUNDARY
+Content-Type: text/html; charset="UTF-8"
+
+<html>
+  <body>
+    <p>Bonjour,</p>
+    <p>Une facture urgente doit etre validee avant la fin de la journee.</p>
+    <p><a href="https://sonatrach-finance-login.example.invalid/session/verify">Ouvrir le portail interne</a></p>
+    <p><a href="http://billing-review.example.invalid/login?redirect=http://evil.example.invalid">Lien de secours</a></p>
+    <p>Piece jointe attendue : <strong>invoice_042026.pdf.exe</strong></p>
+    <p><em>Demo SECA uniquement.</em></p>
+  </body>
+</html>
+
+--SECA-DEMO-BOUNDARY--
