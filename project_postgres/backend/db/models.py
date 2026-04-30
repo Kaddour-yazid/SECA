@@ -19,6 +19,8 @@ class User(Base):
     scans = relationship("Scan", back_populates="user")
     audit_logs = relationship("AuditLog", back_populates="user")
     otp_requests = relationship("EmailOtp", back_populates="user")
+    ip_assignments = relationship("UserIpAssignment", back_populates="user")
+    gateway_events = relationship("GatewayTrafficEvent", back_populates="user")
 
 class Scan(Base):
     __tablename__ = "scans"
@@ -117,6 +119,53 @@ class DesktopSession(Base):
     started_at = Column(DateTime, default=datetime.utcnow)
     last_heartbeat_at = Column(DateTime, default=datetime.utcnow)
     ended_at = Column(DateTime, nullable=True)
+
+
+class UserIpAssignment(Base):
+    __tablename__ = "user_ip_assignments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    device_id = Column(String, nullable=False, index=True)
+    ip_address = Column(String, nullable=False, index=True)
+    hostname = Column(String, nullable=True)
+    department = Column(String, nullable=True)
+    group_name = Column(String, nullable=True)
+    attribution_source = Column(String, nullable=False, default="desktop-session")
+    first_seen = Column(DateTime, default=datetime.utcnow)
+    last_seen = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="ip_assignments")
+
+
+class GatewayTrafficEvent(Base):
+    __tablename__ = "gateway_traffic_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    user_email = Column(String, nullable=True, index=True)
+    user_name = Column(String, nullable=True)
+    department = Column(String, nullable=True, index=True)
+    group_name = Column(String, nullable=True, index=True)
+    device_id = Column(String, nullable=True, index=True)
+    hostname = Column(String, nullable=True)
+    client_ip = Column(String, nullable=False, index=True)
+    method = Column(String, nullable=True)
+    protocol = Column(String, nullable=True)
+    host = Column(String, nullable=True, index=True)
+    port = Column(Integer, nullable=True)
+    blocked = Column(Boolean, default=False, nullable=False, index=True)
+    target = Column(Text, nullable=True)
+    scan_url = Column(Text, nullable=True)
+    static_status = Column(String, nullable=True)
+    static_threat_score = Column(Integer, nullable=True)
+    static_match_type = Column(String, nullable=True)
+    static_source = Column(String, nullable=True)
+    block_reason = Column(String, nullable=True)
+    attribution_source = Column(String, nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    user = relationship("User", back_populates="gateway_events")
 
 
 class GroupProxyAssignment(Base):

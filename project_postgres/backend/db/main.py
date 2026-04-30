@@ -47,6 +47,8 @@ from models import (
     ProxyBlockRule,
     DesktopDevice,
     DesktopSession,
+    UserIpAssignment,
+    GatewayTrafficEvent,
     GroupProxyAssignment,
     ExternalReputationCache,
 )
@@ -1241,6 +1243,46 @@ def _desktop_proxy_status_details(
     )
 
 
+def _persist_user_ip_assignments(
+        db: Session,
+        session: Dict[str, Any],
+        session_last_heartbeat: datetime,
+) -> None:
+    user_id = int(session.get("user_id") or 0)
+    device_id = str(session.get("device_id") or "").strip()
+    if user_id <= 0 or not device_id:
+        return
+
+    hostname = str(session.get("hostname") or "").strip() or None
+    department = str(session.get("department") or "").strip() or None
+    group_name = str(session.get("group_name") or "").strip() or None
+
+    for ip_address in _normalize_local_ip_list(session.get("local_ips")):
+        assignment = (
+            db.query(UserIpAssignment)
+            .filter(
+                UserIpAssignment.user_id == user_id,
+                UserIpAssignment.device_id == device_id,
+                UserIpAssignment.ip_address == ip_address,
+            )
+            .first()
+        )
+        if not assignment:
+            assignment = UserIpAssignment(
+                user_id=user_id,
+                device_id=device_id,
+                ip_address=ip_address,
+                first_seen=session_last_heartbeat,
+            )
+            db.add(assignment)
+
+        assignment.hostname = hostname
+        assignment.department = department
+        assignment.group_name = group_name
+        assignment.attribution_source = "desktop-session"
+        assignment.last_seen = session_last_heartbeat
+
+
 def _persist_desktop_session_state(session: Dict[str, Any]) -> None:
     session_started_at = datetime.fromisoformat(session["started_at"]) if session.get("started_at") else datetime.utcnow()
     session_last_heartbeat = datetime.fromisoformat(session["last_heartbeat"]) if session.get("last_heartbeat") else datetime.utcnow()
@@ -1288,7 +1330,40 @@ def _persist_desktop_session_state(session: Dict[str, Any]) -> None:
         session_row.disconnect_reason = session.get("disconnect_reason")
         session_row.last_heartbeat_at = session_last_heartbeat
         session_row.ended_at = None if session_row.online else session_last_heartbeat
+        _persist_user_ip_assignments(db, session, session_last_heartbeat)
         db.commit()
+
+
+def _saved_user_ip_assignment_for_client_ip(client_ip: str) -> Optional[Dict[str, Any]]:
+    normalized_ip = str(client_ip or "").strip()
+    if not normalized_ip:
+        return None
+
+    with Session(engine) as db:
+        assignment = (
+            db.query(UserIpAssignment)
+            .filter(UserIpAssignment.ip_address == normalized_ip)
+            .order_by(UserIpAssignment.last_seen.desc(), UserIpAssignment.id.desc())
+            .first()
+        )
+        if not assignment:
+            return None
+
+        user = db.query(User).filter(User.id == assignment.user_id).first()
+        if not user:
+            return None
+
+        return {
+            "user_id": user.id,
+            "user_name": _desktop_user_display_name(user),
+            "user_email": user.email,
+            "department": str(assignment.department or user.department or "").strip() or None,
+            "group_name": str(assignment.group_name or user.group_name or "").strip() or None,
+            "device_id": assignment.device_id,
+            "hostname": assignment.hostname,
+            "local_ips": [assignment.ip_address],
+            "attribution_source": "saved-ip-assignment",
+        }
 
 
 def _active_desktop_session_for_client_ip(client_ip: str) -> Optional[Dict[str, Any]]:
@@ -1653,6 +1728,7 @@ def _gateway_event_for_history(event: Dict[str, Any]) -> Dict[str, Any]:
         "time": now.strftime("%H:%M:%S"),
         "timestamp": now.isoformat(),
         "type": event.get("type", "proxy"),
+        "attribution_source": event.get("attribution_source"),
         "client_ip": client_ip,
         "method": method,
         "protocol": protocol,
@@ -1711,6 +1787,8 @@ def _gateway_audit_details(event: Dict[str, Any]) -> str:
         parts.append(f"user={event.get('user_email')}")
     if event.get("department") and event.get("group_name"):
         parts.append(f"scope={event.get('department')}/{event.get('group_name')}")
+    if event.get("attribution_source"):
+        parts.append(f"attribution={event.get('attribution_source')}")
     return " | ".join(parts)
 
 
@@ -1720,25 +1798,70 @@ def _enrich_gateway_event_with_desktop_session(normalized: Dict[str, Any]) -> Di
         return normalized
 
     session = _active_desktop_session_for_client_ip(client_ip)
-    if not session:
-        return normalized
+    if session:
+        normalized["desktop_session_id"] = session.get("session_id")
+        normalized["user_id"] = session.get("user_id")
+        normalized["user_name"] = session.get("user_name")
+        normalized["user_email"] = session.get("email")
+        normalized["department"] = session.get("department")
+        normalized["group_name"] = session.get("group_name")
+        normalized["device_id"] = session.get("device_id")
+        normalized["hostname"] = session.get("hostname")
+        normalized["local_ips"] = list(session.get("local_ips") or [])
+        normalized["attribution_source"] = "active-desktop-session"
+        assignment = _group_proxy_assignment_for_scope(session.get("department"), session.get("group_name"))
+    else:
+        saved_assignment = _saved_user_ip_assignment_for_client_ip(client_ip)
+        if not saved_assignment:
+            return normalized
+        normalized["user_id"] = saved_assignment.get("user_id")
+        normalized["user_name"] = saved_assignment.get("user_name")
+        normalized["user_email"] = saved_assignment.get("user_email")
+        normalized["department"] = saved_assignment.get("department")
+        normalized["group_name"] = saved_assignment.get("group_name")
+        normalized["device_id"] = saved_assignment.get("device_id")
+        normalized["hostname"] = saved_assignment.get("hostname")
+        normalized["local_ips"] = list(saved_assignment.get("local_ips") or [])
+        normalized["attribution_source"] = saved_assignment.get("attribution_source")
+        assignment = _group_proxy_assignment_for_scope(
+            saved_assignment.get("department"),
+            saved_assignment.get("group_name"),
+        )
 
-    normalized["desktop_session_id"] = session.get("session_id")
-    normalized["user_id"] = session.get("user_id")
-    normalized["user_name"] = session.get("user_name")
-    normalized["user_email"] = session.get("email")
-    normalized["department"] = session.get("department")
-    normalized["group_name"] = session.get("group_name")
-    normalized["device_id"] = session.get("device_id")
-    normalized["hostname"] = session.get("hostname")
-    normalized["local_ips"] = list(session.get("local_ips") or [])
-
-    assignment = _group_proxy_assignment_for_scope(session.get("department"), session.get("group_name"))
     if assignment:
         normalized["assigned_proxy_host"] = assignment.proxy_host
         normalized["assigned_proxy_port"] = assignment.proxy_port
 
     return normalized
+
+
+def _persist_gateway_traffic_event(db: Session, normalized: Dict[str, Any]) -> None:
+    created_at = _gateway_history_timestamp(normalized.get("timestamp")) or datetime.utcnow()
+    row = GatewayTrafficEvent(
+        user_id=normalized.get("user_id"),
+        user_email=normalized.get("user_email"),
+        user_name=normalized.get("user_name"),
+        department=normalized.get("department"),
+        group_name=normalized.get("group_name"),
+        device_id=normalized.get("device_id"),
+        hostname=normalized.get("hostname"),
+        client_ip=str(normalized.get("client_ip") or "unknown"),
+        method=normalized.get("method"),
+        protocol=normalized.get("protocol"),
+        host=(normalized.get("host") or "").strip() or None,
+        port=int(normalized.get("port") or 0) if normalized.get("port") else None,
+        blocked=bool(normalized.get("blocked", False)),
+        target=normalized.get("target"),
+        scan_url=normalized.get("scan_url"),
+        static_status=normalized.get("static_status"),
+        static_threat_score=normalized.get("static_threat_score"),
+        static_match_type=normalized.get("static_match_type"),
+        static_source=normalized.get("static_source"),
+        block_reason=normalized.get("block_reason"),
+        attribution_source=normalized.get("attribution_source"),
+        created_at=created_at,
+    )
+    db.add(row)
 
 
 def _update_gateway_runtime_state(normalized: Dict[str, Any]) -> Dict[str, Any]:
@@ -1803,6 +1926,8 @@ def _update_gateway_runtime_state(normalized: Dict[str, Any]) -> Dict[str, Any]:
 def _record_gateway_event_sync(event: Dict[str, Any], db: Optional[Session] = None) -> Dict[str, Any]:
     normalized = _gateway_event_for_history(event)
     normalized = _update_gateway_runtime_state(normalized)
+    if db is not None:
+        _persist_gateway_traffic_event(db, normalized)
 
     action = _gateway_audit_action(normalized)
     if normalized.get("presence_online_transition"):
@@ -6228,19 +6353,42 @@ async def monitoring_proxy_usage_stats(
         }
 
     cutoff = datetime.utcnow() - timedelta(days=period_windows[period])
-    department_rows = [
-        row for row in list(gateway_history)
-        if str(row.get("department") or "").strip() == admin_department
+    persisted_rows = (
+        db.query(GatewayTrafficEvent)
+        .filter(
+            GatewayTrafficEvent.department == admin_department,
+            GatewayTrafficEvent.created_at >= cutoff,
+        )
+        .order_by(GatewayTrafficEvent.created_at.desc())
+        .all()
+    )
+    scoped_department_rows = [
+        {
+            "timestamp": row.created_at.isoformat() if row.created_at else None,
+            "host": row.host,
+            "blocked": bool(row.blocked),
+            "user_id": row.user_id,
+            "user_email": row.user_email,
+            "user_name": row.user_name,
+            "group_name": row.group_name,
+            "department": row.department,
+            "client_ip": row.client_ip,
+            "device_id": row.device_id,
+            "hostname": row.hostname,
+            "method": row.method,
+            "protocol": row.protocol,
+            "port": row.port,
+            "target": row.target,
+            "scan_url": row.scan_url,
+            "static_status": row.static_status,
+            "static_threat_score": row.static_threat_score,
+            "static_match_type": row.static_match_type,
+            "static_source": row.static_source,
+            "block_reason": row.block_reason,
+            "attribution_source": row.attribution_source,
+        }
+        for row in persisted_rows
     ]
-    scoped_rows = []
-    scoped_department_rows = []
-    for row in department_rows:
-        row_ts = _gateway_history_timestamp(row.get("timestamp"))
-        if not row_ts or row_ts < cutoff:
-            continue
-        scoped_department_rows.append(row)
-        if str(row.get("group_name") or "").strip() == admin_group:
-            scoped_rows.append(row)
 
     members = (
         db.query(User)
