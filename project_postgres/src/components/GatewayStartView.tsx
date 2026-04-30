@@ -67,6 +67,7 @@ type DesktopSessionRow = {
 type GatewayHistoryRow = {
   timestamp?: string | null;
   host?: string | null;
+  port?: number | null;
   method?: string | null;
   blocked?: boolean;
   block_reason?: string | null;
@@ -183,6 +184,130 @@ const formatDateTime = (value: string | null) => {
   if (Number.isNaN(date.getTime())) return 'No activity yet';
   return date.toLocaleString();
 };
+
+const KNOWN_SITE_RULES: Array<{ suffixes: string[]; label: string; iconHost?: string }> = [
+  { suffixes: ['youtube.com', 'youtu.be'], label: 'YouTube', iconHost: 'youtube.com' },
+  { suffixes: ['play.google.com'], label: 'Google Play', iconHost: 'play.google.com' },
+  { suffixes: ['google.com', 'gstatic.com', 'googleapis.com', 'clients6.google.com'], label: 'Google', iconHost: 'google.com' },
+  { suffixes: ['facebook.com', 'fbcdn.net'], label: 'Facebook', iconHost: 'facebook.com' },
+  { suffixes: ['instagram.com', 'cdninstagram.com'], label: 'Instagram', iconHost: 'instagram.com' },
+  { suffixes: ['whatsapp.com', 'whatsapp.net'], label: 'WhatsApp', iconHost: 'whatsapp.com' },
+  { suffixes: ['x.com', 'twitter.com', 't.co'], label: 'X', iconHost: 'x.com' },
+  { suffixes: ['tiktok.com'], label: 'TikTok', iconHost: 'tiktok.com' },
+  { suffixes: ['linkedin.com'], label: 'LinkedIn', iconHost: 'linkedin.com' },
+  { suffixes: ['github.com', 'githubusercontent.com'], label: 'GitHub', iconHost: 'github.com' },
+  { suffixes: ['microsoft.com', 'live.com', 'outlook.com', 'office.com'], label: 'Microsoft', iconHost: 'microsoft.com' },
+  { suffixes: ['openai.com', 'chatgpt.com'], label: 'OpenAI', iconHost: 'openai.com' },
+  { suffixes: ['wikipedia.org'], label: 'Wikipedia', iconHost: 'wikipedia.org' },
+  { suffixes: ['netflix.com'], label: 'Netflix', iconHost: 'netflix.com' },
+  { suffixes: ['amazon.com', 'amazonaws.com'], label: 'Amazon', iconHost: 'amazon.com' },
+  { suffixes: ['discord.com', 'discord.gg'], label: 'Discord', iconHost: 'discord.com' },
+  { suffixes: ['spotify.com', 'scdn.co'], label: 'Spotify', iconHost: 'spotify.com' },
+];
+
+const looksLikeIPv4 = (value: string) => /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value.trim());
+
+const titleCaseToken = (value: string) =>
+  value
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+
+const humanizeUnknownHost = (host: string) => {
+  const normalized = host.trim().toLowerCase().replace(/^www\./, '');
+  if (!normalized) return 'Unknown Site';
+  if (looksLikeIPv4(normalized)) return normalized;
+  const parts = normalized.split('.').filter(Boolean);
+  if (!parts.length) return normalized;
+  if (parts.length >= 2) {
+    const registrable = parts[0];
+    return titleCaseToken(registrable);
+  }
+  return titleCaseToken(parts[0]);
+};
+
+const resolveSitePresentation = (host?: string | null) => {
+  const rawHost = (host || '').trim().toLowerCase();
+  if (!rawHost) {
+    return {
+      label: 'Unknown Site',
+      faviconHost: null as string | null,
+      secondary: null as string | null,
+      rawHost: '',
+    };
+  }
+
+  const normalized = rawHost.replace(/^www\./, '');
+  const matchedRule = KNOWN_SITE_RULES.find((rule) =>
+    rule.suffixes.some((suffix) => normalized === suffix || normalized.endsWith(`.${suffix}`)),
+  );
+
+  if (matchedRule) {
+    return {
+      label: matchedRule.label,
+      faviconHost: matchedRule.iconHost || matchedRule.suffixes[0],
+      secondary: normalized !== (matchedRule.iconHost || matchedRule.suffixes[0]) ? normalized : null,
+      rawHost,
+    };
+  }
+
+  if (looksLikeIPv4(normalized)) {
+    return {
+      label: normalized,
+      faviconHost: null,
+      secondary: null,
+      rawHost,
+    };
+  }
+
+  return {
+    label: humanizeUnknownHost(normalized),
+    faviconHost: normalized,
+    secondary: normalized,
+    rawHost,
+  };
+};
+
+function SiteIdentity({
+  host,
+  compact = false,
+  showSecondary = true,
+}: {
+  host?: string | null;
+  compact?: boolean;
+  showSecondary?: boolean;
+}) {
+  const [iconFailed, setIconFailed] = useState(false);
+  const site = resolveSitePresentation(host);
+  const faviconUrl = site.faviconHost
+    ? `https://www.google.com/s2/favicons?domain=${encodeURIComponent(site.faviconHost)}&sz=64`
+    : null;
+
+  return (
+    <div className="flex min-w-0 items-center gap-3">
+      <div className={`flex shrink-0 items-center justify-center rounded-full border border-slate-700 bg-slate-900/70 ${compact ? 'h-8 w-8' : 'h-10 w-10'}`}>
+        {faviconUrl && !iconFailed ? (
+          <img
+            src={faviconUrl}
+            alt={site.label}
+            className={compact ? 'h-4 w-4 rounded-sm' : 'h-5 w-5 rounded-sm'}
+            loading="lazy"
+            onError={() => setIconFailed(true)}
+          />
+        ) : (
+          <Globe className={compact ? 'h-4 w-4 text-cyan-300' : 'h-5 w-5 text-cyan-300'} />
+        )}
+      </div>
+      <div className="min-w-0">
+        <p className={`truncate font-semibold text-white ${compact ? 'text-sm' : 'text-sm'}`}>{site.label}</p>
+        {showSecondary && site.secondary ? (
+          <p className="truncate text-xs text-slate-500">{site.secondary}</p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
 
 const formatProxyEndpoint = (host?: string | null, port?: number | null) => {
   const normalizedHost = (host || '').trim();
@@ -742,12 +867,12 @@ export function GatewayStartView() {
                     <h4 className="text-lg font-semibold text-white">Most Used Sites</h4>
                   </div>
                   {proxyUsageStats?.top_sites?.length ? (
-                    <div className="space-y-3">
+                    <div className="gateway-panel-scroll space-y-3">
                       {proxyUsageStats.top_sites.map((site) => (
                         <div key={site.host} className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
-                              <p className="truncate text-sm font-semibold text-white">{site.host}</p>
+                              <SiteIdentity host={site.host} />
                               <p className="mt-1 text-xs text-slate-400">
                                 {site.unique_members ?? 0} member(s) · Last seen {formatDateTime(site.last_seen || null)}
                               </p>
@@ -781,7 +906,7 @@ export function GatewayStartView() {
                     <h4 className="text-lg font-semibold text-white">Daily Activity</h4>
                   </div>
                   {proxyUsageStats?.daily_stats?.length ? (
-                    <div className="space-y-3">
+                    <div className="gateway-panel-scroll space-y-3">
                       {proxyUsageStats.daily_stats.map((entry) => (
                         <div key={entry.date} className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
                           <div className="flex items-center justify-between gap-3">
@@ -833,7 +958,7 @@ export function GatewayStartView() {
                     <h4 className="text-lg font-semibold text-white">Usage by Person</h4>
                   </div>
                   {proxyUsageStats?.member_stats?.length ? (
-                    <div className="space-y-3">
+                    <div className="gateway-panel-scroll space-y-3">
                       {proxyUsageStats.member_stats.map((member) => (
                         <button
                           key={`${member.user_id ?? member.email ?? member.name}`}
@@ -877,7 +1002,7 @@ export function GatewayStartView() {
                                   key={`${member.name}-${site.host}`}
                                   className="flex items-center justify-between gap-3 rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2"
                                 >
-                                  <p className="truncate text-sm text-slate-200">{site.host}</p>
+                                  <SiteIdentity host={site.host} compact />
                                   <span className="text-xs font-semibold text-cyan-300">{site.request_count} hit(s)</span>
                                 </div>
                               ))
@@ -901,7 +1026,7 @@ export function GatewayStartView() {
                     <h4 className="text-lg font-semibold text-white">Usage by Group</h4>
                   </div>
                   {proxyUsageStats?.group_stats?.length ? (
-                    <div className="space-y-3">
+                    <div className="gateway-panel-scroll space-y-3">
                       {proxyUsageStats.group_stats.map((group) => (
                         <button
                           key={group.group_name}
@@ -939,7 +1064,7 @@ export function GatewayStartView() {
                                   key={`${group.group_name}-${site.host}`}
                                   className="flex items-center justify-between gap-3 rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2"
                                 >
-                                  <p className="truncate text-sm text-slate-200">{site.host}</p>
+                                  <SiteIdentity host={site.host} compact />
                                   <span className="text-xs font-semibold text-cyan-300">{site.request_count} hit(s)</span>
                                 </div>
                               ))
@@ -1010,7 +1135,7 @@ export function GatewayStartView() {
                 <h3 className="text-xl font-bold text-white">Recent Group Scans</h3>
               </div>
               {recentScans.length ? (
-                <div className="space-y-3">
+                <div className="gateway-panel-scroll space-y-3">
                   {recentScans.map((scan) => (
                     <div key={scan.id} className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
                       <div className="flex items-start justify-between gap-3">
@@ -1180,7 +1305,7 @@ export function GatewayStartView() {
                                     key={`${entry.key}-${site.host}`}
                                     className="flex items-center justify-between gap-3 rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2"
                                   >
-                                    <p className="truncate text-sm text-slate-200">{site.host}</p>
+                                    <SiteIdentity host={site.host} compact />
                                     <span className="text-xs font-semibold text-cyan-300">
                                       {site.request_count} hit(s)
                                     </span>
@@ -1285,13 +1410,11 @@ export function GatewayStartView() {
 
                   <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
                     <h4 className="mb-4 text-lg font-semibold text-white">Most Used Sites</h4>
-                    <div className="space-y-3">
+                    <div className="gateway-panel-scroll space-y-3">
                       {selectedMemberUsage.top_sites.length ? (
                         selectedMemberUsage.top_sites.map((site) => (
                           <div key={`detail-${selectedMemberUsage.name}-${site.host}`} className="flex items-center justify-between gap-3 rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-3">
-                            <div className="min-w-0">
-                              <p className="truncate text-sm font-semibold text-white">{site.host}</p>
-                            </div>
+                            <SiteIdentity host={site.host} />
                             <span className="text-sm font-semibold text-cyan-300">{site.request_count} hit(s)</span>
                           </div>
                         ))
@@ -1363,13 +1486,11 @@ export function GatewayStartView() {
 
                 <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
                   <h4 className="mb-4 text-lg font-semibold text-white">Most Used Sites in This Group</h4>
-                  <div className="space-y-3">
+                  <div className="gateway-panel-scroll space-y-3">
                     {selectedGroupUsage.top_sites.length ? (
                       selectedGroupUsage.top_sites.map((site) => (
                         <div key={`group-detail-${selectedGroupUsage.group_name}-${site.host}`} className="flex items-center justify-between gap-3 rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-3">
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-semibold text-white">{site.host}</p>
-                          </div>
+                          <SiteIdentity host={site.host} />
                           <span className="text-sm font-semibold text-cyan-300">{site.request_count} hit(s)</span>
                         </div>
                       ))
@@ -1428,20 +1549,27 @@ export function GatewayStartView() {
                       <div key={`${event.timestamp || 't'}-${index}`} className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
-                            <p className="truncate text-sm font-semibold text-white">{event.host || 'Unknown target'}</p>
+                            <SiteIdentity host={event.host || 'Unknown target'} />
                             <p className="mt-1 text-xs text-slate-400">
                               {(event.user_name || event.user_email || 'Unattached worker')} · {event.hostname || 'Unknown device'}
                             </p>
                           </div>
-                          <span
-                            className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${
-                              event.blocked
-                                ? 'border-red-500/30 bg-red-500/10 text-red-300'
-                                : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-                            }`}
-                          >
-                            {event.blocked ? 'Blocked' : 'Allowed'}
-                          </span>
+                          <div className="flex items-center gap-2">
+                            {event.port ? (
+                              <span className="rounded-full border border-slate-700 bg-slate-900/70 px-2.5 py-1 text-xs font-semibold text-slate-300">
+                                Port {event.port}
+                              </span>
+                            ) : null}
+                            <span
+                              className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${
+                                event.blocked
+                                  ? 'border-red-500/30 bg-red-500/10 text-red-300'
+                                  : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                              }`}
+                            >
+                              {event.blocked ? 'Blocked' : 'Allowed'}
+                            </span>
+                          </div>
                         </div>
                         <p className="mt-2 text-xs text-slate-500">
                           {(event.method || 'HTTP').toUpperCase()} · {formatDateTime(event.timestamp || null)}

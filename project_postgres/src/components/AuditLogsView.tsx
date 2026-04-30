@@ -11,6 +11,9 @@ type AuditLog = {
   action: string;
   details: string;
   timestamp: string;
+  category?: string | null;
+  source_table?: string | null;
+  source_id?: number | null;
 };
 
 type ProxyHealth = {
@@ -45,6 +48,7 @@ type ProxyStats = {
 };
 
 type VerdictFilter = "all" | "blocked" | "allowed";
+type AuditViewMode = "audit" | "history";
 type ParsedDetailField = {
   key: string;
   label: string;
@@ -274,6 +278,7 @@ function previewPrimaryDetail(details: string): string {
   const targetField = parsed.fields.find((field) => field.key.toLowerCase() === "target");
   const scanUrlField = parsed.fields.find((field) => field.key.toLowerCase() === "scan_url");
   const urlField = parsed.fields.find((field) => ["url", "host", "domain"].includes(field.key.toLowerCase()));
+  const portField = parsed.fields.find((field) => field.key.toLowerCase() === "port");
 
   const primaryUrl =
     scanUrlField?.value ||
@@ -285,7 +290,18 @@ function previewPrimaryDetail(details: string): string {
     urlField?.value ||
     "";
 
-  if (primaryUrl) return primaryUrl;
+  if (primaryUrl) {
+    if (portField?.value && !primaryUrl.includes(`:${portField.value}`) && /^https?:\/\//i.test(primaryUrl)) {
+      try {
+        const parsedUrl = new URL(primaryUrl);
+        const hostWithPort = parsedUrl.port ? parsedUrl.host : `${parsedUrl.hostname}:${portField.value}`;
+        return `${parsedUrl.protocol}//${hostWithPort}${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`;
+      } catch {
+        return `${primaryUrl} (port ${portField.value})`;
+      }
+    }
+    return primaryUrl;
+  }
 
   return previewDetailItems(details).join(" | ") || details;
 }
@@ -319,6 +335,7 @@ function fieldToneClass(field: ParsedDetailField): string {
 export function AuditLogsView() {
   const { token } = useAuth();
   const [logs, setLogs] = useState<AuditLog[]>([]);
+  const [viewMode, setViewMode] = useState<AuditViewMode>("audit");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [gatewayError, setGatewayError] = useState<string | null>(null);
@@ -338,14 +355,50 @@ export function AuditLogsView() {
     if (!token) return;
     try {
       if (showLoader) setLoading(true);
-      const res = await fetch(apiUrl("/audit?sort_by=date&order=desc&limit=500"), {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) throw new Error("Failed to fetch audit logs");
-      setLogs((await res.json()) as AuditLog[]);
+      let data: Array<Record<string, unknown>> = [];
+
+      if (viewMode === "history") {
+        const historyRes = await fetch(apiUrl(`/history/app?limit=2000`), {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        if (historyRes.ok) {
+          data = (await historyRes.json()) as Array<Record<string, unknown>>;
+        } else {
+          const fallbackRes = await fetch(apiUrl(`/audit?sort_by=date&order=desc&limit=500`), {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (!fallbackRes.ok) {
+            throw new Error("Failed to fetch history");
+          }
+          data = (await fallbackRes.json()) as Array<Record<string, unknown>>;
+        }
+      } else {
+        const auditRes = await fetch(apiUrl(`/audit?sort_by=date&order=desc&limit=500`), {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!auditRes.ok) {
+          throw new Error("Failed to fetch audit logs");
+        }
+        data = (await auditRes.json()) as Array<Record<string, unknown>>;
+      }
+
+      const normalized = (Array.isArray(data) ? data : []).map((row) => ({
+        id: Number(row.id),
+        user_id: row.user_id === null || row.user_id === undefined ? null : Number(row.user_id),
+        user_email: (row.user_email as string | null | undefined) ?? null,
+        user_name: (row.user_name as string | null | undefined) ?? null,
+        action: String((row.action as string | undefined) || (row.title as string | undefined) || "History Event"),
+        details: String((row.details as string | undefined) || ""),
+        timestamp: String(row.timestamp || ""),
+        category: (row.category as string | null | undefined) ?? null,
+        source_table: (row.source_table as string | null | undefined) ?? null,
+        source_id: row.source_id === null || row.source_id === undefined ? null : Number(row.source_id),
+      })) as AuditLog[];
+      setLogs(normalized);
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to fetch logs");
+      setError(e instanceof Error ? e.message : viewMode === "history" ? "Failed to fetch history" : "Failed to fetch audit logs");
     } finally {
       if (showLoader) setLoading(false);
     }
@@ -382,7 +435,7 @@ export function AuditLogsView() {
   useEffect(() => {
     void loadAuditLogs(true);
     void loadGatewayData();
-  }, [token]);
+  }, [token, viewMode]);
 
   useEffect(() => {
     if (!token) return;
@@ -391,7 +444,7 @@ export function AuditLogsView() {
       void loadGatewayData();
     }, 3000);
     return () => window.clearInterval(id);
-  }, [token]);
+  }, [token, viewMode]);
 
   useEffect(() => {
     if (!showDevicesPage) return;
@@ -408,7 +461,14 @@ export function AuditLogsView() {
   }, [showDevicesPage, selectedDeviceIp]);
 
   const filteredLogs = useMemo(() => {
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+
     return logs.filter((l) => {
+      if (viewMode === "audit") {
+        const parsed = parseBackendTimestamp(l.timestamp);
+        if (!parsed || now - parsed.getTime() > dayMs) return false;
+      }
       if (actionFilter !== "all" && l.action !== actionFilter) return false;
       if (verdictFilter !== "all" && logVerdict(l) !== verdictFilter) return false;
       if (dateFilter && localDateValue(l.timestamp) !== dateFilter) return false;
@@ -423,7 +483,7 @@ export function AuditLogsView() {
         formatTimestamp(l.timestamp).toLowerCase().includes(s)
       );
     });
-  }, [logs, actionFilter, verdictFilter, dateFilter, searchTerm]);
+  }, [logs, actionFilter, verdictFilter, dateFilter, searchTerm, viewMode]);
 
   const uniqueActions = useMemo(() => Array.from(new Set(logs.map((l) => l.action))), [logs]);
   const activeProxyDevices = useMemo(
@@ -661,13 +721,35 @@ export function AuditLogsView() {
     <div className="flex h-full flex-col overflow-hidden bg-slate-900 p-8">
       <div className="mb-6 flex shrink-0 items-center justify-between gap-4">
         <div>
-          <h2 className="text-3xl font-bold text-white">Audit Logs</h2>
-          <p className="text-slate-400">Main audit view (devices moved to dedicated page).</p>
+          <h2 className="text-3xl font-bold text-white">{viewMode === "history" ? "History" : "Audit Logs"}</h2>
+          <p className="text-slate-400">
+            {viewMode === "history"
+              ? "Complete application history across recorded events."
+              : "Main audit view limited to the last 24 hours for faster review."}
+          </p>
         </div>
-        <button onClick={() => exportRows(filteredLogs, "audit_logs")} disabled={filteredLogs.length === 0} className="px-4 py-2 bg-cyan-500 hover:bg-cyan-600 text-white rounded-lg flex items-center gap-2 disabled:opacity-50">
-          <Download className="w-4 h-4" />
-          Export Excel
-        </button>
+        <div className="flex items-center gap-3">
+          <div className="rounded-xl border border-slate-700 bg-slate-800/70 p-1">
+            <button
+              type="button"
+              onClick={() => setViewMode("audit")}
+              className={`rounded-lg px-4 py-2 text-sm transition ${viewMode === "audit" ? "bg-cyan-500 text-white" : "text-slate-300 hover:bg-slate-700"}`}
+            >
+              Audit Logs
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode("history")}
+              className={`rounded-lg px-4 py-2 text-sm transition ${viewMode === "history" ? "bg-cyan-500 text-white" : "text-slate-300 hover:bg-slate-700"}`}
+            >
+              History
+            </button>
+          </div>
+          <button onClick={() => exportRows(filteredLogs, viewMode === "history" ? "app_history" : "audit_logs")} disabled={filteredLogs.length === 0} className="px-4 py-2 bg-cyan-500 hover:bg-cyan-600 text-white rounded-lg flex items-center gap-2 disabled:opacity-50">
+            <Download className="w-4 h-4" />
+            Export Excel
+          </button>
+        </div>
       </div>
 
       <div className="mb-6 grid shrink-0 grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -745,6 +827,11 @@ export function AuditLogsView() {
                       <td className="px-4 py-3 text-sm text-slate-200 whitespace-nowrap">
                         <div className="flex items-center gap-2">
                           <span>{log.action}</span>
+                          {viewMode === "history" && log.category && (
+                            <span className="text-[11px] px-2 py-0.5 rounded-full border bg-sky-500/15 text-sky-300 border-sky-500/30">
+                              {log.category}
+                            </span>
+                          )}
                           {logVerdict(log) !== "other" && (
                             <span className={`text-[11px] px-2 py-0.5 rounded-full border ${logVerdict(log) === "blocked" ? "bg-rose-500/15 text-rose-300 border-rose-500/30" : "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"}`}>
                               {logVerdict(log) === "blocked" ? "Blocked" : "Allowed"}

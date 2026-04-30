@@ -42,6 +42,7 @@ from models import (
     User,
     Scan,
     AuditLog,
+    AppHistoryEvent,
     PhishTankEntry,
     ThreatUrl,
     ProxyBlockRule,
@@ -123,6 +124,46 @@ def _ensure_auth_profile_columns() -> None:
 
 
 _ensure_auth_profile_columns()
+
+
+def _backfill_app_history_from_audit_logs() -> None:
+    try:
+        with Session(engine) as db:
+            existing_audit_ids = {
+                row[0]
+                for row in db.query(AppHistoryEvent.source_id)
+                .filter(AppHistoryEvent.source_table == "audit_logs")
+                .all()
+                if row[0] is not None
+            }
+            if existing_audit_ids:
+                audit_query = db.query(AuditLog).filter(~AuditLog.id.in_(existing_audit_ids))
+            else:
+                audit_query = db.query(AuditLog)
+
+            missing_logs = audit_query.order_by(AuditLog.timestamp.asc()).all()
+            if not missing_logs:
+                return
+
+            for log in missing_logs:
+                db.add(
+                    AppHistoryEvent(
+                        user_id=log.user_id,
+                        category="audit",
+                        title=log.action,
+                        details=log.details,
+                        source_table="audit_logs",
+                        source_id=log.id,
+                        created_at=log.timestamp or datetime.utcnow(),
+                    )
+                )
+            db.commit()
+            logger.info("Backfilled %s audit log(s) into app history", len(missing_logs))
+    except Exception as exc:
+        logger.warning("Failed to backfill app history from audit logs: %s", exc)
+
+
+_backfill_app_history_from_audit_logs()
 
 app = FastAPI(title="Security Analyzer API")
 
@@ -2544,11 +2585,37 @@ def create_audit_log(db: Session, user_id: int, action: str, details: str):
     audit_log = AuditLog(user_id=user_id, action=action, details=details)
     db.add(audit_log)
     db.commit()
+    db.refresh(audit_log)
+    db.add(
+        AppHistoryEvent(
+            user_id=user_id,
+            category="audit",
+            title=action,
+            details=details,
+            source_table="audit_logs",
+            source_id=audit_log.id,
+            created_at=audit_log.timestamp or datetime.utcnow(),
+        )
+    )
+    db.commit()
 
 
 def create_system_audit_log(db: Session, action: str, details: str):
     audit_log = AuditLog(user_id=None, action=action, details=details)
     db.add(audit_log)
+    db.commit()
+    db.refresh(audit_log)
+    db.add(
+        AppHistoryEvent(
+            user_id=None,
+            category="system",
+            title=action,
+            details=details,
+            source_table="audit_logs",
+            source_id=audit_log.id,
+            created_at=audit_log.timestamp or datetime.utcnow(),
+        )
+    )
     db.commit()
 
 
@@ -7004,7 +7071,7 @@ async def get_audit_logs(
         action_filter: Optional[str] = Query(None),
         start_date: Optional[str] = Query(None),
         end_date: Optional[str] = Query(None),
-        limit: int = Query(100, le=500),
+        limit: int = Query(100, ge=1, le=5000),
         db: Session = Depends(get_db)
 ):
     """Get audit logs with role-based access control"""
@@ -7073,6 +7140,69 @@ async def get_audit_logs(
             })
 
         return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/history/app")
+async def get_app_history(
+        current_user: User = Depends(get_current_user),
+        target_user_id: Optional[int] = Query(None, description="Filter by user ID (admin only)"),
+        category: Optional[str] = Query(None),
+        start_date: Optional[str] = Query(None),
+        end_date: Optional[str] = Query(None),
+        limit: int = Query(1000, ge=1, le=5000),
+        db: Session = Depends(get_db)
+):
+    try:
+        query = db.query(AppHistoryEvent)
+
+        if current_user.is_admin:
+            if target_user_id is not None:
+                query = query.filter(AppHistoryEvent.user_id == target_user_id)
+        else:
+            query = query.filter(AppHistoryEvent.user_id == current_user.id)
+
+        if category:
+            query = query.filter(AppHistoryEvent.category == category)
+
+        if start_date:
+            start = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            query = query.filter(AppHistoryEvent.created_at >= start)
+
+        if end_date:
+            end = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            query = query.filter(AppHistoryEvent.created_at <= end)
+
+        rows = query.order_by(AppHistoryEvent.created_at.desc()).limit(limit).all()
+        user_ids = sorted({row.user_id for row in rows if row.user_id is not None})
+        user_email_map: Dict[int, str] = {}
+        if user_ids:
+            users = db.query(User.id, User.email).filter(User.id.in_(user_ids)).all()
+            user_email_map = {u.id: u.email for u in users}
+
+        payload = []
+        for row in rows:
+            user_email = user_email_map.get(row.user_id)
+            if user_email:
+                user_name = user_email.split("@", 1)[0]
+            elif row.user_id is None:
+                user_name = "System"
+            else:
+                user_name = f"User #{row.user_id}"
+            payload.append({
+                "id": row.id,
+                "user_id": row.user_id,
+                "user_email": user_email,
+                "user_name": user_name,
+                "category": row.category,
+                "title": row.title,
+                "details": row.details or "",
+                "source_table": row.source_table,
+                "source_id": row.source_id,
+                "timestamp": row.created_at.isoformat(),
+            })
+        return payload
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

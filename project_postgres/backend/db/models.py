@@ -43,6 +43,20 @@ class AuditLog(Base):
     timestamp = Column(DateTime, default=datetime.utcnow)
     user = relationship("User", back_populates="audit_logs")
 
+
+class AppHistoryEvent(Base):
+    __tablename__ = "app_history_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    category = Column(String, index=True, nullable=False, default="audit")
+    title = Column(String, nullable=False)
+    details = Column(Text, nullable=True)
+    source_table = Column(String, nullable=True, index=True)
+    source_id = Column(Integer, nullable=True, index=True)
+    metadata_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
 class PhishTankEntry(Base):
     __tablename__ = "phishtank_entries"
     id = Column(Integer, primary_key=True, index=True)
