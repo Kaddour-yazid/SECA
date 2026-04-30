@@ -15,6 +15,8 @@ class User(Base):
     group_name = Column(String, nullable=True)
     role = Column(String, default="user")  # "admin" or "user"
     is_admin = Column(Boolean, default=False)
+    admin_department = Column(Boolean, default=False)
+    admin_group = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     scans = relationship("Scan", back_populates="user")
     audit_logs = relationship("AuditLog", back_populates="user")

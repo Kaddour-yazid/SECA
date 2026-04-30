@@ -5,6 +5,8 @@ type User = {
   id: number;
   email: string;
   is_admin: boolean;
+  admin_department?: boolean;
+  admin_group?: boolean;
   role?: string | null;
   first_name?: string | null;
   last_name?: string | null;

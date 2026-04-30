@@ -61,6 +61,8 @@ from auth import (
     router as auth_router,
     DEPARTMENT_GROUPS,
     DEPARTMENT_ALIASES,
+    is_department_admin,
+    serialize_user,
 )
 from sandbox_runner import run_dynamic_scan as sandbox_run_dynamic_scan
 from security_utils import sha256_hex
@@ -85,6 +87,8 @@ except Exception:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+DEPARTMENT_PROXY_GROUP_NAME = "__DEPARTMENT__"
+
 # Create database tables
 Base.metadata.create_all(bind=engine)
 
@@ -97,6 +101,8 @@ def _ensure_auth_profile_columns() -> None:
             "sex": "VARCHAR",
             "department": "VARCHAR",
             "group_name": "VARCHAR",
+            "admin_department": "BOOLEAN DEFAULT FALSE",
+            "admin_group": "BOOLEAN DEFAULT FALSE",
         },
         "email_otps": {
             "first_name": "VARCHAR",
@@ -124,6 +130,40 @@ def _ensure_auth_profile_columns() -> None:
 
 
 _ensure_auth_profile_columns()
+
+
+def _admin_scope(current_user: User) -> Dict[str, Optional[str]]:
+    department = str(current_user.department or "").strip()
+    group_name = str(current_user.group_name or "").strip()
+    if is_department_admin(current_user):
+        return {
+            "department": department or None,
+            "group_name": None,
+            "scope": "department",
+        }
+    return {
+        "department": department or None,
+        "group_name": group_name or None,
+        "scope": "group" if group_name else "department",
+    }
+
+
+def _scope_matches_department_group(
+    *,
+    department: Optional[str],
+    group_name: Optional[str],
+    current_user: User,
+) -> bool:
+    scope = _admin_scope(current_user)
+    scope_department = str(scope.get("department") or "").strip()
+    scope_group = str(scope.get("group_name") or "").strip()
+    target_department = str(department or "").strip()
+    target_group = str(group_name or "").strip()
+    if scope_department and target_department != scope_department:
+        return False
+    if scope_group and target_group != scope_group:
+        return False
+    return True
 
 
 def _backfill_app_history_from_audit_logs() -> None:
@@ -1136,11 +1176,7 @@ def _deserialize_local_ips(value: Optional[str]) -> List[str]:
 
 
 def _group_proxy_scope_rows() -> List[Tuple[str, str]]:
-    rows: List[Tuple[str, str]] = []
-    for department, payload in DEPARTMENT_GROUPS.items():
-        for group_name in payload.get("groups", {}).values():
-            rows.append((department, group_name))
-    return rows
+    return [(department, DEPARTMENT_PROXY_GROUP_NAME) for department in DEPARTMENT_GROUPS.keys()]
 
 
 def seed_group_proxy_assignments() -> None:
@@ -1164,7 +1200,7 @@ def seed_group_proxy_assignments() -> None:
                         proxy_host=SECA_GROUP_PROXY_DEFAULT_HOST,
                         proxy_port=SECA_GROUP_PROXY_BASE_PORT + index,
                         enabled=True,
-                        note="Auto-seeded group proxy assignment",
+                        note="Auto-seeded department proxy assignment",
                     )
                 )
             db.commit()
@@ -1204,14 +1240,12 @@ def _emit_desktop_presence_audit(session: Dict[str, Any], online: bool, reason: 
 
 
 def _desktop_session_scope_matches(session: Dict[str, Any], current_user: User) -> bool:
-    admin_department = str(current_user.department or "").strip()
-    admin_group = str(current_user.group_name or "").strip()
-    if not admin_department or not admin_group:
-        return True
-    return (
-        str(session.get("department") or "").strip() == admin_department
-        and str(session.get("group_name") or "").strip() == admin_group
-        and not bool(session.get("is_admin"))
+    if bool(session.get("is_admin")):
+        return False
+    return _scope_matches_department_group(
+        department=session.get("department"),
+        group_name=session.get("group_name"),
+        current_user=current_user,
     )
 
 
@@ -1425,10 +1459,23 @@ def _active_desktop_session_for_client_ip(client_ip: str) -> Optional[Dict[str, 
 def _group_proxy_assignment_for_scope(department: Optional[str], group_name: Optional[str], db: Optional[Session] = None) -> Optional[GroupProxyAssignment]:
     dep = str(department or "").strip()
     grp = str(group_name or "").strip()
-    if not dep or not grp:
+    if not dep:
         return None
 
     def _query(session: Session) -> Optional[GroupProxyAssignment]:
+        department_assignment = (
+            session.query(GroupProxyAssignment)
+            .filter(
+                GroupProxyAssignment.department == dep,
+                GroupProxyAssignment.group_name == DEPARTMENT_PROXY_GROUP_NAME,
+                GroupProxyAssignment.enabled.is_(True),
+            )
+            .first()
+        )
+        if department_assignment:
+            return department_assignment
+        if not grp:
+            return None
         return (
             session.query(GroupProxyAssignment)
             .filter(
@@ -1612,13 +1659,13 @@ def _stop_desktop_session(user: User, payload: DesktopSessionStop) -> Optional[D
 def _collect_persisted_desktop_sessions_for_admin(current_user: User, db: Session, limit: int = 100) -> List[Dict[str, Any]]:
     query = db.query(DesktopSession).order_by(DesktopSession.last_heartbeat_at.desc())
 
-    admin_department = str(current_user.department or "").strip()
-    admin_group = str(current_user.group_name or "").strip()
-    if admin_department and admin_group:
-        query = query.filter(
-            DesktopSession.department == admin_department,
-            DesktopSession.group_name == admin_group,
-        )
+    scope = _admin_scope(current_user)
+    scope_department = str(scope.get("department") or "").strip()
+    scope_group = str(scope.get("group_name") or "").strip()
+    if scope_department:
+        query = query.filter(DesktopSession.department == scope_department)
+    if scope_group:
+        query = query.filter(DesktopSession.group_name == scope_group)
 
     rows = query.limit(limit).all()
     if not rows:
@@ -2664,6 +2711,11 @@ DOMAIN_ONLY_REPUTATION_HOSTS = {
     "docs.google.com",
     "mail.google.com",
     "accounts.google.com",
+    "youtubei.googleapis.com",
+    "googlevideo.com",
+    "ytimg.com",
+    "i.ytimg.com",
+    "yt3.ggpht.com",
     "ssl.gstatic.com",
     "dropbox.com",
     "www.dropbox.com",
@@ -2677,6 +2729,8 @@ DOMAIN_ONLY_REPUTATION_HOSTS = {
 }
 TRUSTED_ROOT_DOMAINS = {
     "youtube.com",
+    "googlevideo.com",
+    "ytimg.com",
     "google.com",
     "facebook.com",
     "instagram.com",
@@ -3332,6 +3386,21 @@ def layer2_phishtank_check(url: str, db: Session) -> Dict[str, Any]:
             "message": "URL found in local curated threat feed",
         }
     if domain and domain in local_feed["domains"]:
+        shared_host = domain in DOMAIN_ONLY_REPUTATION_HOSTS
+        trusted_root = _is_trusted_root_domain(domain)
+        if shared_host or trusted_root:
+            return {
+                "found": False,
+                "verified": False,
+                "threat_type": local_feed["domains"][domain],
+                "source": "local-url-feed",
+                "threat_level": "low",
+                "match_type": "domain_only",
+                "downgraded_shared_host": shared_host,
+                "downgraded_trusted_root": trusted_root,
+                "domain_only_score": 0,
+                "message": "Domain appears in local feed, but it is a trusted/shared host so only exact URL hits are enforced",
+            }
         return {
             "found": True,
             "verified": True,
@@ -3342,6 +3411,21 @@ def layer2_phishtank_check(url: str, db: Session) -> Dict[str, Any]:
             "message": "Domain found in local curated threat feed",
         }
     if effective_domain and effective_domain in local_feed["domains"]:
+        shared_host = effective_domain in DOMAIN_ONLY_REPUTATION_HOSTS
+        trusted_root = _is_trusted_root_domain(effective_domain)
+        if shared_host or trusted_root:
+            return {
+                "found": False,
+                "verified": False,
+                "threat_type": local_feed["domains"][effective_domain],
+                "source": "local-url-feed",
+                "threat_level": "low",
+                "match_type": "domain_only",
+                "downgraded_shared_host": shared_host,
+                "downgraded_trusted_root": trusted_root,
+                "domain_only_score": 0,
+                "message": "Effective domain appears in local feed, but it is a trusted/shared host so only exact URL hits are enforced",
+            }
         return {
             "found": True,
             "verified": True,
@@ -6333,15 +6417,15 @@ async def gateway_api_history(
         limit: int = Query(200, ge=1, le=1000),
         current_user: User = Depends(require_admin)
 ):
-    admin_department = str(current_user.department or "").strip()
-    admin_group = str(current_user.group_name or "").strip()
     rows = list(gateway_history)
-    if admin_department and admin_group:
-        rows = [
-            row for row in rows
-            if str(row.get("department") or "").strip() == admin_department
-            and str(row.get("group_name") or "").strip() == admin_group
-        ]
+    rows = [
+        row for row in rows
+        if _scope_matches_department_group(
+            department=row.get("department"),
+            group_name=row.get("group_name"),
+            current_user=current_user,
+        )
+    ]
     return rows[:limit]
 
 
@@ -6382,6 +6466,13 @@ def _gateway_history_host(row: Dict[str, Any]) -> str:
     return "unknown-host"
 
 
+def _normalize_static_status(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"clean", "suspicious", "malicious"}:
+        return normalized
+    return "unknown"
+
+
 @app.get("/monitoring/proxy-usage-stats")
 async def monitoring_proxy_usage_stats(
         period: str = Query("week"),
@@ -6397,16 +6488,19 @@ async def monitoring_proxy_usage_stats(
     if period not in period_windows:
         raise HTTPException(status_code=400, detail="Invalid monitoring period")
 
-    admin_department = str(current_user.department or "").strip()
-    admin_group = str(current_user.group_name or "").strip()
-    if not admin_department or not admin_group:
+    scope = _admin_scope(current_user)
+    admin_department = str(scope.get("department") or "").strip()
+    admin_group = str(scope.get("group_name") or "").strip()
+    scope_label = "department" if is_department_admin(current_user) else "group"
+    if not admin_department:
         return {
             "period": period,
             "days": period_windows[period],
             "generated_at": datetime.utcnow().isoformat(),
             "group_summary": {
                 "department": admin_department,
-                "group_name": admin_group,
+                "group_name": admin_group or None,
+                "scope": scope_label,
                 "request_count": 0,
                 "blocked_count": 0,
                 "allowed_count": 0,
@@ -6456,22 +6550,31 @@ async def monitoring_proxy_usage_stats(
         }
         for row in persisted_rows
     ]
+    if admin_group:
+        scoped_department_rows = [
+            row
+            for row in scoped_department_rows
+            if str(row.get("group_name") or "").strip() == admin_group
+        ]
 
-    members = (
+    member_query = (
         db.query(User)
         .filter(
             User.department == admin_department,
-            User.group_name == admin_group,
             User.is_admin.is_(False),
         )
-        .order_by(User.first_name.asc(), User.last_name.asc(), User.email.asc())
-        .all()
     )
+    if admin_group:
+        member_query = member_query.filter(User.group_name == admin_group)
+    members = member_query.order_by(User.first_name.asc(), User.last_name.asc(), User.email.asc()).all()
 
     member_stats_map: Dict[str, Dict[str, Any]] = {}
     top_sites_counter: Counter[str] = Counter()
     top_sites_blocked: Counter[str] = Counter()
     top_sites_allowed: Counter[str] = Counter()
+    top_sites_clean: Counter[str] = Counter()
+    top_sites_suspicious: Counter[str] = Counter()
+    top_sites_malicious: Counter[str] = Counter()
     top_sites_members: Dict[str, set] = defaultdict(set)
     top_sites_last_seen: Dict[str, str] = {}
     group_stats_map: Dict[str, Dict[str, Any]] = {}
@@ -6488,12 +6591,16 @@ async def monitoring_proxy_usage_stats(
             "allowed_count": 0,
             "unique_sites": set(),
             "top_sites": Counter(),
+            "top_sites_clean": Counter(),
+            "top_sites_suspicious": Counter(),
+            "top_sites_malicious": Counter(),
             "last_seen": None,
         }
 
     for row in scoped_department_rows:
         host = _gateway_history_host(row)
         blocked = bool(row.get("blocked"))
+        static_status = _normalize_static_status(row.get("static_status"))
         timestamp = _gateway_history_timestamp(row.get("timestamp"))
         timestamp_text = timestamp.isoformat() if timestamp else None
         user_id = row.get("user_id")
@@ -6512,6 +6619,9 @@ async def monitoring_proxy_usage_stats(
                 "unique_sites": set(),
                 "unique_members": set(),
                 "top_sites": Counter(),
+                "top_sites_clean": Counter(),
+                "top_sites_suspicious": Counter(),
+                "top_sites_malicious": Counter(),
                 "last_seen": None,
             },
         )
@@ -6522,6 +6632,12 @@ async def monitoring_proxy_usage_stats(
             group_bucket["allowed_count"] += 1
         group_bucket["unique_sites"].add(host)
         group_bucket["top_sites"][host] += 1
+        if static_status == "clean":
+            group_bucket["top_sites_clean"][host] += 1
+        elif static_status == "suspicious":
+            group_bucket["top_sites_suspicious"][host] += 1
+        elif static_status == "malicious":
+            group_bucket["top_sites_malicious"][host] += 1
         if user_id is not None or user_email or user_name:
             group_bucket["unique_members"].add(
                 f"user:{user_id}" if user_id is not None else f"email:{(user_email or user_name).lower()}"
@@ -6529,7 +6645,7 @@ async def monitoring_proxy_usage_stats(
         if timestamp_text and (not group_bucket["last_seen"] or str(group_bucket["last_seen"]) < timestamp_text):
             group_bucket["last_seen"] = timestamp_text
 
-        if group_name == admin_group:
+        if not admin_group or group_name == admin_group:
             member_key = f"user:{user_id}" if user_id is not None else f"email:{(user_email or user_name).lower()}"
             if member_key not in member_stats_map:
                 member_stats_map[member_key] = {
@@ -6541,6 +6657,9 @@ async def monitoring_proxy_usage_stats(
                     "allowed_count": 0,
                     "unique_sites": set(),
                     "top_sites": Counter(),
+                    "top_sites_clean": Counter(),
+                    "top_sites_suspicious": Counter(),
+                    "top_sites_malicious": Counter(),
                     "last_seen": None,
                 }
 
@@ -6551,6 +6670,12 @@ async def monitoring_proxy_usage_stats(
             else:
                 member_row["allowed_count"] += 1
             member_row["top_sites"][host] += 1
+            if static_status == "clean":
+                member_row["top_sites_clean"][host] += 1
+            elif static_status == "suspicious":
+                member_row["top_sites_suspicious"][host] += 1
+            elif static_status == "malicious":
+                member_row["top_sites_malicious"][host] += 1
             member_row["unique_sites"].add(host)
             if timestamp_text:
                 if not member_row["last_seen"] or str(member_row["last_seen"]) < timestamp_text:
@@ -6561,6 +6686,12 @@ async def monitoring_proxy_usage_stats(
                 top_sites_blocked[host] += 1
             else:
                 top_sites_allowed[host] += 1
+            if static_status == "clean":
+                top_sites_clean[host] += 1
+            elif static_status == "suspicious":
+                top_sites_suspicious[host] += 1
+            elif static_status == "malicious":
+                top_sites_malicious[host] += 1
             top_sites_members[host].add(member_key)
             if timestamp_text and (host not in top_sites_last_seen or top_sites_last_seen[host] < timestamp_text):
                 top_sites_last_seen[host] = timestamp_text
@@ -6592,6 +6723,9 @@ async def monitoring_proxy_usage_stats(
             "request_count": count,
             "blocked_count": int(top_sites_blocked.get(host, 0)),
             "allowed_count": int(top_sites_allowed.get(host, 0)),
+            "clean_count": int(top_sites_clean.get(host, 0)),
+            "suspicious_count": int(top_sites_suspicious.get(host, 0)),
+            "malicious_count": int(top_sites_malicious.get(host, 0)),
             "unique_members": len(top_sites_members.get(host, set())),
             "last_seen": top_sites_last_seen.get(host),
         }
@@ -6604,6 +6738,9 @@ async def monitoring_proxy_usage_stats(
             {
                 "host": host,
                 "request_count": count,
+                "clean_count": int(data["top_sites_clean"].get(host, 0)),
+                "suspicious_count": int(data["top_sites_suspicious"].get(host, 0)),
+                "malicious_count": int(data["top_sites_malicious"].get(host, 0)),
             }
             for host, count in data["top_sites"].most_common(8)
         ]
@@ -6655,7 +6792,13 @@ async def monitoring_proxy_usage_stats(
                 "unique_members": len(data["unique_members"]),
                 "last_seen": data["last_seen"],
                 "top_sites": [
-                    {"host": host, "request_count": count}
+                    {
+                        "host": host,
+                        "request_count": count,
+                        "clean_count": int(data["top_sites_clean"].get(host, 0)),
+                        "suspicious_count": int(data["top_sites_suspicious"].get(host, 0)),
+                        "malicious_count": int(data["top_sites_malicious"].get(host, 0)),
+                    }
                     for host, count in data["top_sites"].most_common(12)
                 ],
             }
@@ -6674,7 +6817,8 @@ async def monitoring_proxy_usage_stats(
         "generated_at": datetime.utcnow().isoformat(),
         "group_summary": {
             "department": admin_department,
-            "group_name": admin_group,
+            "group_name": admin_group or None,
+            "scope": scope_label,
             "request_count": sum(int(item["request_count"]) for item in member_stats),
             "blocked_count": sum(int(item["blocked_count"]) for item in member_stats),
             "allowed_count": sum(int(item["allowed_count"]) for item in member_stats),
@@ -6690,14 +6834,22 @@ async def monitoring_proxy_usage_stats(
 
 @app.get("/gateway/api/stats")
 async def gateway_api_stats(current_user: User = Depends(require_admin)):
-    del current_user
     with gateway_state_lock:
-        requests_by_ip = dict(gateway_clients)
-        methods = dict(gateway_method_counts)
-        total_events = len(gateway_history)
-        unique_clients = len(gateway_devices)
-        blocked = gateway_blocked_count
-        allowed = gateway_allowed_count
+        scoped_rows = [
+            row
+            for row in gateway_history
+            if _scope_matches_department_group(
+                department=row.get("department"),
+                group_name=row.get("group_name"),
+                current_user=current_user,
+            )
+        ]
+        requests_by_ip = dict(Counter(str(row.get("client_ip") or "") for row in scoped_rows if row.get("client_ip")))
+        methods = dict(Counter(str(row.get("method") or "UNKNOWN") for row in scoped_rows))
+        total_events = len(scoped_rows)
+        unique_clients = len({str(row.get("client_ip") or "").strip() for row in scoped_rows if row.get("client_ip")})
+        blocked = sum(1 for row in scoped_rows if bool(row.get("blocked")))
+        allowed = total_events - blocked
     return {
         "total_events": total_events,
         "unique_clients": unique_clients,
@@ -6710,7 +6862,6 @@ async def gateway_api_stats(current_user: User = Depends(require_admin)):
 
 @app.get("/gateway/api/devices")
 async def gateway_api_devices(current_user: User = Depends(require_admin)):
-    del current_user
     with gateway_state_lock:
         now_ts = time.time()
         all_ips = set(gateway_devices.keys()) | set(gateway_client_last_activity.keys()) | set(gateway_active_connections.keys())
@@ -6739,6 +6890,20 @@ async def gateway_api_devices(current_user: User = Depends(require_admin)):
                 if assignment:
                     device["assigned_proxy_host"] = assignment.proxy_host
                     device["assigned_proxy_port"] = assignment.proxy_port
+            saved_assignment = _saved_user_ip_assignment_for_client_ip(ip)
+            if saved_assignment and not session:
+                device["user_id"] = saved_assignment.get("user_id")
+                device["user_name"] = saved_assignment.get("user_name")
+                device["user_email"] = saved_assignment.get("user_email")
+                device["department"] = saved_assignment.get("department")
+                device["group_name"] = saved_assignment.get("group_name")
+                device["hostname"] = saved_assignment.get("hostname")
+            if not _scope_matches_department_group(
+                department=device.get("department"),
+                group_name=device.get("group_name"),
+                current_user=current_user,
+            ):
+                continue
             devices.append(device)
     devices.sort(key=lambda d: (not bool(d.get("connected")), -(int(d.get("total_requests", 0) or 0))), reverse=False)
     return devices
@@ -6751,7 +6916,16 @@ async def gateway_api_device_logs(
         limit: int = Query(300, ge=1, le=1000),
         db: Session = Depends(get_db)
 ):
-    del current_user
+    session = _active_desktop_session_for_client_ip(client_ip)
+    saved_assignment = _saved_user_ip_assignment_for_client_ip(client_ip)
+    scope_department = session.get("department") if session else saved_assignment.get("department") if saved_assignment else None
+    scope_group = session.get("group_name") if session else saved_assignment.get("group_name") if saved_assignment else None
+    if (scope_department or scope_group) and not _scope_matches_department_group(
+        department=scope_department,
+        group_name=scope_group,
+        current_user=current_user,
+    ):
+        raise HTTPException(status_code=404, detail="Device not found in your admin scope")
     query = (
         db.query(AuditLog)
         .filter(
@@ -7212,19 +7386,19 @@ async def get_users(
         current_user: User = Depends(require_admin),
         db: Session = Depends(get_db)
 ):
-    """Get all users (admin only)"""
-    users = db.query(User).all()
+    """Get users visible in the current admin scope."""
+    query = db.query(User)
+    scope = _admin_scope(current_user)
+    scope_department = str(scope.get("department") or "").strip()
+    scope_group = str(scope.get("group_name") or "").strip()
+    if scope_department:
+        query = query.filter(User.department == scope_department)
+    if scope_group:
+        query = query.filter(User.group_name == scope_group)
+    users = query.order_by(User.created_at.desc()).all()
     return [{
-        "id": u.id,
-        "email": u.email,
-        "first_name": u.first_name,
-        "last_name": u.last_name,
-        "sex": u.sex,
-        "department": u.department,
-        "group_name": u.group_name,
-        "role": u.role,
-        "is_admin": u.is_admin,
-        "created_at": u.created_at.isoformat()
+        **serialize_user(u),
+        "created_at": u.created_at.isoformat() if u.created_at else None,
     } for u in users]
 
 
@@ -7232,17 +7406,7 @@ async def get_users(
 async def read_users_me(current_user: User = Depends(get_current_user)):
     """Get current authenticated user info"""
     logger.info("/me endpoint called")
-    return {
-        "id": current_user.id,
-        "email": current_user.email,
-        "first_name": current_user.first_name,
-        "last_name": current_user.last_name,
-        "sex": current_user.sex,
-        "department": current_user.department,
-        "group_name": current_user.group_name,
-        "role": current_user.role,
-        "is_admin": current_user.is_admin
-    }
+    return serialize_user(current_user)
 
 
 @app.get("/desktop/session/config")
@@ -7250,9 +7414,7 @@ async def get_desktop_session_config(
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
-    assignment = None
-    if bool(current_user.is_admin):
-        assignment = _group_proxy_assignment_for_scope(current_user.department, current_user.group_name, db=db)
+    assignment = _group_proxy_assignment_for_scope(current_user.department, current_user.group_name, db=db)
     return {
         "heartbeat_interval_seconds": SECA_DESKTOP_HEARTBEAT_INTERVAL_SECONDS,
         "heartbeat_timeout_seconds": SECA_DESKTOP_HEARTBEAT_TIMEOUT_SECONDS,
@@ -7273,15 +7435,14 @@ async def get_current_group_proxy_assignment(
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
-    if not bool(current_user.is_admin):
-        return {"assignment": None}
     assignment = _group_proxy_assignment_for_scope(current_user.department, current_user.group_name, db=db)
     if not assignment:
         return {"assignment": None}
     return {
         "assignment": {
             "department": assignment.department,
-            "group_name": assignment.group_name,
+            "group_name": current_user.group_name,
+            "scope": "department" if assignment.group_name == DEPARTMENT_PROXY_GROUP_NAME else "group",
             "proxy_host": assignment.proxy_host,
             "proxy_port": assignment.proxy_port,
             "enabled": assignment.enabled,
@@ -7351,7 +7512,8 @@ async def monitoring_group_proxy_assignment(
     return {
         "assignment": {
             "department": assignment.department,
-            "group_name": assignment.group_name,
+            "group_name": current_user.group_name,
+            "scope": "department" if assignment.group_name == DEPARTMENT_PROXY_GROUP_NAME else "group",
             "proxy_host": assignment.proxy_host,
             "proxy_port": assignment.proxy_port,
             "enabled": assignment.enabled,

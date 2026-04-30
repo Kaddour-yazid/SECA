@@ -117,6 +117,38 @@ router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 
+def is_department_admin(user: Optional[models.User]) -> bool:
+    return bool(user and getattr(user, "is_admin", False) and getattr(user, "admin_department", False))
+
+
+def is_group_admin(user: Optional[models.User]) -> bool:
+    if not user or not getattr(user, "is_admin", False):
+        return False
+    if getattr(user, "admin_group", False):
+        return True
+    return not getattr(user, "admin_department", False)
+
+
+def has_admin_access(user: Optional[models.User]) -> bool:
+    return bool(user and getattr(user, "is_admin", False))
+
+
+def serialize_user(user: models.User) -> dict:
+    return {
+        "id": user.id,
+        "email": user.email,
+        "is_admin": bool(user.is_admin),
+        "admin_department": is_department_admin(user),
+        "admin_group": is_group_admin(user),
+        "role": user.role,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "sex": user.sex,
+        "department": user.department,
+        "group_name": user.group_name,
+    }
+
+
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
     if expires_delta:
@@ -419,6 +451,8 @@ def register_verify_otp(payload: schemas.SignupOtpVerify, db: Session = Depends(
         department=otp.department,
         group_name=otp.group_name,
         is_admin=False,
+        admin_department=False,
+        admin_group=False,
         role="user",
     )
     db.add(new_user)
@@ -495,16 +529,7 @@ def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "user": {
-            "id": db_user.id,
-            "email": db_user.email,
-            "is_admin": db_user.is_admin,
-            "first_name": db_user.first_name,
-            "last_name": db_user.last_name,
-            "sex": db_user.sex,
-            "department": db_user.department,
-            "group_name": db_user.group_name,
-        }
+        "user": serialize_user(db_user)
     }
 
 
@@ -521,21 +546,11 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 
 
 def require_admin(current_user: models.User = Depends(get_current_user)):
-    if not current_user.is_admin:
+    if not has_admin_access(current_user):
         raise HTTPException(status_code=403, detail="Admin access required")
     return current_user
 
 
 @router.get("/me")
 def get_me(current_user: models.User = Depends(get_current_user)):
-    return {
-        "id": current_user.id,
-        "email": current_user.email,
-        "is_admin": current_user.is_admin,
-        "role": current_user.role,
-        "first_name": current_user.first_name,
-        "last_name": current_user.last_name,
-        "sex": current_user.sex,
-        "department": current_user.department,
-        "group_name": current_user.group_name,
-    }
+    return serialize_user(current_user)
