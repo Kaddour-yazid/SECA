@@ -37,6 +37,7 @@ type OtpResponse = {
 type AuthContextType = {
   user: User | null;
   token: string | null;
+  authReady: boolean;
   signIn: (email: string, password: string) => Promise<boolean>;
   requestSignUpOtp: (payload: SignupPayload) => Promise<OtpResponse>;
   verifySignUpOtp: (email: string, code: string) => Promise<boolean>;
@@ -103,23 +104,53 @@ async function parseJson(res: Response) {
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(localStorage.getItem('token'));
+  const [authReady, setAuthReady] = useState<boolean>(() => !localStorage.getItem('token'));
 
   useEffect(() => {
-    if (token) {
-      fetch(apiUrl('/me'), {
-        headers: { Authorization: `Bearer ${token}` }
+    if (!token) {
+      setUser(null);
+      setAuthReady(true);
+      return;
+    }
+
+    const controller = new AbortController();
+    setAuthReady(false);
+
+    fetch(apiUrl('/me'), {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    })
+      .then(async (res) => {
+        if (res.status === 401 || res.status === 403) {
+          throw new Error('AUTH_INVALID');
+        }
+        if (!res.ok) {
+          throw new Error(`AUTH_FETCH_FAILED:${res.status}`);
+        }
+        return res.json();
       })
-        .then(res => {
-          if (!res.ok) throw new Error('Invalid token');
-          return res.json();
-        })
-        .then(data => setUser(data))
-        .catch(() => {
+      .then((data) => {
+        setUser(data);
+      })
+      .catch((error: Error) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        if (error.message === 'AUTH_INVALID') {
           localStorage.removeItem('token');
           setToken(null);
           setUser(null);
-        });
-    }
+          return;
+        }
+        // Keep the existing token on transient backend/network errors.
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setAuthReady(true);
+        }
+      });
+
+    return () => controller.abort();
   }, [token]);
 
   useEffect(() => {
@@ -233,6 +264,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem('token', data.access_token);
     setToken(data.access_token);
     setUser(data.user);
+    setAuthReady(true);
     return true;
   };
 
@@ -294,6 +326,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem('token');
     setToken(null);
     setUser(null);
+    setAuthReady(true);
   };
 
   return (
@@ -301,6 +334,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       value={{
         user,
         token,
+        authReady,
         signIn,
         requestSignUpOtp,
         verifySignUpOtp,

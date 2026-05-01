@@ -16,6 +16,8 @@ import { ParametersView } from './ParametersView';
 import { PoliciesView } from './PoliciesView';
 import { Sidebar } from './Sidebar';
 
+const ACTIVE_VIEW_STORAGE_KEY = 'seca-active-view';
+
 function TopStrip({ onViewChange }: { onViewChange: (view: string) => void }) {
   const { user, signOut } = useAuth();
   const { translateText } = useLanguage();
@@ -176,32 +178,71 @@ function TopStrip({ onViewChange }: { onViewChange: (view: string) => void }) {
 }
 
 function AppContent() {
-  const { user } = useAuth();
+  const { user, authReady } = useAuth();
   const { language } = useLanguage();
-  const [activeView, setActiveView] = useState('dashboard');
+  const [activeView, setActiveViewState] = useState(() => localStorage.getItem(ACTIVE_VIEW_STORAGE_KEY) || 'dashboard');
+
+  useEffect(() => {
+    if (authReady && user && !user.is_admin && ['start', 'audit', 'access-control'].includes(activeView)) {
+      setActiveViewState('dashboard');
+      localStorage.setItem(ACTIVE_VIEW_STORAGE_KEY, 'dashboard');
+    }
+  }, [activeView, authReady, user]);
+
+  if (!authReady) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-slate-950 text-slate-300">
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/80 px-6 py-5 text-center shadow-2xl shadow-slate-950/50">
+          <p className="text-sm uppercase tracking-[0.24em] text-cyan-300/80">SECA</p>
+          <p className="mt-3 text-base font-medium text-white">Restoring your session...</p>
+          <p className="mt-1 text-sm text-slate-400">Waiting for backend authentication check.</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!user) {
     return <LoginView />;
   }
 
   const handleViewChange = (view: string) => {
-    if (view === 'start' && !user?.is_admin) {
-      setActiveView('dashboard');
-      return;
+    const nextView =
+      (view === 'start' || view === 'audit' || view === 'access-control') && !user?.is_admin
+        ? 'dashboard'
+        : view;
+
+    setActiveViewState(nextView);
+    localStorage.setItem(ACTIVE_VIEW_STORAGE_KEY, nextView);
+  };
+
+  const renderActiveView = () => {
+    switch (activeView) {
+      case 'file':
+        return <FileScannerView />;
+      case 'url':
+        return <URLScannerView />;
+      case 'email':
+        return <EmailScannerView />;
+      case 'hash':
+        return <HashCheckerView />;
+      case 'start':
+        return user.is_admin ? <GatewayStartView /> : <DashboardView isActive />;
+      case 'audit':
+        return user.is_admin ? <AuditLogsView /> : <DashboardView isActive />;
+      case 'access-control':
+        return user.is_admin ? <AccessControlView /> : <DashboardView isActive />;
+      case 'policies':
+        return <PoliciesView />;
+      case 'settings':
+        return <ParametersView />;
+      case 'dashboard':
+      default:
+        return <DashboardView isActive />;
     }
-    if (view === 'audit' && !user?.is_admin) {
-      setActiveView('dashboard');
-      return;
-    }
-    if (view === 'access-control' && !user?.is_admin) {
-      setActiveView('dashboard');
-      return;
-    }
-    setActiveView(view);
   };
 
   return (
-    <div key={language} className="relative isolate flex h-screen flex-col overflow-hidden bg-slate-950 dark:bg-slate-950">
+    <div dir={language === 'ar' ? 'rtl' : 'ltr'} className="relative isolate flex h-screen flex-col overflow-hidden bg-slate-950 dark:bg-slate-950">
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
         <div className="absolute -left-28 top-20 h-80 w-80 rounded-full bg-cyan-500/10 blur-3xl" />
         <div className="absolute right-[-8rem] top-28 h-[26rem] w-[26rem] rounded-full bg-blue-500/10 blur-3xl" />
@@ -214,42 +255,7 @@ function AppContent() {
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <Sidebar activeView={activeView} onViewChange={handleViewChange} />
         <main className="relative z-0 min-h-0 flex-1 overflow-hidden">
-          <div className={activeView === 'dashboard' ? 'h-full' : 'hidden h-full'}>
-            <DashboardView isActive={activeView === 'dashboard'} />
-          </div>
-          <div className={activeView === 'file' ? 'h-full' : 'hidden h-full'}>
-            <FileScannerView />
-          </div>
-          <div className={activeView === 'url' ? 'h-full' : 'hidden h-full'}>
-            <URLScannerView />
-          </div>
-          <div className={activeView === 'email' ? 'h-full' : 'hidden h-full'}>
-            <EmailScannerView />
-          </div>
-          <div className={activeView === 'hash' ? 'h-full' : 'hidden h-full'}>
-            <HashCheckerView />
-          </div>
-          {user?.is_admin && (
-            <div className={activeView === 'start' ? 'h-full' : 'hidden h-full'}>
-              <GatewayStartView />
-            </div>
-          )}
-          {user?.is_admin && (
-            <div className={activeView === 'audit' ? 'h-full' : 'hidden h-full'}>
-              <AuditLogsView />
-            </div>
-          )}
-          {user?.is_admin && (
-            <div className={activeView === 'access-control' ? 'h-full' : 'hidden h-full'}>
-              <AccessControlView />
-            </div>
-          )}
-          <div className={activeView === 'policies' ? 'h-full' : 'hidden h-full'}>
-            <PoliciesView />
-          </div>
-          <div className={activeView === 'settings' ? 'h-full' : 'hidden h-full'}>
-            <ParametersView />
-          </div>
+          <div className="h-full">{renderActiveView()}</div>
         </main>
       </div>
     </div>

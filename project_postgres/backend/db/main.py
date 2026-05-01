@@ -4,7 +4,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import or_, inspect, text
 from sqlalchemy.orm import Session
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Set
 from pydantic import BaseModel
 from collections import Counter, defaultdict, deque
 from email import policy
@@ -164,6 +164,45 @@ def _scope_matches_department_group(
     if scope_group and target_group != scope_group:
         return False
     return True
+
+
+def _scoped_user_ids(db: Session, current_user: User) -> Set[int]:
+    query = db.query(User.id)
+    scope = _admin_scope(current_user)
+    scope_department = str(scope.get("department") or "").strip()
+    scope_group = str(scope.get("group_name") or "").strip()
+    if scope_department:
+        query = query.filter(User.department == scope_department)
+    if scope_group:
+        query = query.filter(User.group_name == scope_group)
+    return {int(row.id) for row in query.all()}
+
+
+def _scoped_system_event_matches(current_user: User, action: Optional[str], details: Optional[str]) -> bool:
+    scope = _admin_scope(current_user)
+    scope_department = str(scope.get("department") or "").strip().lower()
+    scope_group = str(scope.get("group_name") or "").strip().lower()
+    haystack = f"{action or ''} {details or ''}".lower()
+    if not haystack.strip():
+        return False
+    if scope_department and scope_department not in haystack:
+        return False
+    if scope_group and scope_group not in haystack:
+        return False
+    return True
+
+
+def _audit_row_in_admin_scope(
+    *,
+    current_user: User,
+    visible_user_ids: Set[int],
+    user_id: Optional[int],
+    action: Optional[str],
+    details: Optional[str],
+) -> bool:
+    if user_id is not None:
+        return int(user_id) in visible_user_ids
+    return _scoped_system_event_matches(current_user, action, details)
 
 
 def _backfill_app_history_from_audit_logs() -> None:
@@ -7251,13 +7290,25 @@ async def get_audit_logs(
     """Get audit logs with role-based access control"""
     try:
         query = db.query(AuditLog)
+        visible_user_ids: Set[int] = set()
 
-        # Apply user filter based on role
         if current_user.is_admin:
+            visible_user_ids = _scoped_user_ids(db, current_user)
             if target_user_id is not None:
+                if int(target_user_id) not in visible_user_ids:
+                    return []
                 query = query.filter(AuditLog.user_id == target_user_id)
+            else:
+                if visible_user_ids:
+                    query = query.filter(
+                        or_(
+                            AuditLog.user_id.in_(visible_user_ids),
+                            AuditLog.user_id.is_(None),
+                        )
+                    )
+                else:
+                    query = query.filter(AuditLog.user_id.is_(None))
         else:
-            # Non-admin sees only their own logs
             query = query.filter(AuditLog.user_id == current_user.id)
 
         # Apply other filters
@@ -7287,7 +7338,19 @@ async def get_audit_logs(
         else:
             query = query.order_by(sort_column.asc())
 
-        logs = query.limit(limit).all()
+        fetch_limit = limit if not current_user.is_admin or target_user_id is not None else min(max(limit * 5, limit), 5000)
+        logs = query.limit(fetch_limit).all()
+        if current_user.is_admin and target_user_id is None:
+            logs = [
+                row for row in logs
+                if _audit_row_in_admin_scope(
+                    current_user=current_user,
+                    visible_user_ids=visible_user_ids,
+                    user_id=row.user_id,
+                    action=row.action,
+                    details=row.details,
+                )
+            ][:limit]
         user_ids = sorted({l.user_id for l in logs if l.user_id is not None})
         user_email_map: Dict[int, str] = {}
         if user_ids:
@@ -7330,10 +7393,24 @@ async def get_app_history(
 ):
     try:
         query = db.query(AppHistoryEvent)
+        visible_user_ids: Set[int] = set()
 
         if current_user.is_admin:
+            visible_user_ids = _scoped_user_ids(db, current_user)
             if target_user_id is not None:
+                if int(target_user_id) not in visible_user_ids:
+                    return []
                 query = query.filter(AppHistoryEvent.user_id == target_user_id)
+            else:
+                if visible_user_ids:
+                    query = query.filter(
+                        or_(
+                            AppHistoryEvent.user_id.in_(visible_user_ids),
+                            AppHistoryEvent.user_id.is_(None),
+                        )
+                    )
+                else:
+                    query = query.filter(AppHistoryEvent.user_id.is_(None))
         else:
             query = query.filter(AppHistoryEvent.user_id == current_user.id)
 
@@ -7348,7 +7425,19 @@ async def get_app_history(
             end = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
             query = query.filter(AppHistoryEvent.created_at <= end)
 
-        rows = query.order_by(AppHistoryEvent.created_at.desc()).limit(limit).all()
+        fetch_limit = limit if not current_user.is_admin or target_user_id is not None else min(max(limit * 5, limit), 5000)
+        rows = query.order_by(AppHistoryEvent.created_at.desc()).limit(fetch_limit).all()
+        if current_user.is_admin and target_user_id is None:
+            rows = [
+                row for row in rows
+                if _audit_row_in_admin_scope(
+                    current_user=current_user,
+                    visible_user_ids=visible_user_ids,
+                    user_id=row.user_id,
+                    action=row.title,
+                    details=row.details,
+                )
+            ][:limit]
         user_ids = sorted({row.user_id for row in rows if row.user_id is not None})
         user_email_map: Dict[int, str] = {}
         if user_ids:

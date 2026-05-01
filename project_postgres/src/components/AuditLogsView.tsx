@@ -333,7 +333,7 @@ function fieldToneClass(field: ParsedDetailField): string {
 }
 
 export function AuditLogsView() {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [viewMode, setViewMode] = useState<AuditViewMode>("audit");
   const [loading, setLoading] = useState(true);
@@ -344,6 +344,7 @@ export function AuditLogsView() {
   const [stats, setStats] = useState<ProxyStats | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [actionFilter, setActionFilter] = useState("all");
+  const [userFilter, setUserFilter] = useState("all");
   const [verdictFilter, setVerdictFilter] = useState<VerdictFilter>("all");
   const [dateFilter, setDateFilter] = useState("");
   const [showDevicesPage, setShowDevicesPage] = useState(false);
@@ -470,6 +471,10 @@ export function AuditLogsView() {
         if (!parsed || now - parsed.getTime() > dayMs) return false;
       }
       if (actionFilter !== "all" && l.action !== actionFilter) return false;
+      if (userFilter !== "all") {
+        const logUserKey = l.user_id === null ? "system" : String(l.user_id);
+        if (logUserKey !== userFilter) return false;
+      }
       if (verdictFilter !== "all" && logVerdict(l) !== verdictFilter) return false;
       if (dateFilter && localDateValue(l.timestamp) !== dateFilter) return false;
       if (!searchTerm) return true;
@@ -483,15 +488,31 @@ export function AuditLogsView() {
         formatTimestamp(l.timestamp).toLowerCase().includes(s)
       );
     });
-  }, [logs, actionFilter, verdictFilter, dateFilter, searchTerm, viewMode]);
+  }, [logs, actionFilter, userFilter, verdictFilter, dateFilter, searchTerm, viewMode]);
 
   const uniqueActions = useMemo(() => Array.from(new Set(logs.map((l) => l.action))), [logs]);
+  const uniqueUsers = useMemo(() => {
+    const byKey = new Map<string, string>();
+    logs.forEach((log) => {
+      const key = log.user_id === null ? "system" : String(log.user_id);
+      if (!byKey.has(key)) byKey.set(key, displayUser(log));
+    });
+    return Array.from(byKey.entries()).sort((a, b) => a[1].localeCompare(b[1]));
+  }, [logs]);
+  const hasActiveFilters = Boolean(searchTerm || actionFilter !== "all" || userFilter !== "all" || verdictFilter !== "all" || dateFilter);
   const activeProxyDevices = useMemo(
     () => devices.filter((device) => Boolean(device.activity_online)).length,
     [devices]
   );
   const selectedDevice = useMemo(() => devices.find((d) => d.client_ip === selectedDeviceIp) || null, [devices, selectedDeviceIp]);
   const parsedDetails = useMemo(() => (detailsLog ? parseAuditDetails(detailsLog.details) : { fields: [], notes: [] }), [detailsLog]);
+  const isDepartmentAdmin = Boolean(user?.is_admin && user?.admin_department);
+  const scopeTypeLabel = isDepartmentAdmin ? "Department scope" : user?.admin_group ? "Group scope" : "Admin scope";
+  const scopeBadge = user?.department
+    ? isDepartmentAdmin
+      ? `${user.department} - Department admin`
+      : `${user.department} - ${user.group_name || "Group admin"}`
+    : "Missing admin scope";
   const scoreField = useMemo(
     () =>
       parsedDetails.fields.find((field) => {
@@ -724,11 +745,15 @@ export function AuditLogsView() {
           <h2 className="text-3xl font-bold text-white">{viewMode === "history" ? "History" : "Audit Logs"}</h2>
           <p className="text-slate-400">
             {viewMode === "history"
-              ? "Complete application history across recorded events."
-              : "Main audit view limited to the last 24 hours for faster review."}
+              ? "Application history filtered to the current admin scope."
+              : "Audit view filtered to the current admin scope and limited to the last 24 hours for faster review."}
           </p>
         </div>
         <div className="flex items-center gap-3">
+          <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-sm text-cyan-300">
+            <span className="mr-2 text-cyan-200/70">{scopeTypeLabel}</span>
+            {scopeBadge}
+          </div>
           <div className="rounded-xl border border-slate-700 bg-slate-800/70 p-1">
             <button
               type="button"
@@ -781,7 +806,20 @@ export function AuditLogsView() {
       {gatewayError && <p className="mb-6 shrink-0 text-sm text-amber-300">{gatewayError}</p>}
 
       <div className="mb-6 shrink-0 rounded-xl border border-slate-700 bg-slate-800/50 p-4 space-y-4">
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+        <div className="flex flex-col gap-2 border-b border-slate-700/70 pb-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <p className="text-sm font-semibold text-slate-200">Visible audit perimeter</p>
+            <p className="text-xs text-slate-400">
+              {isDepartmentAdmin
+                ? `Showing events linked to users and system activity inside ${user?.department || "the department"}.`
+                : `Showing events linked to ${user?.group_name || "the current group"} inside ${user?.department || "the department"}.`}
+            </p>
+          </div>
+          <p className="text-xs text-slate-500">
+            {filteredLogs.length} visible / {logs.length} loaded
+          </p>
+        </div>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
             <input value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="Search action, details, user, timestamp" className="w-full pl-10 pr-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white" />
@@ -790,12 +828,30 @@ export function AuditLogsView() {
             <option value="all">All Actions</option>
             {uniqueActions.map((a) => <option key={a} value={a}>{a}</option>)}
           </select>
+          <select value={userFilter} onChange={(e) => setUserFilter(e.target.value)} className="px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white">
+            <option value="all">All Users</option>
+            {uniqueUsers.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+          </select>
           <select value={verdictFilter} onChange={(e) => setVerdictFilter(e.target.value as VerdictFilter)} className="px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white">
             <option value="all">All Verdicts</option>
             <option value="blocked">Blocked</option>
             <option value="allowed">Allowed</option>
           </select>
           <input type="date" value={dateFilter} onChange={(e) => setDateFilter(e.target.value)} className="px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white" />
+          <button
+            type="button"
+            disabled={!hasActiveFilters}
+            onClick={() => {
+              setSearchTerm("");
+              setActionFilter("all");
+              setUserFilter("all");
+              setVerdictFilter("all");
+              setDateFilter("");
+            }}
+            className="rounded-lg border border-slate-600 bg-slate-900/50 px-4 py-2 text-sm text-slate-200 transition hover:border-cyan-500/50 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Reset Filters
+          </button>
         </div>
       </div>
 

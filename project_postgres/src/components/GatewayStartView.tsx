@@ -157,20 +157,6 @@ type ProxyUsageStatsPayload = {
   daily_stats: ProxyUsageDailyRow[];
 };
 
-type EmployeeSlot = {
-  key: string;
-  id: number | null;
-  name: string;
-  email: string | null;
-  sex: string | null;
-  department: string;
-  group_name: string;
-  joinedAt: string | null;
-  state: 'registered' | 'placeholder';
-};
-
-const EXPECTED_GROUP_EMPLOYEES = 3;
-
 const isDepartmentAdminUser = (user?: { is_admin?: boolean; admin_department?: boolean } | null) =>
   Boolean(user?.is_admin && user?.admin_department);
 
@@ -559,6 +545,12 @@ export function GatewayStartView() {
   const adminGroup = user?.group_name || '';
   const departmentAdmin = isDepartmentAdminUser(user);
   const scopeGroup = departmentAdmin ? '' : adminGroup;
+  const scopeTitle = departmentAdmin ? 'Department scope' : 'Group scope';
+  const scopeLabel = adminDepartment
+    ? departmentAdmin
+      ? `${adminDepartment} - all groups`
+      : `${adminDepartment} - ${adminGroup || 'missing group'}`
+    : 'Missing admin scope';
 
   const realEmployees = useMemo(() => {
     if (!adminDepartment) return [];
@@ -570,7 +562,6 @@ export function GatewayStartView() {
     );
   }, [adminDepartment, scopeGroup, users]);
 
-  const expectedEmployees = departmentAdmin ? realEmployees.length || 0 : EXPECTED_GROUP_EMPLOYEES;
   const departmentGroupCount = useMemo(
     () => new Set(realEmployees.map((entry) => (entry.group_name || '').trim()).filter(Boolean)).size,
     [realEmployees],
@@ -579,39 +570,6 @@ export function GatewayStartView() {
     () => new Set((proxyUsageStats?.group_stats || []).filter((item) => item.request_count > 0).map((item) => item.group_name)).size,
     [proxyUsageStats],
   );
-
-  const employeeSlots = useMemo<EmployeeSlot[]>(() => {
-    const registered = realEmployees.map((entry) => ({
-      key: `user-${entry.id}`,
-      id: entry.id,
-      name: formatName(entry),
-      email: entry.email,
-      sex: entry.sex || null,
-      department: entry.department || adminDepartment,
-      group_name: entry.group_name || scopeGroup,
-      joinedAt: entry.created_at,
-      state: 'registered' as const,
-    }));
-
-    if (departmentAdmin) {
-      return registered;
-    }
-
-    const missing = Math.max(0, expectedEmployees - registered.length);
-    const placeholders = Array.from({ length: missing }, (_, index) => ({
-      key: `placeholder-${index + 1}`,
-      id: null,
-      name: `Employee Slot ${index + 1}`,
-      email: null,
-      sex: null,
-      department: adminDepartment,
-      group_name: scopeGroup,
-      joinedAt: null,
-      state: 'placeholder' as const,
-    }));
-
-    return [...registered, ...placeholders];
-  }, [adminDepartment, expectedEmployees, realEmployees, scopeGroup]);
 
   const employeeIds = useMemo(
     () => new Set(realEmployees.map((entry) => entry.id)),
@@ -690,6 +648,11 @@ export function GatewayStartView() {
     () => realEmployees.filter((entry) => isProxyConnected(latestSessionByUser.get(entry.id))).length,
     [latestSessionByUser, realEmployees],
   );
+  const activeSessionEmployees = useMemo(
+    () => realEmployees.filter((entry) => Boolean(latestSessionByUser.get(entry.id)?.online)).length,
+    [latestSessionByUser, realEmployees],
+  );
+  const membersWithProxyActivity = proxyUsageStats?.group_summary.unique_members ?? 0;
 
   const suspiciousCount = useMemo(
     () =>
@@ -784,11 +747,8 @@ export function GatewayStartView() {
             </p>
           </div>
           <div className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-sm text-cyan-300">
-            {adminDepartment
-              ? departmentAdmin
-                ? `${adminDepartment} · Department admin`
-                : `${adminDepartment} · ${adminGroup}`
-              : 'Missing admin scope'}
+            <span className="mr-2 text-cyan-200/70">{scopeTitle}</span>
+            {scopeLabel}
           </div>
         </div>
 
@@ -798,28 +758,48 @@ export function GatewayStartView() {
           </div>
         ) : null}
 
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+          <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4">
+            <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Visible scope</p>
+            <p className="mt-2 text-lg font-semibold text-white">{scopeLabel}</p>
+            <p className="mt-1 text-xs text-slate-400">
+              {departmentAdmin ? 'This admin can review all non-admin users in the department.' : 'This admin can review only the selected group.'}
+            </p>
+          </div>
+          <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4">
+            <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Members visible</p>
+            <p className="mt-2 text-lg font-semibold text-white">{realEmployees.length}</p>
+            <p className="mt-1 text-xs text-slate-400">Registered non-admin accounts matching this scope.</p>
+          </div>
+          <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4">
+            <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Data sources</p>
+            <p className="mt-2 text-lg font-semibold text-white">Sessions, proxy, scans</p>
+            <p className="mt-1 text-xs text-slate-400">Monitoring cards are built from backend-filtered scoped data.</p>
+          </div>
+        </div>
+
         <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
           <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4">
             <div className="mb-2 flex items-center justify-between">
-              <p className="text-sm text-slate-400">{departmentAdmin ? 'Groups in Department' : 'Expected Employees'}</p>
+              <p className="text-sm text-slate-400">{departmentAdmin ? 'Groups in Department' : 'Members in Group'}</p>
               <Users className="h-5 w-5 text-cyan-400" />
             </div>
-            <p className="text-3xl font-bold text-white">{departmentAdmin ? departmentGroupCount : expectedEmployees}</p>
+            <p className="text-3xl font-bold text-white">{departmentAdmin ? departmentGroupCount : realEmployees.length}</p>
           </div>
           <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4">
             <div className="mb-2 flex items-center justify-between">
-              <p className="text-sm text-slate-400">{departmentAdmin ? 'Registered Members' : 'Registered Employees'}</p>
+              <p className="text-sm text-slate-400">{departmentAdmin ? 'Registered Members' : 'Members with Activity'}</p>
               <UserCheck className="h-5 w-5 text-emerald-400" />
             </div>
-            <p className="text-3xl font-bold text-white">{realEmployees.length}</p>
+            <p className="text-3xl font-bold text-white">{departmentAdmin ? realEmployees.length : membersWithProxyActivity}</p>
           </div>
           <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4">
             <div className="mb-2 flex items-center justify-between">
-              <p className="text-sm text-slate-400">{departmentAdmin ? 'Groups with Activity' : 'Open Slots'}</p>
+              <p className="text-sm text-slate-400">{departmentAdmin ? 'Groups with Activity' : 'Active Sessions'}</p>
               <UserPlus className="h-5 w-5 text-amber-400" />
             </div>
             <p className="text-3xl font-bold text-white">
-              {departmentAdmin ? groupsWithActivityCount : Math.max(0, expectedEmployees - realEmployees.length)}
+              {departmentAdmin ? groupsWithActivityCount : activeSessionEmployees}
             </p>
           </div>
           <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4">
@@ -868,7 +848,7 @@ export function GatewayStartView() {
                   <p className="mt-1 text-sm text-slate-400">
                     {departmentAdmin
                       ? 'Built from the employees registered in the current admin department.'
-                      : 'Built from the employees registered in the current admin group.'}
+                      : 'Built from the employees and proxy activity currently visible in the admin group scope.'}
                   </p>
                 </div>
                 <div className="flex flex-col items-end gap-2">
@@ -893,9 +873,9 @@ export function GatewayStartView() {
                   <p className="mt-3 text-lg font-semibold text-amber-300">{suspiciousCount}</p>
                 </div>
                 <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                  <p className="text-sm text-slate-400">Registered vs Expected</p>
+                  <p className="text-sm text-slate-400">{departmentAdmin ? 'Registered Members' : 'Members Connected to Proxy'}</p>
                   <p className="mt-3 text-lg font-semibold text-white">
-                    {departmentAdmin ? `${realEmployees.length} total member(s)` : `${realEmployees.length} / ${expectedEmployees}`}
+                    {departmentAdmin ? `${realEmployees.length} total member(s)` : `${proxyConnectedEmployees} connected member(s)`}
                   </p>
                 </div>
               </div>
@@ -1162,25 +1142,22 @@ export function GatewayStartView() {
               </div>
 
               <div className="mt-6">
-                <h4 className="mb-3 text-lg font-semibold text-white">{departmentAdmin ? 'Department Members' : 'Employee Slots'}</h4>
-                <div className="space-y-3">
-                  {employeeSlots.map((entry) => {
-                    const latestSession = entry.id ? latestSessionByUser.get(entry.id) : undefined;
+                <h4 className="mb-3 text-lg font-semibold text-white">{departmentAdmin ? 'Department Members' : 'Group Members'}</h4>
+                {realEmployees.length ? (
+                  <div className="space-y-3">
+                    {realEmployees.map((entry) => {
+                    const latestSession = latestSessionByUser.get(entry.id);
                     const status = connectionSummary(latestSession);
                     return (
                       <div
-                        key={entry.key}
-                        className={`rounded-xl border p-4 ${
-                          entry.state === 'registered'
-                            ? 'border-slate-700 bg-slate-900/50'
-                            : 'border-dashed border-slate-700 bg-slate-950/35'
-                        }`}
+                        key={`overview-member-${entry.id}`}
+                        className="rounded-xl border border-slate-700 bg-slate-900/50 p-4"
                       >
                         <div className="flex items-start justify-between gap-4">
                           <div>
-                            <p className="text-base font-semibold text-white">{entry.name}</p>
+                            <p className="text-base font-semibold text-white">{formatName(entry)}</p>
                             <p className="mt-1 text-sm text-slate-400">
-                              {entry.email || 'Waiting for first employee login'}
+                              {entry.email}
                             </p>
                             {latestSession ? (
                               <p className={`mt-2 text-xs ${status.tone}`}>
@@ -1189,21 +1166,20 @@ export function GatewayStartView() {
                             ) : null}
                           </div>
                           <span
-                            className={`rounded-full border px-3 py-1 text-xs font-semibold ${
-                              entry.state !== 'registered'
-                                ? 'border-slate-700 bg-slate-800/70 text-slate-400'
-                                : status.badgeClass
-                            }`}
+                            className={`rounded-full border px-3 py-1 text-xs font-semibold ${status.badgeClass}`}
                           >
-                            {entry.state !== 'registered'
-                              ? 'Placeholder'
-                              : status.badge}
+                            {status.badge}
                           </span>
                         </div>
                       </div>
                     );
-                  })}
-                </div>
+                    })}
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/35 p-5 text-sm text-slate-400">
+                    No registered members were found in the current admin scope yet.
+                  </div>
+                )}
               </div>
             </div>
 
@@ -1253,7 +1229,7 @@ export function GatewayStartView() {
             <div className="mb-5 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
               <div>
                 <h3 className="text-xl font-bold text-white">
-                  {departmentAdmin ? 'Groups in SSI Department' : 'Employees in Current Group'}
+                  {departmentAdmin ? `Groups in ${adminDepartment || 'Department'}` : 'Employees in Current Group'}
                 </h3>
                 <p className="mt-1 text-sm text-slate-400">
                   {departmentAdmin
@@ -1349,49 +1325,34 @@ export function GatewayStartView() {
                   </div>
                 )
               ) : (
-                employeeSlots.map((entry) => {
-                  const scanCount = entry.id ? scanCountByUser.get(entry.id) || 0 : 0;
-                  const latestSession = entry.id ? latestSessionByUser.get(entry.id) : undefined;
+                realEmployees.length ? realEmployees.map((entry) => {
+                  const scanCount = scanCountByUser.get(entry.id) || 0;
+                  const latestSession = latestSessionByUser.get(entry.id);
                   const status = connectionSummary(latestSession);
-                  const usageStats = entry.id ? memberUsageById.get(entry.id) : undefined;
+                  const usageStats = memberUsageById.get(entry.id);
                   return (
                     <button
-                      key={entry.key}
+                      key={`employee-card-${entry.id}`}
                       type="button"
-                      disabled={entry.state !== 'registered' || !entry.id}
                       onClick={() => {
-                        if (entry.id) {
-                          setSelectedMemberId(entry.id);
-                          setActivePanel('person-detail');
-                        }
+                        setSelectedMemberId(entry.id);
+                        setActivePanel('person-detail');
                       }}
-                      className={`rounded-xl border p-5 text-left transition ${
-                        entry.state === 'registered'
-                          ? 'border-slate-700 bg-slate-900/50 hover:border-cyan-500/40 hover:bg-slate-900/70'
-                          : 'border-dashed border-slate-700 bg-slate-950/35'
-                      }`}
+                      className="rounded-xl border border-slate-700 bg-slate-900/50 p-5 text-left transition hover:border-cyan-500/40 hover:bg-slate-900/70"
                     >
                       <div className="flex items-start justify-between gap-4">
                         <div>
-                          <p className="text-lg font-semibold text-white">{entry.name}</p>
+                          <p className="text-lg font-semibold text-white">{formatName(entry)}</p>
                           <p className="mt-1 text-sm text-slate-400">
-                            {entry.email || 'Reserved employee slot'}
+                            {entry.email}
                           </p>
                         </div>
                         <div className="flex flex-col items-end gap-2">
                           <span className="rounded-full border border-slate-700 bg-slate-800/70 px-3 py-1 text-xs text-slate-300">
-                            {entry.department || '-'}
+                            {entry.department || adminDepartment || '-'}
                           </span>
-                          <span
-                            className={`rounded-full border px-3 py-1 text-xs font-semibold ${
-                              entry.state !== 'registered'
-                                ? 'border-slate-700 bg-slate-800/70 text-slate-400'
-                                : status.badgeClass
-                            }`}
-                          >
-                            {entry.state !== 'registered'
-                              ? 'Placeholder'
-                              : status.badge}
+                          <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${status.badgeClass}`}>
+                            {status.badge}
                           </span>
                         </div>
                       </div>
@@ -1417,11 +1378,11 @@ export function GatewayStartView() {
                         </div>
                         <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
                           <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Sex</p>
-                          <p className="mt-2 text-sm font-medium text-slate-200">{entry.sex || 'Pending'}</p>
+                          <p className="mt-2 text-sm font-medium text-slate-200">{entry.sex || 'Not set'}</p>
                         </div>
                         <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
                           <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Joined</p>
-                          <p className="mt-2 text-sm font-medium text-slate-200">{formatDate(entry.joinedAt)}</p>
+                          <p className="mt-2 text-sm font-medium text-slate-200">{formatDate(entry.created_at)}</p>
                         </div>
                         <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
                           <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Device</p>
@@ -1438,9 +1399,7 @@ export function GatewayStartView() {
                         <div className="col-span-2 rounded-lg border border-slate-700 bg-slate-950/50 p-3">
                           <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Connection Status</p>
                           <p className={`mt-2 text-sm font-medium ${status.tone}`}>
-                            {entry.state !== 'registered'
-                              ? 'This employee slot is still empty.'
-                              : status.label}
+                            {status.label}
                           </p>
                         </div>
                         <div className="col-span-2 rounded-lg border border-slate-700 bg-slate-950/50 p-3">
@@ -1462,7 +1421,7 @@ export function GatewayStartView() {
                                 {usageStats.top_sites.length ? (
                                   usageStats.top_sites.map((site) => (
                                     <div
-                                      key={`${entry.key}-${site.host}`}
+                                      key={`${entry.id}-${site.host}`}
                                       className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2"
                                     >
                                       <div className="flex items-center justify-between gap-3">
@@ -1490,7 +1449,11 @@ export function GatewayStartView() {
                       </div>
                     </button>
                   );
-                })
+                }) : (
+                  <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/35 p-5 text-sm text-slate-400">
+                    No members are registered in the current group scope yet.
+                  </div>
+                )
               )}
             </div>
           </div>

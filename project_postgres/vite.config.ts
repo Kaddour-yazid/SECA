@@ -7,16 +7,26 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: '0.0.0.0',
-    port: 8080,
-    strictPort: true,
-    hmr: {
-      clientPort: 8080,
+    port: 5173,
+    strictPort: false,
+    watch: {
+      ignored: [
+        '**/backend/**',
+        '**/desktop/**',
+        '**/desktop-release/**',
+        '**/docs/**',
+        '**/dist/**',
+        '**/.meilisearch-data/**',
+        '**/__pycache__/**',
+        '**/*.log',
+        '**/*.pyc',
+      ],
     },
   },
   preview: {
     host: '0.0.0.0',
-    port: 8080,
-    strictPort: true,
+    port: 5173,
+    strictPort: false,
   },
   optimizeDeps: {
     exclude: ['lucide-react'],
