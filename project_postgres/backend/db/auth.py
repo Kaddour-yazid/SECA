@@ -5,13 +5,14 @@ from typing import Optional
 
 import hashlib
 import hmac
+import ipaddress
 import os
 import re
 import secrets
 import smtplib
 import unicodedata
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
@@ -57,9 +58,9 @@ DEPARTMENT_GROUPS = {
         "label": "RXS",
         "groups": {
             "Infrastructure (Sauvegarde & Stockage)": "Infrastructure (Sauvegarde & Stockage)",
-            "Service Système (Messagerie, Identité & Accès)": "Service Système (Messagerie, Identité & Accès)",
-            "Service Interconnexion (Routage, Commutation & Sécurité Périmétrique)": "Service Interconnexion (Routage, Commutation & Sécurité Périmétrique)",
-            "Service Support (Matériel & Déploiement Logiciel)": "Service Support (Matériel & Déploiement Logiciel)",
+            "Service Syst??me (Messagerie, Identit?? & Acc??s)": "Service Syst??me (Messagerie, Identit?? & Acc??s)",
+            "Service Interconnexion (Routage, Commutation & S??curit?? P??rim??trique)": "Service Interconnexion (Routage, Commutation & S??curit?? P??rim??trique)",
+            "Service Support (Mat??riel & D??ploiement Logiciel)": "Service Support (Mat??riel & D??ploiement Logiciel)",
             "Service Data Center": "Service Data Center",
         },
     },
@@ -69,21 +70,37 @@ DEPARTMENT_GROUPS = {
             "Groupe GED": "Groupe GED",
             "Groupe Maintenance": "Groupe Maintenance",
             "Groupe DBA": "Groupe DBA",
-            "Groupe Développement": "Groupe Développement",
-            "Groupe Qualité": "Groupe Qualité",
-            "Groupe Décisionnel & Veille Technologique": "Groupe Décisionnel & Veille Technologique",
+            "Groupe D??veloppement": "Groupe D??veloppement",
+            "Groupe Qualit??": "Groupe Qualit??",
+            "Groupe D??cisionnel & Veille Technologique": "Groupe D??cisionnel & Veille Technologique",
         },
     },
     "SSI": {
         "label": "SSI",
         "groups": {
-            "Pôle SOC & Sécurité des Systèmes": "Sécurité des Systèmes",
-            "Pôle Sécurité Industrielle (OT)": "Sécurité Industrielle (OT)",
-            "Pôle Sécurité Applicative & Gouvernance": "Sécurité Applicative & Gouvernance",
-            "Sécurité des Systèmes": "Sécurité des Systèmes",
-            "Sécurité Industrielle (OT)": "Sécurité Industrielle (OT)",
-            "Sécurité Applicative & Gouvernance": "Sécurité Applicative & Gouvernance",
+            "S\u00e9curit\u00e9 des Syst\u00e8mes": "S\u00e9curit\u00e9 des Syst\u00e8mes",
+            "S\u00e9curit\u00e9 Industrielle (OT)": "S\u00e9curit\u00e9 Industrielle (OT)",
+            "S\u00e9curit\u00e9 Applicative & Gouvernance": "S\u00e9curit\u00e9 Applicative & Gouvernance",
         },
+    },
+}
+DEPARTMENT_GROUP_ALIASES = {
+    "SSI": {
+        "P\u00f4le SOC & S\u00e9curit\u00e9 des Syst\u00e8mes": "S\u00e9curit\u00e9 des Syst\u00e8mes",
+        "P\u00f4le S\u00e9curit\u00e9 Industrielle (OT)": "S\u00e9curit\u00e9 Industrielle (OT)",
+        "P\u00f4le S\u00e9curit\u00e9 Applicative & Gouvernance": "S\u00e9curit\u00e9 Applicative & Gouvernance",
+        "PÃ´le SOC & SÃ©curitÃ© des SystÃ¨mes": "S\u00e9curit\u00e9 des Syst\u00e8mes",
+        "PÃ´le SÃ©curitÃ© Industrielle (OT)": "S\u00e9curit\u00e9 Industrielle (OT)",
+        "PÃ´le SÃ©curitÃ© Applicative & Gouvernance": "S\u00e9curit\u00e9 Applicative & Gouvernance",
+        "P?le SOC & S?curit? des Syst?mes": "S\u00e9curit\u00e9 des Syst\u00e8mes",
+        "P?le S?curit? Industrielle (OT)": "S\u00e9curit\u00e9 Industrielle (OT)",
+        "P?le S?curit? Applicative & Gouvernance": "S\u00e9curit\u00e9 Applicative & Gouvernance",
+        "S??curit?? des Syst??mes": "S\u00e9curit\u00e9 des Syst\u00e8mes",
+        "S??curit?? Industrielle (OT)": "S\u00e9curit\u00e9 Industrielle (OT)",
+        "S??curit?? Applicative & Gouvernance": "S\u00e9curit\u00e9 Applicative & Gouvernance",
+        "S?curit? des Syst?mes": "S\u00e9curit\u00e9 des Syst\u00e8mes",
+        "S?curit? Industrielle (OT)": "S\u00e9curit\u00e9 Industrielle (OT)",
+        "S?curit? Applicative & Gouvernance": "S\u00e9curit\u00e9 Applicative & Gouvernance",
     },
 }
 DEPARTMENT_ALIASES = {
@@ -118,15 +135,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 
 def is_department_admin(user: Optional[models.User]) -> bool:
-    return bool(user and getattr(user, "is_admin", False) and getattr(user, "admin_department", False))
-
-
-def is_group_admin(user: Optional[models.User]) -> bool:
-    if not user or not getattr(user, "is_admin", False):
-        return False
-    if getattr(user, "admin_group", False):
-        return True
-    return not getattr(user, "admin_department", False)
+    return bool(user and getattr(user, "is_admin", False))
 
 
 def has_admin_access(user: Optional[models.User]) -> bool:
@@ -139,7 +148,6 @@ def serialize_user(user: models.User) -> dict:
         "email": user.email,
         "is_admin": bool(user.is_admin),
         "admin_department": is_department_admin(user),
-        "admin_group": is_group_admin(user),
         "role": user.role,
         "first_name": user.first_name,
         "last_name": user.last_name,
@@ -203,13 +211,42 @@ def _group_key(value: str) -> str:
     return normalized
 
 
-def _normalize_group_name(department: str, group_name: Optional[str]) -> str:
-    cleaned = _clean_profile_field(group_name, "Group", 160)
-    available = DEPARTMENT_GROUPS[department]["groups"]
+def canonicalize_group_name(department: Optional[str], group_name: Optional[str]) -> str:
+    department_key = str(department or "").strip().upper()
+    cleaned = str(group_name or "").strip()
+    if not cleaned:
+        return ""
+
+    aliases = DEPARTMENT_GROUP_ALIASES.get(department_key, {})
+    available = DEPARTMENT_GROUPS.get(department_key, {}).get("groups", {})
+    if cleaned in aliases:
+        return aliases[cleaned]
     if cleaned in available:
         return available[cleaned]
 
     cleaned_key = _group_key(cleaned)
+    for alias, canonical in aliases.items():
+        if _group_key(alias) == cleaned_key:
+            return canonical
+    for candidate, canonical in available.items():
+        if _group_key(candidate) == cleaned_key:
+            return canonical
+    return cleaned
+
+
+def _normalize_group_name(department: str, group_name: Optional[str]) -> str:
+    cleaned = _clean_profile_field(group_name, "Group", 160)
+    available = DEPARTMENT_GROUPS[department]["groups"]
+    aliases = DEPARTMENT_GROUP_ALIASES.get(department, {})
+    canonical = canonicalize_group_name(department, cleaned)
+    if canonical:
+        if canonical in aliases.values() or canonical in available.values():
+            return canonical
+
+    cleaned_key = _group_key(cleaned)
+    for alias, canonical in aliases.items():
+        if _group_key(alias) == cleaned_key:
+            return canonical
     for candidate, canonical in available.items():
         if _group_key(candidate) == cleaned_key:
             return canonical
@@ -240,6 +277,76 @@ def _generate_otp_code() -> str:
 def _record_auth_audit(db: Session, user_id: Optional[int], action: str, details: str) -> None:
     db.add(models.AuditLog(user_id=user_id, action=action, details=details))
     db.commit()
+
+
+def _request_client_ip(request: Optional[Request]) -> Optional[str]:
+    if request is None:
+        return None
+
+    forwarded_for = str(request.headers.get("x-forwarded-for") or "").strip()
+    if forwarded_for:
+        for candidate in forwarded_for.split(","):
+            normalized = str(candidate or "").strip()
+            if not normalized:
+                continue
+            try:
+                return ipaddress.ip_address(normalized).compressed
+            except ValueError:
+                continue
+
+    real_ip = str(request.headers.get("x-real-ip") or "").strip()
+    if real_ip:
+        try:
+            return ipaddress.ip_address(real_ip).compressed
+        except ValueError:
+            pass
+
+    if request.client and request.client.host:
+        try:
+            return ipaddress.ip_address(str(request.client.host).strip()).compressed
+        except ValueError:
+            return str(request.client.host).strip() or None
+    return None
+
+
+def _upsert_user_ip_assignment_from_request(
+    db: Session,
+    user: models.User,
+    request: Optional[Request],
+    source: str = "web-login",
+) -> Optional[str]:
+    client_ip = _request_client_ip(request)
+    if not client_ip:
+        return None
+
+    hostname = f"Web client ({client_ip})"
+    device_id = f"web-ip:{client_ip}"
+    assignment = (
+        db.query(models.UserIpAssignment)
+        .filter(models.UserIpAssignment.ip_address == client_ip)
+        .order_by(models.UserIpAssignment.last_seen.desc(), models.UserIpAssignment.id.desc())
+        .first()
+    )
+    now = datetime.utcnow()
+
+    if not assignment:
+        assignment = models.UserIpAssignment(
+            user_id=user.id,
+            device_id=device_id,
+            ip_address=client_ip,
+            first_seen=now,
+        )
+        db.add(assignment)
+
+    assignment.user_id = user.id
+    assignment.device_id = device_id
+    assignment.hostname = hostname
+    assignment.department = str(user.department or "").strip() or None
+    assignment.group_name = str(user.group_name or "").strip() or None
+    assignment.attribution_source = source
+    assignment.last_seen = now
+    db.commit()
+    return client_ip
 
 
 def _send_email_code(email: str, code: str, purpose: str) -> dict:
@@ -452,7 +559,6 @@ def register_verify_otp(payload: schemas.SignupOtpVerify, db: Session = Depends(
         group_name=otp.group_name,
         is_admin=False,
         admin_department=False,
-        admin_group=False,
         role="user",
     )
     db.add(new_user)
@@ -512,7 +618,7 @@ def password_reset_confirm(payload: schemas.PasswordResetConfirm, db: Session = 
 
 
 @router.post("/login")
-def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
+def login(user: schemas.UserLogin, request: Request, db: Session = Depends(get_db)):
     db_user = db.query(models.User).filter(models.User.email == _normalize_email(user.email)).first()
     if not db_user:
         raise HTTPException(status_code=401, detail="Invalid email or password")
@@ -524,6 +630,8 @@ def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
     if needs_rehash:
         db_user.password = hash_password(user.password)
         db.commit()
+
+    _upsert_user_ip_assignment_from_request(db, db_user, request, source="web-login")
 
     access_token = create_access_token(data={"sub": str(db_user.id)})
     return {
@@ -552,5 +660,10 @@ def require_admin(current_user: models.User = Depends(get_current_user)):
 
 
 @router.get("/me")
-def get_me(current_user: models.User = Depends(get_current_user)):
+def get_me(
+    request: Request,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _upsert_user_ip_assignment_from_request(db, current_user, request, source="web-session")
     return serialize_user(current_user)

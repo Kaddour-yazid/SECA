@@ -16,6 +16,7 @@ import { apiUrl } from '../config/api';
 
 type MonitoringTab = 'overview' | 'employees' | 'sessions' | 'person-detail' | 'group-detail';
 type MonitoringRange = 'day' | '3days' | 'week' | 'month';
+type EmployeeStatsMode = 'urls' | 'scans';
 
 type UserRow = {
   id: number;
@@ -28,7 +29,6 @@ type UserRow = {
   role?: string | null;
   is_admin: boolean;
   admin_department?: boolean;
-  admin_group?: boolean;
   created_at: string;
 };
 
@@ -39,6 +39,21 @@ type ScanRow = {
   target: string;
   status: string;
   created_at: string;
+};
+
+type ScanStatsSummary = {
+  total: number;
+  clean: number;
+  suspicious: number;
+  malicious: number;
+  static_count: number;
+  dynamic_count: number;
+  file_count: number;
+  url_count: number;
+  email_count: number;
+  hash_count: number;
+  other_count: number;
+  last_seen?: string | null;
 };
 
 type DesktopSessionRow = {
@@ -346,6 +361,83 @@ function SiteStatusBadges({ site }: { site: ProxyUsageSiteRow }) {
   );
 }
 
+const emptyScanStatsSummary = (): ScanStatsSummary => ({
+  total: 0,
+  clean: 0,
+  suspicious: 0,
+  malicious: 0,
+  static_count: 0,
+  dynamic_count: 0,
+  file_count: 0,
+  url_count: 0,
+  email_count: 0,
+  hash_count: 0,
+  other_count: 0,
+  last_seen: null,
+});
+
+const buildScanStatsSummary = (rows: ScanRow[]): ScanStatsSummary => {
+  const summary = emptyScanStatsSummary();
+  for (const row of rows) {
+    const type = String(row.scan_type || '').toLowerCase();
+    const status = String(row.status || '').toLowerCase();
+    summary.total += 1;
+    if (status === 'clean') summary.clean += 1;
+    else if (status === 'suspicious') summary.suspicious += 1;
+    else if (status === 'malicious') summary.malicious += 1;
+
+    if (type.includes('dynamic')) summary.dynamic_count += 1;
+    else summary.static_count += 1;
+
+    if (type.includes('file')) summary.file_count += 1;
+    else if (type.includes('url')) summary.url_count += 1;
+    else if (type.includes('email') || type.includes('mail')) summary.email_count += 1;
+    else if (type.includes('hash')) summary.hash_count += 1;
+    else summary.other_count += 1;
+
+    if (row.created_at && (!summary.last_seen || new Date(row.created_at).getTime() > new Date(summary.last_seen).getTime())) {
+      summary.last_seen = row.created_at;
+    }
+  }
+  return summary;
+};
+
+const scanStatusBadgeClass = (status?: string | null) => {
+  const normalized = String(status || '').toLowerCase();
+  if (normalized === 'malicious') return 'border-red-500/30 bg-red-500/10 text-red-300';
+  if (normalized === 'suspicious') return 'border-amber-500/30 bg-amber-500/10 text-amber-300';
+  return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
+};
+
+const scanTypeLabel = (type?: string | null) => {
+  const normalized = String(type || '').trim();
+  if (!normalized) return 'Unknown scan';
+  return normalized
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+};
+
+function ScanStatsBadges({ summary }: { summary: ScanStatsSummary }) {
+  return (
+    <div className="mt-2 flex flex-wrap gap-2 text-xs">
+      <span className="rounded-full border border-slate-700 bg-slate-800/70 px-2.5 py-1 text-slate-300">
+        Total {summary.total}
+      </span>
+      <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-emerald-300">
+        Clean {summary.clean}
+      </span>
+      <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-amber-300">
+        Suspicious {summary.suspicious}
+      </span>
+      <span className="rounded-full border border-rose-500/30 bg-rose-500/10 px-2.5 py-1 text-rose-300">
+        Malicious {summary.malicious}
+      </span>
+    </div>
+  );
+}
+
 const formatProxyEndpoint = (host?: string | null, port?: number | null) => {
   const normalizedHost = (host || '').trim();
   if (!normalizedHost) return 'Not detected';
@@ -440,6 +532,7 @@ export function GatewayStartView() {
   const { translateText } = useLanguage();
   const [activePanel, setActivePanel] = useState<MonitoringTab>('overview');
   const [activeRange, setActiveRange] = useState<MonitoringRange>('week');
+  const [employeeStatsMode, setEmployeeStatsMode] = useState<EmployeeStatsMode>('urls');
   const [users, setUsers] = useState<UserRow[]>([]);
   const [scanRows, setScanRows] = useState<ScanRow[]>([]);
   const [desktopSessions, setDesktopSessions] = useState<DesktopSessionRow[]>([]);
@@ -576,9 +669,23 @@ export function GatewayStartView() {
     [realEmployees],
   );
 
+  const rangeDays = useMemo(() => {
+    if (activeRange === 'day') return 1;
+    if (activeRange === '3days') return 3;
+    if (activeRange === 'month') return 30;
+    return 7;
+  }, [activeRange]);
+
   const groupScans = useMemo(
-    () => scanRows.filter((row) => row.user_id && employeeIds.has(row.user_id)),
-    [scanRows, employeeIds],
+    () => {
+      const cutoff = Date.now() - rangeDays * 24 * 60 * 60 * 1000;
+      return scanRows.filter((row) => {
+        if (!row.user_id || !employeeIds.has(row.user_id)) return false;
+        const ts = new Date(row.created_at).getTime();
+        return Number.isFinite(ts) && ts >= cutoff;
+      });
+    },
+    [scanRows, employeeIds, rangeDays],
   );
 
   const sortedGroupScans = useMemo(
@@ -589,14 +696,37 @@ export function GatewayStartView() {
     [groupScans],
   );
 
-  const scanCountByUser = useMemo(() => {
-    const counts = new Map<number, number>();
+  const scanStatsByUser = useMemo(() => {
+    const grouped = new Map<number, ScanRow[]>();
     for (const row of groupScans) {
       if (!row.user_id) continue;
-      counts.set(row.user_id, (counts.get(row.user_id) || 0) + 1);
+      const existing = grouped.get(row.user_id) || [];
+      existing.push(row);
+      grouped.set(row.user_id, existing);
     }
-    return counts;
+    const next = new Map<number, ScanStatsSummary>();
+    for (const [userId, rows] of grouped.entries()) {
+      next.set(userId, buildScanStatsSummary(rows));
+    }
+    return next;
   }, [groupScans]);
+
+  const scanStatsByGroup = useMemo(() => {
+    const grouped = new Map<string, ScanRow[]>();
+    for (const row of groupScans) {
+      const owner = row.user_id != null ? realEmployees.find((entry) => entry.id === row.user_id) : null;
+      const groupName = (owner?.group_name || '').trim();
+      if (!groupName) continue;
+      const existing = grouped.get(groupName) || [];
+      existing.push(row);
+      grouped.set(groupName, existing);
+    }
+    const next = new Map<string, ScanStatsSummary>();
+    for (const [groupName, rows] of grouped.entries()) {
+      next.set(groupName, buildScanStatsSummary(rows));
+    }
+    return next;
+  }, [groupScans, realEmployees]);
 
   const latestSessionByUser = useMemo(() => {
     const next = new Map<number, DesktopSessionRow>();
@@ -697,7 +827,9 @@ export function GatewayStartView() {
   const selectedMemberUsage = selectedMemberId != null ? memberUsageById.get(selectedMemberId) ?? null : null;
   const selectedMemberUser = selectedMemberId != null ? realEmployees.find((entry) => entry.id === selectedMemberId) ?? null : null;
   const selectedMemberSession = selectedMemberId != null ? latestSessionByUser.get(selectedMemberId) : undefined;
+  const selectedMemberScanStats = selectedMemberId != null ? scanStatsByUser.get(selectedMemberId) || emptyScanStatsSummary() : emptyScanStatsSummary();
   const selectedGroupUsage = selectedGroupName ? groupUsageByName.get(selectedGroupName) ?? null : null;
+  const selectedGroupScanStats = selectedGroupName ? scanStatsByGroup.get(selectedGroupName) || emptyScanStatsSummary() : emptyScanStatsSummary();
   const personDetailBackTarget: MonitoringTab = departmentAdmin && selectedGroupName ? 'group-detail' : 'employees';
   const personDetailBackLabel = departmentAdmin && selectedGroupName ? 'Back to Group' : 'Back to Employees';
   const selectedGroupMembers = useMemo(
@@ -706,6 +838,17 @@ export function GatewayStartView() {
       : [],
     [realEmployees, selectedGroupName],
   );
+  const selectedMemberScans = useMemo(
+    () => selectedMemberId != null ? sortedGroupScans.filter((row) => row.user_id === selectedMemberId) : [],
+    [selectedMemberId, sortedGroupScans],
+  );
+  const selectedGroupScans = useMemo(() => {
+    if (!selectedGroupName) return [];
+    const memberIds = new Set(selectedGroupMembers.map((entry) => entry.id));
+    return sortedGroupScans.filter((row) => row.user_id != null && memberIds.has(row.user_id));
+  }, [selectedGroupMembers, selectedGroupName, sortedGroupScans]);
+  const canShowPersonDetail = employeeStatsMode === 'urls' ? Boolean(selectedMemberUsage) : Boolean(selectedMemberUser);
+  const canShowGroupDetail = employeeStatsMode === 'urls' ? Boolean(selectedGroupUsage) : Boolean(selectedGroupName);
 
   const renderRangeSwitcher = () => (
     <div className="flex flex-wrap gap-2">
@@ -1003,78 +1146,7 @@ export function GatewayStartView() {
                 </div>
               </div>
 
-              <div className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-2">
-                <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                  <div className="mb-4 flex items-center gap-2">
-                    <Users className="h-5 w-5 text-cyan-300" />
-                    <h4 className="text-lg font-semibold text-white">Usage by Person</h4>
-                  </div>
-                  {proxyUsageStats?.member_stats?.length ? (
-                    <div className="gateway-panel-scroll space-y-3">
-                      {proxyUsageStats.member_stats.map((member) => (
-                        <button
-                          key={`${member.user_id ?? member.email ?? member.name}`}
-                          type="button"
-                          disabled={member.user_id == null}
-                          onClick={() => {
-                            if (member.user_id != null) {
-                              setSelectedMemberId(member.user_id);
-                              setActivePanel('person-detail');
-                            }
-                          }}
-                          className="w-full rounded-lg border border-slate-700 bg-slate-950/50 p-3 text-left transition hover:border-cyan-500/40 hover:bg-slate-900/70 disabled:cursor-default"
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <p className="truncate text-sm font-semibold text-white">{member.name}</p>
-                              <p className="mt-1 text-xs text-slate-400">
-                                {member.email || 'No email'} · Last seen {formatDateTime(member.last_seen || null)}
-                              </p>
-                            </div>
-                            <div className="text-right">
-                              <p className="text-lg font-bold text-white">{member.request_count}</p>
-                              <p className="text-xs text-slate-500">requests</p>
-                            </div>
-                          </div>
-                          <div className="mt-3 flex flex-wrap gap-2 text-xs">
-                            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-emerald-300">
-                              Allowed {member.allowed_count}
-                            </span>
-                            <span className="rounded-full border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-red-300">
-                              Blocked {member.blocked_count}
-                            </span>
-                            <span className="rounded-full border border-slate-700 bg-slate-800/70 px-2.5 py-1 text-slate-300">
-                              Unique sites {member.unique_sites}
-                            </span>
-                          </div>
-                          <div className="mt-3 space-y-2">
-                            {member.top_sites.length ? (
-                              member.top_sites.slice(0, 10).map((site) => (
-                                <div
-                                  key={`${member.name}-${site.host}`}
-                                  className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2"
-                                >
-                                  <div className="flex items-center justify-between gap-3">
-                                    <SiteIdentity host={site.host} compact />
-                                    <span className="text-xs font-semibold text-cyan-300">{site.request_count} hit(s)</span>
-                                  </div>
-                                  <SiteStatusBadges site={site} />
-                                </div>
-                              ))
-                            ) : (
-                              <p className="text-sm text-slate-400">No site activity yet.</p>
-                            )}
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/35 p-5 text-sm text-slate-400">
-                      No member usage data in the selected window.
-                    </div>
-                  )}
-                </div>
-
+              <div className="mt-6">
                 <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
                   <div className="mb-4 flex items-center gap-2">
                     <Briefcase className="h-5 w-5 text-cyan-300" />
@@ -1140,47 +1212,6 @@ export function GatewayStartView() {
                   )}
                 </div>
               </div>
-
-              <div className="mt-6">
-                <h4 className="mb-3 text-lg font-semibold text-white">{departmentAdmin ? 'Department Members' : 'Group Members'}</h4>
-                {realEmployees.length ? (
-                  <div className="space-y-3">
-                    {realEmployees.map((entry) => {
-                    const latestSession = latestSessionByUser.get(entry.id);
-                    const status = connectionSummary(latestSession);
-                    return (
-                      <div
-                        key={`overview-member-${entry.id}`}
-                        className="rounded-xl border border-slate-700 bg-slate-900/50 p-4"
-                      >
-                        <div className="flex items-start justify-between gap-4">
-                          <div>
-                            <p className="text-base font-semibold text-white">{formatName(entry)}</p>
-                            <p className="mt-1 text-sm text-slate-400">
-                              {entry.email}
-                            </p>
-                            {latestSession ? (
-                              <p className={`mt-2 text-xs ${status.tone}`}>
-                                {status.label}
-                              </p>
-                            ) : null}
-                          </div>
-                          <span
-                            className={`rounded-full border px-3 py-1 text-xs font-semibold ${status.badgeClass}`}
-                          >
-                            {status.badge}
-                          </span>
-                        </div>
-                      </div>
-                    );
-                    })}
-                  </div>
-                ) : (
-                  <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/35 p-5 text-sm text-slate-400">
-                    No registered members were found in the current admin scope yet.
-                  </div>
-                )}
-              </div>
             </div>
 
             <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
@@ -1239,6 +1270,28 @@ export function GatewayStartView() {
               </div>
               <div className="flex flex-col items-end gap-2">
                 {renderRangeSwitcher()}
+                <div className="flex flex-wrap gap-2">
+                  {([
+                    { id: 'urls', label: 'URL Stats' },
+                    { id: 'scans', label: 'Scan Stats' },
+                  ] as Array<{ id: EmployeeStatsMode; label: string }>).map((mode) => {
+                    const active = employeeStatsMode === mode.id;
+                    return (
+                      <button
+                        key={mode.id}
+                        type="button"
+                        onClick={() => setEmployeeStatsMode(mode.id)}
+                        className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                          active
+                            ? 'bg-cyan-500 text-white shadow-lg'
+                            : 'text-slate-300 hover:bg-cyan-500/10 hover:text-cyan-400'
+                        }`}
+                      >
+                        {mode.label}
+                      </button>
+                    );
+                  })}
+                </div>
                 <span className="text-xs text-slate-500">
                   {proxyUsageStats
                     ? `Window: last ${proxyUsageStats.days} day${proxyUsageStats.days > 1 ? 's' : ''}`
@@ -1249,7 +1302,7 @@ export function GatewayStartView() {
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               {departmentAdmin ? (
                 (proxyUsageStats?.group_stats || []).length ? (
-                  (proxyUsageStats?.group_stats || []).map((group) => (
+                (proxyUsageStats?.group_stats || []).map((group) => (
                     <button
                       key={`dept-group-${group.group_name}`}
                       type="button"
@@ -1279,42 +1332,91 @@ export function GatewayStartView() {
                       <div className="mt-5 grid grid-cols-2 gap-3">
                         <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
                           <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Requests</p>
-                          <p className="mt-2 text-sm font-medium text-slate-200">{group.request_count}</p>
+                          <p className="mt-2 text-sm font-medium text-slate-200">
+                            {employeeStatsMode === 'urls'
+                              ? group.request_count
+                              : (scanStatsByGroup.get(group.group_name) || emptyScanStatsSummary()).total}
+                          </p>
                         </div>
                         <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
-                          <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Members with Activity</p>
-                          <p className="mt-2 text-sm font-medium text-slate-200">{group.unique_members}</p>
+                          <p className="text-xs uppercase tracking-[0.18em] text-slate-500">
+                            {employeeStatsMode === 'urls' ? 'Members with Activity' : 'Last Scan'}
+                          </p>
+                          <p className="mt-2 text-sm font-medium text-slate-200">
+                            {employeeStatsMode === 'urls'
+                              ? group.unique_members
+                              : formatDateTime((scanStatsByGroup.get(group.group_name) || emptyScanStatsSummary()).last_seen || null)}
+                          </p>
                         </div>
                         <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
-                          <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Allowed</p>
-                          <p className="mt-2 text-sm font-medium text-emerald-300">{group.allowed_count}</p>
+                          <p className="text-xs uppercase tracking-[0.18em] text-slate-500">
+                            {employeeStatsMode === 'urls' ? 'Allowed' : 'Clean'}
+                          </p>
+                          <p className="mt-2 text-sm font-medium text-emerald-300">
+                            {employeeStatsMode === 'urls'
+                              ? group.allowed_count
+                              : (scanStatsByGroup.get(group.group_name) || emptyScanStatsSummary()).clean}
+                          </p>
                         </div>
                         <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
-                          <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Blocked</p>
-                          <p className="mt-2 text-sm font-medium text-red-300">{group.blocked_count}</p>
+                          <p className="text-xs uppercase tracking-[0.18em] text-slate-500">
+                            {employeeStatsMode === 'urls' ? 'Blocked' : 'Malicious'}
+                          </p>
+                          <p className="mt-2 text-sm font-medium text-red-300">
+                            {employeeStatsMode === 'urls'
+                              ? group.blocked_count
+                              : (scanStatsByGroup.get(group.group_name) || emptyScanStatsSummary()).malicious}
+                          </p>
                         </div>
                         <div className="col-span-2 rounded-lg border border-slate-700 bg-slate-950/50 p-3">
-                          <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Top Sites in Selected Window</p>
-                          <div className="mt-3 space-y-2">
-                            {group.top_sites.length ? (
-                              group.top_sites.slice(0, 8).map((site) => (
-                                <div
-                                  key={`dept-group-site-${group.group_name}-${site.host}`}
-                                  className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2"
-                                >
-                                  <div className="flex items-center justify-between gap-3">
-                                    <SiteIdentity host={site.host} compact />
-                                    <span className="text-xs font-semibold text-cyan-300">
-                                      {site.request_count} hit(s)
+                          {employeeStatsMode === 'urls' ? (
+                            <>
+                              <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Top Sites in Selected Window</p>
+                              <div className="mt-3 space-y-2">
+                                {group.top_sites.length ? (
+                                  group.top_sites.slice(0, 8).map((site) => (
+                                    <div
+                                      key={`dept-group-site-${group.group_name}-${site.host}`}
+                                      className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2"
+                                    >
+                                      <div className="flex items-center justify-between gap-3">
+                                        <SiteIdentity host={site.host} compact />
+                                        <span className="text-xs font-semibold text-cyan-300">
+                                          {site.request_count} hit(s)
+                                        </span>
+                                      </div>
+                                      <SiteStatusBadges site={site} />
+                                    </div>
+                                  ))
+                                ) : (
+                                  <p className="text-sm text-slate-400">No proxy usage yet for this group.</p>
+                                )}
+                              </div>
+                            </>
+                          ) : (
+                            (() => {
+                              const scanSummary = scanStatsByGroup.get(group.group_name) || emptyScanStatsSummary();
+                              return (
+                                <>
+                                  <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Scan Summary in Selected Window</p>
+                                  <ScanStatsBadges summary={scanSummary} />
+                                  <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-300 md:grid-cols-3">
+                                    <div className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2">Static {scanSummary.static_count}</div>
+                                    <div className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2">Dynamic {scanSummary.dynamic_count}</div>
+                                    <div className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2">File {scanSummary.file_count}</div>
+                                    <div className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2">URL {scanSummary.url_count}</div>
+                                    <div className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2">Email {scanSummary.email_count}</div>
+                                    <div className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2">Hash {scanSummary.hash_count}</div>
+                                  </div>
+                                  <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                                    <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-amber-300">
+                                      Suspicious {scanSummary.suspicious}
                                     </span>
                                   </div>
-                                  <SiteStatusBadges site={site} />
-                                </div>
-                              ))
-                            ) : (
-                              <p className="text-sm text-slate-400">No proxy usage yet for this group.</p>
-                            )}
-                          </div>
+                                </>
+                              );
+                            })()
+                          )}
                         </div>
                       </div>
                     </button>
@@ -1326,7 +1428,7 @@ export function GatewayStartView() {
                 )
               ) : (
                 realEmployees.length ? realEmployees.map((entry) => {
-                  const scanCount = scanCountByUser.get(entry.id) || 0;
+                  const scanSummary = scanStatsByUser.get(entry.id) || emptyScanStatsSummary();
                   const latestSession = latestSessionByUser.get(entry.id);
                   const status = connectionSummary(latestSession);
                   const usageStats = memberUsageById.get(entry.id);
@@ -1363,17 +1465,27 @@ export function GatewayStartView() {
                           <p className="mt-2 text-sm font-medium text-slate-200">{entry.group_name || '-'}</p>
                         </div>
                         <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
-                          <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Scans</p>
-                          <p className="mt-2 text-sm font-medium text-slate-200">{scanCount}</p>
+                          <p className="text-xs uppercase tracking-[0.18em] text-slate-500">
+                            {employeeStatsMode === 'urls' ? 'Scans' : 'Last Scan'}
+                          </p>
+                          <p className="mt-2 text-sm font-medium text-slate-200">
+                            {employeeStatsMode === 'urls' ? scanSummary.total : formatDateTime(scanSummary.last_seen || null)}
+                          </p>
                         </div>
                         <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
-                          <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Proxy Requests</p>
-                          <p className="mt-2 text-sm font-medium text-slate-200">{usageStats?.request_count ?? 0}</p>
+                          <p className="text-xs uppercase tracking-[0.18em] text-slate-500">
+                            {employeeStatsMode === 'urls' ? 'Proxy Requests' : 'Clean'}
+                          </p>
+                          <p className={`mt-2 text-sm font-medium ${employeeStatsMode === 'urls' ? 'text-slate-200' : 'text-emerald-300'}`}>
+                            {employeeStatsMode === 'urls' ? (usageStats?.request_count ?? 0) : scanSummary.clean}
+                          </p>
                         </div>
                         <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
-                          <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Most Used Site</p>
-                          <p className="mt-2 truncate text-sm font-medium text-slate-200">
-                            {usageStats?.top_sites?.[0]?.host || 'No proxy usage yet'}
+                          <p className="text-xs uppercase tracking-[0.18em] text-slate-500">
+                            {employeeStatsMode === 'urls' ? 'Most Used Site' : 'Malicious'}
+                          </p>
+                          <p className={`mt-2 truncate text-sm font-medium ${employeeStatsMode === 'urls' ? 'text-slate-200' : 'text-red-300'}`}>
+                            {employeeStatsMode === 'urls' ? (usageStats?.top_sites?.[0]?.host || 'No proxy usage yet') : scanSummary.malicious}
                           </p>
                         </div>
                         <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
@@ -1403,47 +1515,69 @@ export function GatewayStartView() {
                           </p>
                         </div>
                         <div className="col-span-2 rounded-lg border border-slate-700 bg-slate-950/50 p-3">
-                          <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Usage Summary in Selected Window</p>
-                          {usageStats ? (
+                          {employeeStatsMode === 'urls' ? (
                             <>
-                              <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                                <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-emerald-300">
-                                  Allowed {usageStats.allowed_count}
-                                </span>
-                                <span className="rounded-full border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-red-300">
-                                  Blocked {usageStats.blocked_count}
-                                </span>
-                                <span className="rounded-full border border-slate-700 bg-slate-800/70 px-2.5 py-1 text-slate-300">
-                                  Unique sites {usageStats.unique_sites}
-                                </span>
-                              </div>
-                              <div className="mt-3 space-y-2">
-                                {usageStats.top_sites.length ? (
-                                  usageStats.top_sites.map((site) => (
-                                    <div
-                                      key={`${entry.id}-${site.host}`}
-                                      className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2"
-                                    >
-                                      <div className="flex items-center justify-between gap-3">
-                                        <SiteIdentity host={site.host} compact />
-                                        <span className="text-xs font-semibold text-cyan-300">
-                                          {site.request_count} hit(s)
-                                        </span>
-                                      </div>
-                                      <SiteStatusBadges site={site} />
-                                    </div>
-                                  ))
-                                ) : (
-                                  <p className="text-sm text-slate-400">
-                                    No proxy events recorded for this member in the selected period.
-                                  </p>
-                                )}
-                              </div>
+                              <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Usage Summary in Selected Window</p>
+                              {usageStats ? (
+                                <>
+                                  <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                                    <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-emerald-300">
+                                      Allowed {usageStats.allowed_count}
+                                    </span>
+                                    <span className="rounded-full border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-red-300">
+                                      Blocked {usageStats.blocked_count}
+                                    </span>
+                                    <span className="rounded-full border border-slate-700 bg-slate-800/70 px-2.5 py-1 text-slate-300">
+                                      Unique sites {usageStats.unique_sites}
+                                    </span>
+                                  </div>
+                                  <div className="mt-3 space-y-2">
+                                    {usageStats.top_sites.length ? (
+                                      usageStats.top_sites.map((site) => (
+                                        <div
+                                          key={`${entry.id}-${site.host}`}
+                                          className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2"
+                                        >
+                                          <div className="flex items-center justify-between gap-3">
+                                            <SiteIdentity host={site.host} compact />
+                                            <span className="text-xs font-semibold text-cyan-300">
+                                              {site.request_count} hit(s)
+                                            </span>
+                                          </div>
+                                          <SiteStatusBadges site={site} />
+                                        </div>
+                                      ))
+                                    ) : (
+                                      <p className="text-sm text-slate-400">
+                                        No proxy events recorded for this member in the selected period.
+                                      </p>
+                                    )}
+                                  </div>
+                                </>
+                              ) : (
+                                <p className="mt-2 text-sm text-slate-400">
+                                  No proxy events recorded for this member in the selected period.
+                                </p>
+                              )}
                             </>
                           ) : (
-                            <p className="mt-2 text-sm text-slate-400">
-                              No proxy events recorded for this member in the selected period.
-                            </p>
+                            <>
+                              <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Scan Summary in Selected Window</p>
+                              <ScanStatsBadges summary={scanSummary} />
+                              <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-300 md:grid-cols-3">
+                                <div className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2">Static {scanSummary.static_count}</div>
+                                <div className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2">Dynamic {scanSummary.dynamic_count}</div>
+                                <div className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2">File {scanSummary.file_count}</div>
+                                <div className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2">URL {scanSummary.url_count}</div>
+                                <div className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2">Email {scanSummary.email_count}</div>
+                                <div className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2">Hash {scanSummary.hash_count}</div>
+                              </div>
+                              <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                                <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-amber-300">
+                                  Suspicious {scanSummary.suspicious}
+                                </span>
+                              </div>
+                            </>
                           )}
                         </div>
                       </div>
@@ -1487,77 +1621,161 @@ export function GatewayStartView() {
               </div>
             </div>
 
-            {selectedMemberUsage ? (
+            {canShowPersonDetail ? (
               <div className="space-y-6">
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
-                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                    <p className="text-sm text-slate-400">Requests</p>
-                    <p className="mt-3 text-2xl font-bold text-white">{selectedMemberUsage.request_count}</p>
-                  </div>
-                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                    <p className="text-sm text-slate-400">Allowed</p>
-                    <p className="mt-3 text-2xl font-bold text-emerald-300">{selectedMemberUsage.allowed_count}</p>
-                  </div>
-                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                    <p className="text-sm text-slate-400">Blocked</p>
-                    <p className="mt-3 text-2xl font-bold text-red-300">{selectedMemberUsage.blocked_count}</p>
-                  </div>
-                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                    <p className="text-sm text-slate-400">Unique Sites</p>
-                    <p className="mt-3 text-2xl font-bold text-white">{selectedMemberUsage.unique_sites}</p>
-                  </div>
-                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                    <p className="text-sm text-slate-400">Last Activity</p>
-                    <p className="mt-3 text-sm font-semibold text-white">{formatDateTime(selectedMemberUsage.last_seen || null)}</p>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 gap-4 xl:grid-cols-[0.95fr_1.05fr]">
-                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                    <h4 className="mb-4 text-lg font-semibold text-white">Identity & Session</h4>
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                      <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
-                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Email</p>
-                        <p className="mt-2 text-sm font-medium text-slate-200">{selectedMemberUsage.email || selectedMemberUser?.email || '-'}</p>
+                {employeeStatsMode === 'urls' && selectedMemberUsage ? (
+                  <>
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Requests</p>
+                        <p className="mt-3 text-2xl font-bold text-white">{selectedMemberUsage.request_count}</p>
                       </div>
-                      <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
-                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Department</p>
-                        <p className="mt-2 text-sm font-medium text-slate-200">{selectedMemberUser?.department || adminDepartment || '-'}</p>
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Allowed</p>
+                        <p className="mt-3 text-2xl font-bold text-emerald-300">{selectedMemberUsage.allowed_count}</p>
                       </div>
-                      <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
-                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Group</p>
-                        <p className="mt-2 text-sm font-medium text-slate-200">{selectedMemberUser?.group_name || adminGroup || '-'}</p>
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Blocked</p>
+                        <p className="mt-3 text-2xl font-bold text-red-300">{selectedMemberUsage.blocked_count}</p>
                       </div>
-                      <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
-                        <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Current Device</p>
-                        <p className="mt-2 text-sm font-medium text-slate-200">{selectedMemberSession?.hostname || selectedMemberSession?.device_id || 'No active session'}</p>
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Unique Sites</p>
+                        <p className="mt-3 text-2xl font-bold text-white">{selectedMemberUsage.unique_sites}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Last Activity</p>
+                        <p className="mt-3 text-sm font-semibold text-white">{formatDateTime(selectedMemberUsage.last_seen || null)}</p>
                       </div>
                     </div>
-                  </div>
 
-                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                    <h4 className="mb-4 text-lg font-semibold text-white">Most Used Sites</h4>
-                    <div className="gateway-panel-scroll space-y-3">
-                      {selectedMemberUsage.top_sites.length ? (
-                        selectedMemberUsage.top_sites.map((site) => (
-                          <div key={`detail-${selectedMemberUsage.name}-${site.host}`} className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-3">
-                            <div className="flex items-center justify-between gap-3">
-                              <SiteIdentity host={site.host} />
-                              <span className="text-sm font-semibold text-cyan-300">{site.request_count} hit(s)</span>
-                            </div>
-                            <SiteStatusBadges site={site} />
+                    <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                      <h4 className="mb-4 text-lg font-semibold text-white">Scan Stats in Selected Window</h4>
+                      <ScanStatsBadges summary={selectedMemberScanStats} />
+                      <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-300 md:grid-cols-3 xl:grid-cols-6">
+                        <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">Static {selectedMemberScanStats.static_count}</div>
+                        <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">Dynamic {selectedMemberScanStats.dynamic_count}</div>
+                        <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">File {selectedMemberScanStats.file_count}</div>
+                        <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">URL {selectedMemberScanStats.url_count}</div>
+                        <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">Email {selectedMemberScanStats.email_count}</div>
+                        <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">Hash {selectedMemberScanStats.hash_count}</div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[0.95fr_1.05fr]">
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <h4 className="mb-4 text-lg font-semibold text-white">Identity & Session</h4>
+                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                            <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Email</p>
+                            <p className="mt-2 text-sm font-medium text-slate-200">{selectedMemberUsage.email || selectedMemberUser?.email || '-'}</p>
                           </div>
-                        ))
-                      ) : (
-                        <p className="text-sm text-slate-400">No recorded browsing yet in the selected window.</p>
-                      )}
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                            <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Department</p>
+                            <p className="mt-2 text-sm font-medium text-slate-200">{selectedMemberUser?.department || adminDepartment || '-'}</p>
+                          </div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                            <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Group</p>
+                            <p className="mt-2 text-sm font-medium text-slate-200">{selectedMemberUser?.group_name || adminGroup || '-'}</p>
+                          </div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+                            <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Current Device</p>
+                            <p className="mt-2 text-sm font-medium text-slate-200">{selectedMemberSession?.hostname || selectedMemberSession?.device_id || 'No active session'}</p>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <h4 className="mb-4 text-lg font-semibold text-white">Most Used Sites</h4>
+                        <div className="gateway-panel-scroll space-y-3">
+                          {selectedMemberUsage.top_sites.length ? (
+                            selectedMemberUsage.top_sites.map((site) => (
+                              <div key={`detail-${selectedMemberUsage.name}-${site.host}`} className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-3">
+                                <div className="flex items-center justify-between gap-3">
+                                  <SiteIdentity host={site.host} />
+                                  <span className="text-sm font-semibold text-cyan-300">{site.request_count} hit(s)</span>
+                                </div>
+                                <SiteStatusBadges site={site} />
+                              </div>
+                            ))
+                          ) : (
+                            <p className="text-sm text-slate-400">No recorded browsing yet in the selected window.</p>
+                          )}
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Total Scans</p>
+                        <p className="mt-3 text-2xl font-bold text-white">{selectedMemberScanStats.total}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Clean</p>
+                        <p className="mt-3 text-2xl font-bold text-emerald-300">{selectedMemberScanStats.clean}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Suspicious</p>
+                        <p className="mt-3 text-2xl font-bold text-amber-300">{selectedMemberScanStats.suspicious}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Malicious</p>
+                        <p className="mt-3 text-2xl font-bold text-red-300">{selectedMemberScanStats.malicious}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Last Scan</p>
+                        <p className="mt-3 text-sm font-semibold text-white">{formatDateTime(selectedMemberScanStats.last_seen || null)}</p>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[0.9fr_1.1fr]">
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <h4 className="mb-4 text-lg font-semibold text-white">Scan Summary in Selected Window</h4>
+                        <ScanStatsBadges summary={selectedMemberScanStats} />
+                        <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-300 md:grid-cols-3">
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">Static {selectedMemberScanStats.static_count}</div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">Dynamic {selectedMemberScanStats.dynamic_count}</div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">File {selectedMemberScanStats.file_count}</div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">URL {selectedMemberScanStats.url_count}</div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">Email {selectedMemberScanStats.email_count}</div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">Hash {selectedMemberScanStats.hash_count}</div>
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <h4 className="mb-4 text-lg font-semibold text-white">Recent Scans</h4>
+                        <div className="gateway-panel-scroll space-y-3">
+                          {selectedMemberScans.length ? (
+                            selectedMemberScans.slice(0, 12).map((scan) => (
+                              <div key={`member-scan-${scan.id}`} className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-3">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <p className="truncate text-sm font-semibold text-white">{scan.target}</p>
+                                    <p className="mt-1 text-xs text-slate-400">
+                                      {scanTypeLabel(scan.scan_type)} · {formatDateTime(scan.created_at)}
+                                    </p>
+                                  </div>
+                                  <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${scanStatusBadgeClass(scan.status)}`}>
+                                    {scan.status}
+                                  </span>
+                                </div>
+                              </div>
+                            ))
+                          ) : (
+                            <p className="text-sm text-slate-400">No scans recorded for this user in the selected window.</p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
             ) : (
               <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/35 p-5 text-sm text-slate-400">
-                No detailed usage available yet for this user in the selected period.
+                {employeeStatsMode === 'urls'
+                  ? 'No detailed usage available yet for this user in the selected period.'
+                  : 'No scan activity is available yet for this user in the selected period.'}
               </div>
             )}
           </div>
@@ -1589,58 +1807,143 @@ export function GatewayStartView() {
               </div>
             </div>
 
-            {selectedGroupUsage ? (
+            {canShowGroupDetail ? (
               <div className="space-y-6">
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
-                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                    <p className="text-sm text-slate-400">Requests</p>
-                    <p className="mt-3 text-2xl font-bold text-white">{selectedGroupUsage.request_count}</p>
-                  </div>
-                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                    <p className="text-sm text-slate-400">Allowed</p>
-                    <p className="mt-3 text-2xl font-bold text-emerald-300">{selectedGroupUsage.allowed_count}</p>
-                  </div>
-                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                    <p className="text-sm text-slate-400">Blocked</p>
-                    <p className="mt-3 text-2xl font-bold text-red-300">{selectedGroupUsage.blocked_count}</p>
-                  </div>
-                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                    <p className="text-sm text-slate-400">Members with Activity</p>
-                    <p className="mt-3 text-2xl font-bold text-white">{selectedGroupUsage.unique_members}</p>
-                  </div>
-                  <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                    <p className="text-sm text-slate-400">Unique Sites</p>
-                    <p className="mt-3 text-2xl font-bold text-white">{selectedGroupUsage.unique_sites}</p>
-                  </div>
-                </div>
+                {employeeStatsMode === 'urls' && selectedGroupUsage ? (
+                  <>
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Requests</p>
+                        <p className="mt-3 text-2xl font-bold text-white">{selectedGroupUsage.request_count}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Allowed</p>
+                        <p className="mt-3 text-2xl font-bold text-emerald-300">{selectedGroupUsage.allowed_count}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Blocked</p>
+                        <p className="mt-3 text-2xl font-bold text-red-300">{selectedGroupUsage.blocked_count}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Members with Activity</p>
+                        <p className="mt-3 text-2xl font-bold text-white">{selectedGroupUsage.unique_members}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Unique Sites</p>
+                        <p className="mt-3 text-2xl font-bold text-white">{selectedGroupUsage.unique_sites}</p>
+                      </div>
+                    </div>
 
-                <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                  <h4 className="mb-4 text-lg font-semibold text-white">Most Used Sites in This Group</h4>
-                  <div className="gateway-panel-scroll space-y-3">
-                    {selectedGroupUsage.top_sites.length ? (
-                      selectedGroupUsage.top_sites.map((site) => (
-                        <div key={`group-detail-${selectedGroupUsage.group_name}-${site.host}`} className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <SiteIdentity host={site.host} />
-                            <span className="text-sm font-semibold text-cyan-300">{site.request_count} hit(s)</span>
-                          </div>
-                          <SiteStatusBadges site={site} />
+                    <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                      <h4 className="mb-4 text-lg font-semibold text-white">Scan Stats in Selected Window</h4>
+                      <ScanStatsBadges summary={selectedGroupScanStats} />
+                      <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-300 md:grid-cols-3 xl:grid-cols-6">
+                        <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">Static {selectedGroupScanStats.static_count}</div>
+                        <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">Dynamic {selectedGroupScanStats.dynamic_count}</div>
+                        <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">File {selectedGroupScanStats.file_count}</div>
+                        <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">URL {selectedGroupScanStats.url_count}</div>
+                        <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">Email {selectedGroupScanStats.email_count}</div>
+                        <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">Hash {selectedGroupScanStats.hash_count}</div>
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                      <h4 className="mb-4 text-lg font-semibold text-white">Most Used Sites in This Group</h4>
+                      <div className="gateway-panel-scroll space-y-3">
+                        {selectedGroupUsage.top_sites.length ? (
+                          selectedGroupUsage.top_sites.map((site) => (
+                            <div key={`group-detail-${selectedGroupUsage.group_name}-${site.host}`} className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-3">
+                              <div className="flex items-center justify-between gap-3">
+                                <SiteIdentity host={site.host} />
+                                <span className="text-sm font-semibold text-cyan-300">{site.request_count} hit(s)</span>
+                              </div>
+                              <SiteStatusBadges site={site} />
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-sm text-slate-400">No recorded browsing yet in the selected window.</p>
+                        )}
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Total Scans</p>
+                        <p className="mt-3 text-2xl font-bold text-white">{selectedGroupScanStats.total}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Clean</p>
+                        <p className="mt-3 text-2xl font-bold text-emerald-300">{selectedGroupScanStats.clean}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Suspicious</p>
+                        <p className="mt-3 text-2xl font-bold text-amber-300">{selectedGroupScanStats.suspicious}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Malicious</p>
+                        <p className="mt-3 text-2xl font-bold text-red-300">{selectedGroupScanStats.malicious}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <p className="text-sm text-slate-400">Last Scan</p>
+                        <p className="mt-3 text-sm font-semibold text-white">{formatDateTime(selectedGroupScanStats.last_seen || null)}</p>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_1fr]">
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <h4 className="mb-4 text-lg font-semibold text-white">Scan Summary in Selected Window</h4>
+                        <ScanStatsBadges summary={selectedGroupScanStats} />
+                        <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-300 md:grid-cols-3">
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">Static {selectedGroupScanStats.static_count}</div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">Dynamic {selectedGroupScanStats.dynamic_count}</div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">File {selectedGroupScanStats.file_count}</div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">URL {selectedGroupScanStats.url_count}</div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">Email {selectedGroupScanStats.email_count}</div>
+                          <div className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-2">Hash {selectedGroupScanStats.hash_count}</div>
                         </div>
-                      ))
-                    ) : (
-                      <p className="text-sm text-slate-400">No recorded browsing yet in the selected window.</p>
-                    )}
-                  </div>
-                </div>
+                      </div>
+
+                      <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
+                        <h4 className="mb-4 text-lg font-semibold text-white">Recent Group Scans</h4>
+                        <div className="gateway-panel-scroll space-y-3">
+                          {selectedGroupScans.length ? (
+                            selectedGroupScans.slice(0, 14).map((scan) => (
+                              <div key={`group-scan-${scan.id}`} className="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-3">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <p className="truncate text-sm font-semibold text-white">{scan.target}</p>
+                                    <p className="mt-1 text-xs text-slate-400">
+                                      {scanTypeLabel(scan.scan_type)} · {formatDateTime(scan.created_at)}
+                                    </p>
+                                  </div>
+                                  <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${scanStatusBadgeClass(scan.status)}`}>
+                                    {scan.status}
+                                  </span>
+                                </div>
+                              </div>
+                            ))
+                          ) : (
+                            <p className="text-sm text-slate-400">No scans recorded for this group in the selected window.</p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
 
                 <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-                  <h4 className="mb-4 text-lg font-semibold text-white">Members of This Group</h4>
+                  <h4 className="mb-4 text-lg font-semibold text-white">
+                    {employeeStatsMode === 'urls' ? 'Members of This Group' : 'Members and Their Scan Stats'}
+                  </h4>
                   <div className="gateway-panel-scroll space-y-3">
                     {selectedGroupMembers.length ? (
                       selectedGroupMembers.map((member) => {
                         const memberUsage = memberUsageById.get(member.id) ?? null;
                         const session = latestSessionByUser.get(member.id);
                         const status = connectionSummary(session);
+                        const memberScanSummary = scanStatsByUser.get(member.id) || emptyScanStatsSummary();
                         return (
                           <button
                             key={`group-member-${member.id}`}
@@ -1658,20 +1961,43 @@ export function GatewayStartView() {
                                 <p className={`mt-2 text-xs ${status.tone}`}>{status.label}</p>
                               </div>
                               <div className="text-right">
-                                <p className="text-lg font-bold text-white">{memberUsage?.request_count ?? 0}</p>
-                                <p className="text-xs text-slate-500">requests</p>
+                                <p className="text-lg font-bold text-white">
+                                  {employeeStatsMode === 'urls' ? (memberUsage?.request_count ?? 0) : memberScanSummary.total}
+                                </p>
+                                <p className="text-xs text-slate-500">
+                                  {employeeStatsMode === 'urls' ? 'requests' : 'scans'}
+                                </p>
                               </div>
                             </div>
                             <div className="mt-3 flex flex-wrap gap-2 text-xs">
-                              <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-emerald-300">
-                                Allowed {memberUsage?.allowed_count ?? 0}
-                              </span>
-                              <span className="rounded-full border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-red-300">
-                                Blocked {memberUsage?.blocked_count ?? 0}
-                              </span>
-                              <span className="rounded-full border border-slate-700 bg-slate-800/70 px-2.5 py-1 text-slate-300">
-                                Unique sites {memberUsage?.unique_sites ?? 0}
-                              </span>
+                              {employeeStatsMode === 'urls' ? (
+                                <>
+                                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-emerald-300">
+                                    Allowed {memberUsage?.allowed_count ?? 0}
+                                  </span>
+                                  <span className="rounded-full border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-red-300">
+                                    Blocked {memberUsage?.blocked_count ?? 0}
+                                  </span>
+                                  <span className="rounded-full border border-slate-700 bg-slate-800/70 px-2.5 py-1 text-slate-300">
+                                    Unique sites {memberUsage?.unique_sites ?? 0}
+                                  </span>
+                                </>
+                              ) : (
+                                <>
+                                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-emerald-300">
+                                    Clean {memberScanSummary.clean}
+                                  </span>
+                                  <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-amber-300">
+                                    Suspicious {memberScanSummary.suspicious}
+                                  </span>
+                                  <span className="rounded-full border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-red-300">
+                                    Malicious {memberScanSummary.malicious}
+                                  </span>
+                                  <span className="rounded-full border border-slate-700 bg-slate-800/70 px-2.5 py-1 text-slate-300">
+                                    Last scan {formatDateTime(memberScanSummary.last_seen || null)}
+                                  </span>
+                                </>
+                              )}
                             </div>
                           </button>
                         );
@@ -1684,7 +2010,9 @@ export function GatewayStartView() {
               </div>
             ) : (
               <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/35 p-5 text-sm text-slate-400">
-                No detailed usage available yet for this group in the selected period.
+                {employeeStatsMode === 'urls'
+                  ? 'No detailed usage available yet for this group in the selected period.'
+                  : 'No scan activity is available yet for this group in the selected period.'}
               </div>
             )}
           </div>

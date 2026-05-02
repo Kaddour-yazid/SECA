@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Que
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy import or_, inspect, text
+from sqlalchemy import and_, or_, inspect, text
 from sqlalchemy.orm import Session
 from typing import Dict, Any, Optional, List, Tuple, Set
 from pydantic import BaseModel
@@ -61,6 +61,7 @@ from auth import (
     router as auth_router,
     DEPARTMENT_GROUPS,
     DEPARTMENT_ALIASES,
+    canonicalize_group_name,
     is_department_admin,
     serialize_user,
 )
@@ -102,7 +103,6 @@ def _ensure_auth_profile_columns() -> None:
             "department": "VARCHAR",
             "group_name": "VARCHAR",
             "admin_department": "BOOLEAN DEFAULT FALSE",
-            "admin_group": "BOOLEAN DEFAULT FALSE",
         },
         "email_otps": {
             "first_name": "VARCHAR",
@@ -128,23 +128,68 @@ def _ensure_auth_profile_columns() -> None:
                 connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"))
                 logger.info("Added missing column %s.%s", table_name, column_name)
 
+        try:
+            connection.execute(text("ALTER TABLE users DROP COLUMN IF EXISTS admin_group"))
+            logger.info("Dropped legacy column users.admin_group if it existed")
+        except Exception as exc:
+            logger.warning("Unable to drop legacy column users.admin_group: %s", exc)
+
 
 _ensure_auth_profile_columns()
 
 
+def _normalize_legacy_ssi_group_names() -> None:
+    replacements = [
+        ("Sécurité des Systèmes", ["%SOC%", "%des Syst%mes%"]),
+        ("Sécurité Industrielle (OT)", ["%Industrielle%"]),
+        ("Sécurité Applicative & Gouvernance", ["%Applicative%"]),
+    ]
+    table_columns = {
+        "users": ("group_name", "department = 'SSI'"),
+        "email_otps": ("group_name", "department = 'SSI'"),
+        "desktop_devices": ("last_group_name", None),
+        "desktop_sessions": ("group_name", "department = 'SSI'"),
+        "user_ip_assignments": ("group_name", "department = 'SSI'"),
+        "gateway_traffic_events": ("group_name", "department = 'SSI'"),
+        "group_proxy_assignments": ("group_name", "department = 'SSI'"),
+    }
+
+    with engine.begin() as connection:
+        for table_name, (column_name, where_clause) in table_columns.items():
+            for new_value, patterns in replacements:
+                pattern_clauses = " OR ".join(f"{column_name} LIKE :pattern_{index}" for index, _ in enumerate(patterns))
+                try:
+                    where_sql = f" AND {where_clause}" if where_clause else ""
+                    connection.execute(
+                        text(
+                            f"UPDATE {table_name} "
+                            f"SET {column_name} = :new_value "
+                            f"WHERE ({pattern_clauses}){where_sql}"
+                        ),
+                        {
+                            "new_value": new_value,
+                            **{f"pattern_{index}": pattern for index, pattern in enumerate(patterns)},
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Unable to normalize legacy SSI group name for %s.%s (%s): %s",
+                        table_name,
+                        column_name,
+                        new_value,
+                        exc,
+                    )
+
+
+_normalize_legacy_ssi_group_names()
+
+
 def _admin_scope(current_user: User) -> Dict[str, Optional[str]]:
     department = str(current_user.department or "").strip()
-    group_name = str(current_user.group_name or "").strip()
-    if is_department_admin(current_user):
-        return {
-            "department": department or None,
-            "group_name": None,
-            "scope": "department",
-        }
     return {
         "department": department or None,
-        "group_name": group_name or None,
-        "scope": "group" if group_name else "department",
+        "group_name": None,
+        "scope": "department",
     }
 
 
@@ -202,6 +247,8 @@ def _audit_row_in_admin_scope(
 ) -> bool:
     if user_id is not None:
         return int(user_id) in visible_user_ids
+    if _unknown_gateway_event_visible_to_admin(current_user, action, details):
+        return True
     return _scoped_system_event_matches(current_user, action, details)
 
 
@@ -320,6 +367,7 @@ def _read_bool_env(name: str, default: bool) -> bool:
 SECA_PROXY_AUTOSTART = _read_bool_env("SECA_PROXY_AUTOSTART", False)
 SECA_PROXY_LISTEN_HOST = os.environ.get("SECA_PROXY_LISTEN_HOST", "127.0.0.1").strip() or "127.0.0.1"
 SECA_PROXY_LISTEN_PORT = _read_int_env("SECA_PROXY_LISTEN_PORT", 3128, minimum=1, maximum=65535)
+SECA_PROXY_PUBLIC_HOST = os.environ.get("SECA_PROXY_PUBLIC_HOST", "").strip()
 SECA_PROXY_BLOCKLIST_REFRESH_SECONDS = _read_int_env("SECA_PROXY_BLOCKLIST_REFRESH_SECONDS", 10, minimum=2)
 SECA_PROXY_ACTIVE_WINDOW_SECONDS = _read_int_env("SECA_PROXY_ACTIVE_WINDOW_SECONDS", 60, minimum=5)
 SECA_PROXY_TUNNEL_CHUNK_BYTES = _read_int_env("SECA_PROXY_TUNNEL_CHUNK_BYTES", 262144, minimum=16384, maximum=1048576)
@@ -1198,6 +1246,104 @@ def _normalize_local_ip_list(values: Optional[List[str]]) -> List[str]:
     return normalized
 
 
+def _request_client_host(request: Optional[Request]) -> Optional[str]:
+    if request is None:
+        return None
+
+    forwarded_for = str(request.headers.get("x-forwarded-for") or "").strip()
+    if forwarded_for:
+        for candidate in forwarded_for.split(","):
+            normalized = str(candidate or "").strip()
+            if not normalized:
+                continue
+            try:
+                return ipaddress.ip_address(normalized).compressed
+            except ValueError:
+                continue
+
+    real_ip = str(request.headers.get("x-real-ip") or "").strip()
+    if real_ip:
+        try:
+            return ipaddress.ip_address(real_ip).compressed
+        except ValueError:
+            pass
+
+    return request.client.host if request.client else None
+
+
+def _is_loopback_or_wildcard_host(host: Optional[str]) -> bool:
+    normalized = str(host or "").strip().lower().strip("[]")
+    if not normalized:
+        return True
+    if normalized in {"0.0.0.0", "::", "::1", "127.0.0.1", "localhost"}:
+        return True
+    try:
+        return bool(ipaddress.ip_address(normalized).is_loopback)
+    except ValueError:
+        return False
+
+
+def _detect_lan_ipv4() -> Optional[str]:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            candidate = sock.getsockname()[0]
+        if candidate and not _is_loopback_or_wildcard_host(candidate):
+            return candidate
+    except OSError:
+        return None
+    return None
+
+
+def _proxy_advertised_host(request: Optional[Request] = None) -> str:
+    if SECA_PROXY_PUBLIC_HOST and not _is_loopback_or_wildcard_host(SECA_PROXY_PUBLIC_HOST):
+        return SECA_PROXY_PUBLIC_HOST
+
+    request_host = ""
+    if request is not None:
+        request_host = str(request.url.hostname or "").strip()
+        if request_host and not _is_loopback_or_wildcard_host(request_host):
+            return request_host
+
+    if not _is_loopback_or_wildcard_host(SECA_PROXY_LISTEN_HOST):
+        return SECA_PROXY_LISTEN_HOST
+
+    detected_lan = _detect_lan_ipv4()
+    if detected_lan:
+        return detected_lan
+
+    return "127.0.0.1"
+
+
+def _proxy_assignment_payload(
+        assignment: Optional["GroupProxyAssignment"],
+        current_group_name: Optional[str],
+        request: Optional[Request] = None,
+) -> Optional[Dict[str, Any]]:
+    if not assignment:
+        return None
+
+    scope = "department" if assignment.group_name == DEPARTMENT_PROXY_GROUP_NAME else "group"
+    proxy_host = assignment.proxy_host
+    proxy_port = assignment.proxy_port
+
+    if scope == "department":
+        proxy_host = _proxy_advertised_host(request)
+        proxy_port = SECA_PROXY_LISTEN_PORT
+    elif _is_loopback_or_wildcard_host(proxy_host):
+        proxy_host = _proxy_advertised_host(request)
+
+    return {
+        "department": assignment.department,
+        "group_name": current_group_name,
+        "scope": scope,
+        "proxy_host": proxy_host,
+        "proxy_port": proxy_port,
+        "enabled": assignment.enabled,
+        "note": assignment.note,
+    }
+
+
 def _serialize_local_ips(values: Optional[List[str]]) -> str:
     return json.dumps(_normalize_local_ip_list(values))
 
@@ -1912,6 +2058,8 @@ def _gateway_audit_details(event: Dict[str, Any]) -> str:
         parts.append(f"block_reason={event.get('block_reason')}")
     if event.get("user_email"):
         parts.append(f"user={event.get('user_email')}")
+    elif event.get("user_name"):
+        parts.append(f"user={event.get('user_name')}")
     if event.get("department") and event.get("group_name"):
         parts.append(f"scope={event.get('department')}/{event.get('group_name')}")
     if event.get("attribution_source"):
@@ -1940,6 +2088,9 @@ def _enrich_gateway_event_with_desktop_session(normalized: Dict[str, Any]) -> Di
     else:
         saved_assignment = _saved_user_ip_assignment_for_client_ip(client_ip)
         if not saved_assignment:
+            normalized["user_name"] = "Unknown user"
+            normalized["user_email"] = None
+            normalized["attribution_source"] = normalized.get("attribution_source") or "unknown-user"
             return normalized
         normalized["user_id"] = saved_assignment.get("user_id")
         normalized["user_name"] = saved_assignment.get("user_name")
@@ -2064,8 +2215,25 @@ def _record_gateway_event_sync(event: Dict[str, Any], db: Optional[Session] = No
             True,
             db=db,
         )
-    _emit_system_audit_log(action, _gateway_audit_details(normalized), db=db)
+    user_id = normalized.get("user_id")
+    if user_id:
+        if db is not None:
+            create_audit_log(db, int(user_id), action, _gateway_audit_details(normalized))
+        else:
+            with Session(engine) as local_db:
+                create_audit_log(local_db, int(user_id), action, _gateway_audit_details(normalized))
+    else:
+        _emit_system_audit_log(action, _gateway_audit_details(normalized), db=db)
     return normalized
+
+
+def _unknown_gateway_event_visible_to_admin(current_user: User, action: Optional[str], details: Optional[str]) -> bool:
+    del current_user
+    action_text = str(action or "").strip().lower()
+    details_text = str(details or "").strip().lower()
+    if not action_text.startswith("gateway "):
+        return False
+    return "attribution=unknown-user" in details_text or "user=unknown user" in details_text
 
 
 def _record_gateway_event_with_sync_audit(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -2257,8 +2425,9 @@ def _proxy_static_scan_event_sync(
     static_signals: List[str] = []
     static_enforced_block = False
     block_reason = "policy_rule" if block_rule else None
+    bypass_local_private = bool(scan_url and _is_private_or_local_target_url(scan_url))
 
-    if scan_url:
+    if scan_url and not bypass_local_private:
         try:
             with Session(engine) as db:
                 static_eval = _evaluate_url_static(scan_url, db)
@@ -2278,6 +2447,12 @@ def _proxy_static_scan_event_sync(
             static_enforced_block = False
             if not block_reason:
                 block_reason = None
+    elif bypass_local_private:
+        static_status = "clean"
+        static_signals = ["Local/private target bypassed by proxy static scan"]
+        static_enforced_block = False
+        if not block_rule:
+            block_reason = None
 
     blocked = bool(block_rule) or static_enforced_block
     if block_rule and not static_enforced_block:
@@ -2427,7 +2602,7 @@ async def _proxy_handle_client(reader: asyncio.StreamReader, writer: asyncio.Str
             key_lower = key.lower()
             if key_lower == "host":
                 host_header = value
-            if key_lower in {"proxy-connection", "proxy-authenticate", "proxy-authorization"}:
+            if key_lower in {"proxy-connection", "proxy-authenticate", "proxy-authorization", "connection", "keep-alive"}:
                 continue
             header_pairs.append((key, value))
 
@@ -2512,6 +2687,16 @@ async def _proxy_handle_client(reader: asyncio.StreamReader, writer: asyncio.Str
 
         if not any(k.lower() == "host" for k, _ in header_pairs):
             header_pairs.append(("Host", upstream_host if upstream_port == 80 else f"{upstream_host}:{upstream_port}"))
+        forwarded_for_present = any(k.lower() == "x-forwarded-for" for k, _ in header_pairs)
+        real_ip_present = any(k.lower() == "x-real-ip" for k, _ in header_pairs)
+        forwarded_proto_present = any(k.lower() == "x-forwarded-proto" for k, _ in header_pairs)
+        if not forwarded_for_present:
+            header_pairs.append(("X-Forwarded-For", client_ip))
+        if not real_ip_present:
+            header_pairs.append(("X-Real-IP", client_ip))
+        if not forwarded_proto_present:
+            header_pairs.append(("X-Forwarded-Proto", "http"))
+        header_pairs.append(("Connection", "close"))
 
         request_line = f"{method_u} {upstream_target or '/'} {version}\r\n"
         forward_headers = "".join(f"{k}: {v}\r\n" for k, v in header_pairs)
@@ -6459,10 +6644,17 @@ async def gateway_api_history(
     rows = list(gateway_history)
     rows = [
         row for row in rows
-        if _scope_matches_department_group(
-            department=row.get("department"),
-            group_name=row.get("group_name"),
-            current_user=current_user,
+        if (
+            _scope_matches_department_group(
+                department=row.get("department"),
+                group_name=row.get("group_name"),
+                current_user=current_user,
+            )
+            or (
+                not str(row.get("department") or "").strip()
+                and not str(row.get("group_name") or "").strip()
+                and str(row.get("type") or "").strip().lower() == "proxy"
+            )
         )
     ]
     return rows[:limit]
@@ -6553,15 +6745,23 @@ async def monitoring_proxy_usage_stats(
         }
 
     cutoff = datetime.utcnow() - timedelta(days=period_windows[period])
-    persisted_rows = (
-        db.query(GatewayTrafficEvent)
-        .filter(
-            GatewayTrafficEvent.department == admin_department,
-            GatewayTrafficEvent.created_at >= cutoff,
+    persisted_rows_query = db.query(GatewayTrafficEvent).filter(GatewayTrafficEvent.created_at >= cutoff)
+    if is_department_admin(current_user):
+        persisted_rows_query = persisted_rows_query.filter(
+            or_(
+                GatewayTrafficEvent.department == admin_department,
+                and_(
+                    GatewayTrafficEvent.department.is_(None),
+                    GatewayTrafficEvent.group_name.is_(None),
+                ),
+            )
         )
-        .order_by(GatewayTrafficEvent.created_at.desc())
-        .all()
-    )
+    else:
+        persisted_rows_query = persisted_rows_query.filter(GatewayTrafficEvent.department == admin_department)
+        if admin_group:
+            persisted_rows_query = persisted_rows_query.filter(GatewayTrafficEvent.group_name == admin_group)
+
+    persisted_rows = persisted_rows_query.order_by(GatewayTrafficEvent.created_at.desc()).all()
     scoped_department_rows = [
         {
             "timestamp": row.created_at.isoformat() if row.created_at else None,
@@ -6619,6 +6819,30 @@ async def monitoring_proxy_usage_stats(
     group_stats_map: Dict[str, Dict[str, Any]] = {}
     daily_bucket_map: Dict[str, Dict[str, Any]] = {}
 
+    if is_department_admin(current_user):
+        department_groups = DEPARTMENT_GROUPS.get(admin_department, {}).get("groups", {})
+        for canonical_group in department_groups.values():
+            group_name = str(canonical_group or "").strip()
+            if not group_name:
+                continue
+            group_stats_map.setdefault(
+                group_name,
+                {
+                    "group_name": group_name,
+                    "department": admin_department,
+                    "request_count": 0,
+                    "blocked_count": 0,
+                    "allowed_count": 0,
+                    "unique_sites": set(),
+                    "unique_members": set(),
+                    "top_sites": Counter(),
+                    "top_sites_clean": Counter(),
+                    "top_sites_suspicious": Counter(),
+                    "top_sites_malicious": Counter(),
+                    "last_seen": None,
+                },
+            )
+
     for member in members:
         member_name = _desktop_user_display_name(member)
         member_stats_map[f"user:{member.id}"] = {
@@ -6645,7 +6869,7 @@ async def monitoring_proxy_usage_stats(
         user_id = row.get("user_id")
         user_email = str(row.get("user_email") or "").strip() or None
         user_name = str(row.get("user_name") or "").strip() or user_email or "Unassigned"
-        group_name = str(row.get("group_name") or "").strip() or "Unassigned group"
+        group_name = canonicalize_group_name(admin_department, row.get("group_name")) or "Unassigned group"
 
         group_bucket = group_stats_map.setdefault(
             group_name,
@@ -7352,16 +7576,31 @@ async def get_audit_logs(
                 )
             ][:limit]
         user_ids = sorted({l.user_id for l in logs if l.user_id is not None})
-        user_email_map: Dict[int, str] = {}
+        user_profile_map: Dict[int, Dict[str, Optional[str]]] = {}
         if user_ids:
-            users = db.query(User.id, User.email).filter(User.id.in_(user_ids)).all()
-            user_email_map = {u.id: u.email for u in users}
+            users = db.query(User.id, User.email, User.first_name, User.last_name).filter(User.id.in_(user_ids)).all()
+            user_profile_map = {
+                u.id: {
+                    "email": u.email,
+                    "first_name": u.first_name,
+                    "last_name": u.last_name,
+                }
+                for u in users
+            }
 
         response = []
         for l in logs:
-            user_email = user_email_map.get(l.user_id)
-            if user_email:
+            user_profile = user_profile_map.get(l.user_id, {})
+            user_email = user_profile.get("email")
+            first_name = str(user_profile.get("first_name") or "").strip()
+            last_name = str(user_profile.get("last_name") or "").strip()
+            full_name = f"{first_name} {last_name}".strip()
+            if full_name:
+                user_name = full_name
+            elif user_email:
                 user_name = user_email.split("@", 1)[0]
+            elif _unknown_gateway_event_visible_to_admin(current_user, l.action, l.details):
+                user_name = "Unknown user"
             elif l.user_id is None:
                 user_name = "System"
             else:
@@ -7439,16 +7678,31 @@ async def get_app_history(
                 )
             ][:limit]
         user_ids = sorted({row.user_id for row in rows if row.user_id is not None})
-        user_email_map: Dict[int, str] = {}
+        user_profile_map: Dict[int, Dict[str, Optional[str]]] = {}
         if user_ids:
-            users = db.query(User.id, User.email).filter(User.id.in_(user_ids)).all()
-            user_email_map = {u.id: u.email for u in users}
+            users = db.query(User.id, User.email, User.first_name, User.last_name).filter(User.id.in_(user_ids)).all()
+            user_profile_map = {
+                u.id: {
+                    "email": u.email,
+                    "first_name": u.first_name,
+                    "last_name": u.last_name,
+                }
+                for u in users
+            }
 
         payload = []
         for row in rows:
-            user_email = user_email_map.get(row.user_id)
-            if user_email:
+            user_profile = user_profile_map.get(row.user_id, {})
+            user_email = user_profile.get("email")
+            first_name = str(user_profile.get("first_name") or "").strip()
+            last_name = str(user_profile.get("last_name") or "").strip()
+            full_name = f"{first_name} {last_name}".strip()
+            if full_name:
+                user_name = full_name
+            elif user_email:
                 user_name = user_email.split("@", 1)[0]
+            elif _unknown_gateway_event_visible_to_admin(current_user, row.title, row.details):
+                user_name = "Unknown user"
             elif row.user_id is None:
                 user_name = "System"
             else:
@@ -7500,6 +7754,7 @@ async def read_users_me(current_user: User = Depends(get_current_user)):
 
 @app.get("/desktop/session/config")
 async def get_desktop_session_config(
+        request: Request,
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
@@ -7511,33 +7766,20 @@ async def get_desktop_session_config(
         "user_id": current_user.id,
         "department": current_user.department,
         "group_name": current_user.group_name,
-        "proxy_assignment": {
-            "proxy_host": assignment.proxy_host,
-            "proxy_port": assignment.proxy_port,
-            "enabled": assignment.enabled,
-        } if assignment else None,
+        "proxy_assignment": _proxy_assignment_payload(assignment, current_user.group_name, request=request),
     }
 
 
 @app.get("/desktop/proxy-assignment")
 async def get_current_group_proxy_assignment(
+        request: Request,
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
     assignment = _group_proxy_assignment_for_scope(current_user.department, current_user.group_name, db=db)
     if not assignment:
         return {"assignment": None}
-    return {
-        "assignment": {
-            "department": assignment.department,
-            "group_name": current_user.group_name,
-            "scope": "department" if assignment.group_name == DEPARTMENT_PROXY_GROUP_NAME else "group",
-            "proxy_host": assignment.proxy_host,
-            "proxy_port": assignment.proxy_port,
-            "enabled": assignment.enabled,
-            "note": assignment.note,
-        }
-    }
+    return {"assignment": _proxy_assignment_payload(assignment, current_user.group_name, request=request)}
 
 
 @app.post("/desktop/session/heartbeat")
@@ -7550,7 +7792,7 @@ async def desktop_session_heartbeat(
     assignment = None
     if bool(current_user.is_admin):
         assignment = _group_proxy_assignment_for_scope(current_user.department, current_user.group_name, db=db)
-    client_host = request.client.host if request.client else None
+    client_host = _request_client_host(request)
     session, created = await asyncio.to_thread(_touch_desktop_session, current_user, payload, client_host)
     return {
         "ok": True,
@@ -7592,23 +7834,14 @@ async def monitoring_desktop_sessions(
 
 @app.get("/monitoring/group-proxy-assignment")
 async def monitoring_group_proxy_assignment(
+        request: Request,
         current_user: User = Depends(require_admin),
         db: Session = Depends(get_db)
 ):
     assignment = _group_proxy_assignment_for_scope(current_user.department, current_user.group_name, db=db)
     if not assignment:
         return {"assignment": None}
-    return {
-        "assignment": {
-            "department": assignment.department,
-            "group_name": current_user.group_name,
-            "scope": "department" if assignment.group_name == DEPARTMENT_PROXY_GROUP_NAME else "group",
-            "proxy_host": assignment.proxy_host,
-            "proxy_port": assignment.proxy_port,
-            "enabled": assignment.enabled,
-            "note": assignment.note,
-        }
-    }
+    return {"assignment": _proxy_assignment_payload(assignment, current_user.group_name, request=request)}
 
 
 @app.get("/test")

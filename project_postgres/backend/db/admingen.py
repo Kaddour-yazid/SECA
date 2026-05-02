@@ -37,6 +37,14 @@ DEPARTMENT_ALIASES = {
     "SSE": "SSI",
 }
 
+DEPARTMENT_GROUP_ALIASES: Dict[str, Dict[str, str]] = {
+    "SSI": {
+        "Pôle SOC & Sécurité des Systèmes": "Sécurité des Systèmes",
+        "Pôle Sécurité Industrielle (OT)": "Sécurité Industrielle (OT)",
+        "Pôle Sécurité Applicative & Gouvernance": "Sécurité Applicative & Gouvernance",
+    },
+}
+
 SEX_VALUES = {
     "male": "Male",
     "female": "Female",
@@ -92,10 +100,16 @@ def _group_key(value: str) -> str:
 def normalize_group_name(department: str, group_name: str) -> str:
     cleaned = (group_name or "").strip()
     groups = DEPARTMENT_GROUPS[department]
+    aliases = DEPARTMENT_GROUP_ALIASES.get(department, {})
+    if cleaned in aliases:
+        return aliases[cleaned]
     if cleaned in groups:
         return cleaned
 
     cleaned_key = _group_key(cleaned)
+    for alias, canonical in aliases.items():
+        if _group_key(alias) == cleaned_key:
+            return canonical
     for candidate in groups:
         if _group_key(candidate) == cleaned_key:
             return candidate
@@ -149,11 +163,11 @@ def list_structure() -> int:
     print("Admin structure by department:")
     for department, groups in DEPARTMENT_GROUPS.items():
         total += len(groups)
-        print(f"{department}: 1 department admin, {len(groups)} group admins")
+        print(f"{department}: 1 department admin")
         for index, group_name in enumerate(groups, start=1):
             print(f"  {index}. {group_name}")
-    print(f"Total possible group-scoped admins: {total}")
     print(f"Total possible department-scoped admins: {len(DEPARTMENT_GROUPS)}")
+    print(f"Total groups covered by department admins: {total}")
     print("Alias: SSE -> SSI")
     return 0
 
@@ -167,22 +181,6 @@ def main() -> int:
     parser.add_argument("--sex", help="Sex value: male or female")
     parser.add_argument("--department", help="Department code: RXS, SLM, SSI or SSE")
     parser.add_argument("--group", dest="group_name", help="Exact group name for group-scoped admins")
-    parser.add_argument(
-        "--scope",
-        choices=["group", "department"],
-        default="group",
-        help="Admin monitoring scope. Default: group.",
-    )
-    parser.add_argument(
-        "--department-admin",
-        action="store_true",
-        help="Shortcut for --scope department.",
-    )
-    parser.add_argument(
-        "--group-admin",
-        action="store_true",
-        help="Shortcut for --scope group.",
-    )
     parser.add_argument("--list-structure", action="store_true", help="List supported departments and groups, then exit")
     parser.add_argument(
         "--reset-password",
@@ -222,28 +220,11 @@ def main() -> int:
     else:
         department = prompt_department()
 
-    if args.department_admin and args.group_admin:
-        print("Choose only one scope shortcut: --department-admin or --group-admin.")
+    admin_scope = "department"
+    if args.group_name:
+        print("--group is no longer used. Admin accounts are department-wide.")
         return 1
-
-    admin_scope = "department" if args.department_admin else "group" if args.group_admin else args.scope
-    is_department_scope = admin_scope == "department"
-    is_group_scope = admin_scope == "group"
-
-    if is_department_scope:
-        if args.group_name:
-            print("--group cannot be used with department-scoped admins.")
-            return 1
-        group_name = None
-    else:
-        if args.group_name:
-            try:
-                group_name = normalize_group_name(department, args.group_name)
-            except ValueError as exc:
-                print(exc)
-                return 1
-        else:
-            group_name = prompt_group(department)
+    group_name = None
 
     db = SessionLocal()
     try:
@@ -261,8 +242,7 @@ def main() -> int:
                 group_name=group_name,
                 role="admin",
                 is_admin=True,
-                admin_department=is_department_scope,
-                admin_group=is_group_scope,
+                admin_department=True,
             )
             db.add(user)
             db.commit()
@@ -280,8 +260,7 @@ def main() -> int:
             "group_name": group_name,
             "role": "admin",
             "is_admin": True,
-            "admin_department": is_department_scope,
-            "admin_group": is_group_scope,
+            "admin_department": True,
         }
 
         for field_name, field_value in updates.items():

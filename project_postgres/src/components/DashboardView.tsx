@@ -240,13 +240,16 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
         throw new Error('Failed to fetch dashboard data');
       }
       const scanRows: ScanRow[] = await scansRes.json();
-      setScans(scanRows);
+      const sortedScanRows = [...scanRows].sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+      );
+      setScans(sortedScanRows);
 
       if (statsRes.ok) {
         const statsPayload: ScanStats = await statsRes.json();
         setStats(statsPayload);
       } else {
-        setStats(fallbackStatsFromScans(scanRows));
+        setStats(fallbackStatsFromScans(sortedScanRows));
       }
 
       setLastUpdated(new Date().toLocaleTimeString());
@@ -333,6 +336,13 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
   }, [selectedScanId, closeScanReport]);
 
   const selectedSummary = useMemo(() => buildDetailSummary(selectedScan, translateText), [selectedScan, translateText]);
+  const recentScans = useMemo(
+    () =>
+      [...scans].sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+      ),
+    [scans],
+  );
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-slate-900">
@@ -423,7 +433,7 @@ export function DashboardView({ isActive = true }: DashboardViewProps) {
           {!loading && !error && scans.length > 0 && (
             <div className="min-h-0 flex-1 overflow-y-auto pr-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-700 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar]:w-2">
               <ul className="space-y-3">
-              {scans.slice(0, 10).map((scan) => {
+              {recentScans.slice(0, 10).map((scan) => {
                 const scanType = normalizeScanType(scan.scan_type, translateText);
                 return (
                   <li

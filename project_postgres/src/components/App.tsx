@@ -29,7 +29,7 @@ function TopStrip({ onViewChange }: { onViewChange: (view: string) => void }) {
   const lastName = user?.last_name || '';
   const displayName = [firstName, lastName].filter(Boolean).join(' ') || user?.email || 'SECA User';
   const compactName = [firstName, lastName ? `${lastName.charAt(0)}.` : ''].filter(Boolean).join(' ') || displayName;
-  const roleLabel = user?.admin_department ? 'Admin departement' : user?.admin_group ? 'Admin groupe' : user?.is_admin ? 'Admin' : 'Analyste';
+  const roleLabel = user?.is_admin ? 'Admin departement' : 'Analyste';
   const initials = `${firstName.charAt(0)}${lastName.charAt(0)}`.trim().toUpperCase() || user?.email?.charAt(0)?.toUpperCase() || 'S';
   const departmentLabel = user?.department || 'Departement non defini';
   const groupLabel = user?.group_name || 'Groupe non defini';
@@ -131,13 +131,9 @@ function TopStrip({ onViewChange }: { onViewChange: (view: string) => void }) {
                     <div>
                       <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-blue-300/70">Acces</p>
                       <p className="mt-1 text-sm font-medium text-blue-100">
-                        {user?.admin_department
+                        {canAdmin
                           ? 'Supervision et administration du departement'
-                          : user?.admin_group
-                            ? 'Supervision et administration du groupe'
-                            : canAdmin
-                              ? 'Supervision securisee'
-                              : 'Analyse et consultation securisee'}
+                          : 'Analyse et consultation securisee'}
                       </p>
                     </div>
                     <Shield className="h-5 w-5 shrink-0 text-blue-300" />

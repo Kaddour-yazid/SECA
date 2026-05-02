@@ -506,12 +506,12 @@ export function AuditLogsView() {
   );
   const selectedDevice = useMemo(() => devices.find((d) => d.client_ip === selectedDeviceIp) || null, [devices, selectedDeviceIp]);
   const parsedDetails = useMemo(() => (detailsLog ? parseAuditDetails(detailsLog.details) : { fields: [], notes: [] }), [detailsLog]);
-  const isDepartmentAdmin = Boolean(user?.is_admin && user?.admin_department);
-  const scopeTypeLabel = isDepartmentAdmin ? "Department scope" : user?.admin_group ? "Group scope" : "Admin scope";
+  const isDepartmentAdmin = Boolean(user?.is_admin);
+  const scopeTypeLabel = isDepartmentAdmin ? "Department scope" : "Admin scope";
   const scopeBadge = user?.department
     ? isDepartmentAdmin
       ? `${user.department} - Department admin`
-      : `${user.department} - ${user.group_name || "Group admin"}`
+      : `${user.department} - Admin`
     : "Missing admin scope";
   const scoreField = useMemo(
     () =>
