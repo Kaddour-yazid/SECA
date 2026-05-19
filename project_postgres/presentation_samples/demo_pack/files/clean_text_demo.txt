@@ -1,0 +1,12 @@
+SECA DEMO SAMPLE - CLEAN FILE
+
+Purpose:
+- Provide a benign comparison sample for File Scanner.
+- This file contains normal business-style text only.
+
+Content:
+Internal notice for a routine maintenance window.
+No script markers, no executable behavior, no suspicious URLs, and no encoded payload.
+
+Expected result:
+- The platform should classify this sample as clean or low risk.

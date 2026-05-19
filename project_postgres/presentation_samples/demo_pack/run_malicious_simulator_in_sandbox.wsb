@@ -1,0 +1,13 @@
+<Configuration>
+  <VGpu>Disable</VGpu>
+  <Networking>Enable</Networking>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\Users\Click\Desktop\SECABACKUP\project_postgres\presentation_samples\demo_pack\files</HostFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>cmd.exe /c start "" "C:\Users\WDAGUtilityAccount\Desktop\files\fake_report.pdf.cmd"</Command>
+  </LogonCommand>
+</Configuration>
